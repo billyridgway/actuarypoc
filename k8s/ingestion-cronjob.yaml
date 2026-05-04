@@ -11,11 +11,15 @@ spec:
       backoffLimit: 1
       template:
         spec:
+          hostNetwork: true
+          dnsPolicy: ClusterFirstWithHostNet
           restartPolicy: OnFailure
           containers:
             - name: ingest
               image: python:3.11-slim
               env:
+                - name: DEBIAN_FRONTEND
+                  value: "noninteractive"
                 - name: MINIO_ENDPOINT
                   value: "192.168.50.101:32619"
                 - name: MINIO_ACCESS_KEY
@@ -35,4 +39,5 @@ spec:
                   cd /tmp/actuarypoc
                   git checkout feature/poc-scaffold >/dev/null
                   pip install --no-cache-dir -r requirements.txt >/dev/null
+                  export PYTHONPATH="/tmp/actuarypoc/src:${PYTHONPATH:-}"
                   python -m actuarypoc.pipeline.ingest
