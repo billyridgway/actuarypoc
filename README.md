@@ -70,9 +70,21 @@ kubectl -n illustrations-poc get jobs --sort-by=.metadata.creationTimestamp
 kubectl -n illustrations-poc logs job/<latest-job-name>
 ```
 
+## Dagster orchestration scaffold
+
+A minimal Dagster repository lives under `dagster/`. It defines `sample_ingestion_job` (wrapping the existing CSV ingest helper) and an hourly schedule. Run it locally with:
+
+```bash
+pip install -r requirements.txt
+export $(cat .env | xargs)
+dagster job execute -f dagster/repository.py -j sample_ingestion_job
+```
+
+You can also launch the Dagster UI with `dagster dev -f dagster/repository.py` to trigger runs interactively; the job uses the same MinIO env vars.
+
 ## Next Steps
 - Flesh out additional connectors (PAS APIs, SFTP loaders, etc.).
 - Implement schema registry / mapping templates.
 - Expand DSL compiler + interpreter (LLM-assisted extraction).
 - Replace projection stub with actuarial-grade simulation engine.
-- Add Dagster/Prefect orchestration definitions for repeatable runs.
+- Extend Dagster repository with additional assets/jobs + k8s deployment manifests.

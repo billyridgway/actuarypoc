@@ -1,3 +1,4 @@
+dagster==1.7.14
 minio==7.2.7
 pandas==2.2.2
 typer==0.12.3
