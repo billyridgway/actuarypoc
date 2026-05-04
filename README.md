@@ -52,6 +52,24 @@ src/actuarypoc
      src/actuarypoc/dsl/examples/whole_life.yaml
    ```
 
+## Deploying the sample ingestion CronJob (k3s)
+
+A simple CronJob manifest lives in `k8s/ingestion-cronjob.yaml`. It clones the repo each hour inside a `python:3.11-slim` container and runs the sample ingestion pipeline against the MinIO bucket.
+
+Apply it to the provided namespace:
+
+```bash
+kubectl --kubeconfig ~/.openclaw/workspace/.kube/pi-k3s.yaml apply -f k8s/ingestion-cronjob.yaml
+kubectl -n illustrations-poc get cronjob actuarypoc-sample-ingest
+```
+
+To grab the logs from the latest run:
+
+```bash
+kubectl -n illustrations-poc get jobs --sort-by=.metadata.creationTimestamp
+kubectl -n illustrations-poc logs job/<latest-job-name>
+```
+
 ## Next Steps
 - Flesh out additional connectors (PAS APIs, SFTP loaders, etc.).
 - Implement schema registry / mapping templates.

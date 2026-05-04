@@ -1,0 +1,38 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: actuarypoc-sample-ingest
+  namespace: illustrations-poc
+spec:
+  schedule: "0 * * * *"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: ingest
+              image: python:3.11-slim
+              env:
+                - name: MINIO_ENDPOINT
+                  value: "192.168.50.101:32619"
+                - name: MINIO_ACCESS_KEY
+                  value: "admin"
+                - name: MINIO_SECRET_KEY
+                  value: "password"
+                - name: MINIO_BUCKET
+                  value: "illuminet"
+                - name: MINIO_SECURE
+                  value: "false"
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -euo pipefail
+                  apt-get update >/dev/null && apt-get install -y git >/dev/null
+                  git clone https://github.com/billyridgway/actuarypoc.git /tmp/actuarypoc
+                  cd /tmp/actuarypoc
+                  git checkout feature/poc-scaffold >/dev/null
+                  pip install --no-cache-dir -r requirements.txt >/dev/null
+                  python -m actuarypoc.pipeline.ingest
