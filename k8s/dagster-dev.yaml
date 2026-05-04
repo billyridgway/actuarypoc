@@ -26,6 +26,8 @@ spec:
               value: /app/.dagster_home
             - name: GIT_REF
               value: "feature/dagster-k8s-deploy"
+            - name: PYTHONPATH
+              value: /app/src
             - name: MINIO_ENDPOINT
               value: "minio.minio-system.svc.cluster.local:9000"
             - name: MINIO_ACCESS_KEY
