@@ -25,7 +25,7 @@ spec:
             - name: DAGSTER_HOME
               value: /app/.dagster_home
             - name: GIT_REF
-              value: "feature/dagster-scaffold"
+              value: "feature/dagster-k8s-deploy"
             - name: MINIO_ENDPOINT
               value: "minio.minio-system.svc.cluster.local:9000"
             - name: MINIO_ACCESS_KEY
