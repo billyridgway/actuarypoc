@@ -54,7 +54,7 @@ src/actuarypoc
 
 ## Deploying the sample ingestion CronJob (k3s)
 
-A simple CronJob manifest lives in `k8s/ingestion-cronjob.yaml`. It clones the repo each hour inside a `python:3.11-slim` container and runs the sample ingestion pipeline against the MinIO bucket.
+A simple CronJob manifest lives in `k8s/ingestion-cronjob.yaml`. It clones the repo each hour inside a `python:3.11-slim` container and runs the sample ingestion pipeline against the MinIO bucket. By default it talks to the in-cluster MinIO service exposed at `minio.minio-system.svc.cluster.local:9000`.
 
 Apply it to the provided namespace:
 

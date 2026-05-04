@@ -21,7 +21,7 @@ spec:
                 - name: DEBIAN_FRONTEND
                   value: "noninteractive"
                 - name: MINIO_ENDPOINT
-                  value: "192.168.50.101:32619"
+                  value: "minio.minio-system.svc.cluster.local:9000"
                 - name: MINIO_ACCESS_KEY
                   value: "admin"
                 - name: MINIO_SECRET_KEY
