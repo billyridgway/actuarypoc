@@ -57,9 +57,10 @@ src/actuarypoc
 A minimal Dagster repository lives under `dagster/`. Current jobs:
 - `sample_ingestion_job` – wraps the basic policy CSV ingest helper.
 - `pas_export_job` – prototypes the PAS export connector (uses `sample_data/pas_export.csv`).
-- `actuarial_table_job` – ingests actuarial tables (uses `sample_data/actuarial_tables.csv`).
+- `actuarial_table_job` – ingests actuarial tables (`sample_data/actuarial_tables.csv`).
 - `crm_data_job` – ingests CRM account data (`sample_data/crm_accounts.csv`).
 - `rate_curve_job` – ingests rate curve snapshots (`sample_data/rate_curves.csv`).
+- `projection_job` – reads the most recent PAS/actuarial/rate/CRM snapshots and writes a projection summary JSON to the `projections/` prefix.
 
 Run any job locally with:
 
@@ -69,10 +70,11 @@ export $(cat .env | xargs)
 dagster job execute -f dagster/repository.py -j sample_ingestion_job
 ```
 
-You can also launch the Dagster UI with `dagster dev -f dagster/repository.py` to trigger runs interactively; the jobs use the same MinIO env vars. Included schedules (`hourly_sample_ingest_schedule`, `daily_pas_export_schedule`) are registered but default to `STOPPED` so they won't burn storage—enable/disable with the standard Dagster CLI, e.g.:
+You can also launch the Dagster UI with `dagster dev -f dagster/repository.py` to trigger runs interactively; the jobs use the same MinIO env vars. Included schedules (`hourly_sample_ingest_schedule`, `daily_pas_export_schedule`, etc.) are registered but default to `STOPPED` so they won't burn storage—enable/disable with the standard Dagster CLI, e.g.:
 ```
 dagster schedule start -f dagster/repository.py -n hourly_sample_ingest_schedule
 ```
+A `pas_projection_sensor` watches for new PAS snapshots in MinIO and automatically kicks off `projection_job`, ensuring each fresh export gets a projection summary stored under `projections/`.
 
 ### Cluster deployment
 `k8s/dagster-dev.yaml` runs Dagster inside the `illustrations-poc` namespace (NodePort `dagster-dev`, port `30300`). It clones this repo, installs deps, points at in-cluster MinIO, and exposes the Dagster UI/daemon for orchestration (the old Kubernetes CronJob has been removed in favor of this). To redeploy:

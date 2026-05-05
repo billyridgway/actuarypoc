@@ -7,12 +7,19 @@ from dagster import (
     DefaultScheduleStatus,
     Definitions,
     ScheduleDefinition,
+    RunRequest,
     get_dagster_logger,
     job,
     op,
+    sensor,
 )
 
 from actuarypoc.pipeline.ingest import ingest_csv
+from actuarypoc.projection.service import (
+    build_projection_summary,
+    get_latest_object_name,
+    store_projection,
+)
 
 
 SAMPLE_CSV = Path(__file__).resolve().parents[1] / "src" / "actuarypoc" / "sample_data" / "policies.csv"
@@ -99,6 +106,34 @@ def rate_curve_job():
     run_rate_curve_ingest()
 
 
+@op
+def generate_projection(context):
+    summary = build_projection_summary()
+    object_name = store_projection(summary)
+    context.log.info("Stored projection summary at %s", object_name)
+    return object_name
+
+
+@job
+def projection_job():
+    generate_projection()
+
+
+@sensor(job=projection_job, minimum_interval_seconds=300)
+def pas_projection_sensor(context):
+    try:
+        latest_pas = get_latest_object_name("pas_export/")
+    except RuntimeError:
+        context.log.info("No PAS snapshots detected yet")
+        return
+
+    if context.cursor == latest_pas:
+        return
+
+    context.update_cursor(latest_pas)
+    yield RunRequest(run_key=latest_pas)
+
+
 definitions = Definitions(
     jobs=[
         sample_ingestion_job,
@@ -106,6 +141,7 @@ definitions = Definitions(
         actuarial_table_job,
         crm_data_job,
         rate_curve_job,
+        projection_job,
     ],
     schedules=[
         ScheduleDefinition(
@@ -139,4 +175,5 @@ definitions = Definitions(
             default_status=DefaultScheduleStatus.STOPPED,
         ),
     ],
+    sensors=[pas_projection_sensor],
 )
