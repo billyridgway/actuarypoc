@@ -92,11 +92,12 @@ def build_projection_summary(pas_prefix: str = "pas_export/",
 
 
 def store_projection(summary: Dict[str, Any]) -> str:
+    import io
+
     client = get_minio_client()
     bucket = get_bucket_name()
     object_name = f"{PROJECTION_PREFIX}projection-{int(datetime.utcnow().timestamp())}.json"
     encoded = json.dumps(summary, indent=2).encode("utf-8")
-    import io
 
     client.put_object(
         bucket,
