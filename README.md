@@ -16,7 +16,7 @@ src/actuarypoc
 ├── dsl/                # Policy DSL definitions + examples
 ├── pipeline/           # Ingestion pipeline(s)
 ├── projection/         # Projection engine stub
-├── sample_data/        # Synthetic CSV for early tests (includes PAS + actuarial mocks; see docs)
+├── sample_data/        # Synthetic CSV for early tests (PAS/actuarial/CRM/rate mocks; see docs)
 └── storage/            # MinIO helpers
 ```
 
@@ -58,6 +58,8 @@ A minimal Dagster repository lives under `dagster/`. Current jobs:
 - `sample_ingestion_job` – wraps the basic policy CSV ingest helper.
 - `pas_export_job` – prototypes the PAS export connector (uses `sample_data/pas_export.csv`).
 - `actuarial_table_job` – ingests actuarial tables (uses `sample_data/actuarial_tables.csv`).
+- `crm_data_job` – ingests CRM account data (`sample_data/crm_accounts.csv`).
+- `rate_curve_job` – ingests rate curve snapshots (`sample_data/rate_curves.csv`).
 
 Run any job locally with:
 
