@@ -52,27 +52,13 @@ src/actuarypoc
      src/actuarypoc/dsl/examples/whole_life.yaml
    ```
 
-## Deploying the sample ingestion CronJob (k3s)
-
-A simple CronJob manifest lives in `k8s/ingestion-cronjob.yaml`. It clones the repo each hour inside a `python:3.11-slim` container and runs the sample ingestion pipeline against the MinIO bucket. By default it talks to the in-cluster MinIO service exposed at `minio.minio-system.svc.cluster.local:9000`.
-
-Apply it to the provided namespace:
-
-```bash
-kubectl --kubeconfig ~/.openclaw/workspace/.kube/pi-k3s.yaml apply -f k8s/ingestion-cronjob.yaml
-kubectl -n illustrations-poc get cronjob actuarypoc-sample-ingest
-```
-
-To grab the logs from the latest run:
-
-```bash
-kubectl -n illustrations-poc get jobs --sort-by=.metadata.creationTimestamp
-kubectl -n illustrations-poc logs job/<latest-job-name>
-```
-
 ## Dagster orchestration scaffold
 
-A minimal Dagster repository lives under `dagster/`. It defines `sample_ingestion_job` (wrapping the existing CSV ingest helper) and an hourly schedule. Run it locally with:
+A minimal Dagster repository lives under `dagster/`. Current jobs:
+- `sample_ingestion_job` – wraps the basic policy CSV ingest helper.
+- `pas_export_job` – prototypes the PAS export connector (uses `sample_data/pas_export.csv`).
+
+Run any job locally with:
 
 ```bash
 pip install -r requirements.txt
@@ -80,10 +66,13 @@ export $(cat .env | xargs)
 dagster job execute -f dagster/repository.py -j sample_ingestion_job
 ```
 
-You can also launch the Dagster UI with `dagster dev -f dagster/repository.py` to trigger runs interactively; the job uses the same MinIO env vars. The included schedule (`hourly_sample_ingest_schedule`) is registered but defaults to `STOPPED` so it won't burn storage—enable/disable with the standard Dagster CLI: `dagster schedule start|stop -f dagster/repository.py -n hourly_sample_ingest_schedule`.
+You can also launch the Dagster UI with `dagster dev -f dagster/repository.py` to trigger runs interactively; the jobs use the same MinIO env vars. Included schedules (`hourly_sample_ingest_schedule`, `daily_pas_export_schedule`) are registered but default to `STOPPED` so they won't burn storage—enable/disable with the standard Dagster CLI, e.g.:
+```
+dagster schedule start -f dagster/repository.py -n hourly_sample_ingest_schedule
+```
 
 ### Cluster deployment
-`k8s/dagster-dev.yaml` runs Dagster inside the `illustrations-poc` namespace (NodePort `dagster-dev`, port `30300`). It clones this repo, installs deps, points at in-cluster MinIO, and exposes the Dagster UI/daemon for orchestration. To redeploy:
+`k8s/dagster-dev.yaml` runs Dagster inside the `illustrations-poc` namespace (NodePort `dagster-dev`, port `30300`). It clones this repo, installs deps, points at in-cluster MinIO, and exposes the Dagster UI/daemon for orchestration (the old Kubernetes CronJob has been removed in favor of this). To redeploy:
 ```
 kubectl --kubeconfig ~/.openclaw/workspace/.kube/pi-k3s.yaml apply -f k8s/dagster-dev.yaml
 ```
