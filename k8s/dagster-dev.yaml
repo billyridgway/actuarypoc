@@ -25,7 +25,7 @@ spec:
             - name: DAGSTER_HOME
               value: /app/.dagster_home
             - name: GIT_REF
-              value: "feature/actuarial-mock"
+              value: "feature/projection-trigger"
             - name: PYTHONPATH
               value: /app/src
             - name: MINIO_ENDPOINT
