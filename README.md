@@ -16,7 +16,7 @@ src/actuarypoc
 ├── dsl/                # Policy DSL definitions + examples
 ├── pipeline/           # Ingestion pipeline(s)
 ├── projection/         # Projection engine stub
-├── sample_data/        # Synthetic CSV for early tests
+├── sample_data/        # Synthetic CSV for early tests (includes `pas_export.csv` mock; see `docs/pas_export_schema.md`)
 └── storage/            # MinIO helpers
 ```
 
