@@ -80,7 +80,13 @@ export $(cat .env | xargs)
 dagster job execute -f dagster/repository.py -j sample_ingestion_job
 ```
 
-You can also launch the Dagster UI with `dagster dev -f dagster/repository.py` to trigger runs interactively; the job uses the same MinIO env vars.
+You can also launch the Dagster UI with `dagster dev -f dagster/repository.py` to trigger runs interactively; the job uses the same MinIO env vars. The included schedule (`hourly_sample_ingest_schedule`) is registered but defaults to `STOPPED` so it won't burn storage—enable/disable with the standard Dagster CLI: `dagster schedule start|stop -f dagster/repository.py -n hourly_sample_ingest_schedule`.
+
+### Cluster deployment
+`k8s/dagster-dev.yaml` runs Dagster inside the `illustrations-poc` namespace (NodePort `dagster-dev`, port `30300`). It clones this repo, installs deps, points at in-cluster MinIO, and exposes the Dagster UI/daemon for orchestration. To redeploy:
+```
+kubectl --kubeconfig ~/.openclaw/workspace/.kube/pi-k3s.yaml apply -f k8s/dagster-dev.yaml
+```
 
 ## Next Steps
 - Flesh out additional connectors (PAS APIs, SFTP loaders, etc.).

@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from dagster import Definitions, ScheduleDefinition, job, op, get_dagster_logger
+from dagster import (
+    DefaultScheduleStatus,
+    Definitions,
+    ScheduleDefinition,
+    get_dagster_logger,
+    job,
+    op,
+)
 
 from actuarypoc.pipeline.ingest import ingest_csv
 
@@ -30,6 +37,7 @@ definitions = Definitions(
             job=sample_ingestion_job,
             cron_schedule="0 * * * *",
             name="hourly_sample_ingest_schedule",
+            default_status=DefaultScheduleStatus.STOPPED,
         )
     ],
 )
