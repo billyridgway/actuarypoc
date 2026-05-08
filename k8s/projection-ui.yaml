@@ -1,0 +1,176 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: projection-ui
+  namespace: illustrations-poc
+  labels:
+    app: projection-ui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: projection-ui
+  template:
+    metadata:
+      labels:
+        app: projection-ui
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: projection-ui
+          image: python:3.11-slim
+          ports:
+            - containerPort: 8080
+          env:
+            - name: DAGSTER_HOME
+              value: /app/.dagster_home
+            - name: GIT_REF
+              value: "feature/projection-trigger"
+            - name: PYTHONPATH
+              value: /app/src
+            - name: MINIO_ENDPOINT
+              value: "minio.minio-system.svc.cluster.local:9000"
+            - name: MINIO_ACCESS_KEY
+              value: "admin"
+            - name: MINIO_SECRET_KEY
+              value: "password"
+            - name: MINIO_BUCKET
+              value: "illuminet"
+            - name: MINIO_SECURE
+              value: "false"
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              apt-get update >/dev/null && apt-get install -y git >/dev/null
+              rm -rf /app && git clone https://github.com/billyridgway/actuarypoc.git /app
+              cd /app
+              git checkout ${GIT_REF:-main} >/dev/null
+              pip install --no-cache-dir -r requirements.txt fastapi
+              cat << 'PY' > /app/ui_server.py
+              from __future__ import annotations
+
+              from typing import Any, Dict, List
+
+              from fastapi import FastAPI, HTTPException
+              from fastapi.responses import HTMLResponse
+
+              from actuarypoc.storage.minio_client import get_minio_client, get_bucket_name
+
+
+              app = FastAPI(title="ActuaryPOC Projection Viewer", version="0.1.0")
+
+
+              @app.get("/health")
+              def health() -> Dict[str, str]:
+                  return {"status": "ok"}
+
+
+              def _list_projection_objects(prefix: str = "projections/") -> List[str]:
+                  client = get_minio_client()
+                  bucket = get_bucket_name()
+                  objects = []
+                  for obj in client.list_objects(bucket, prefix=prefix, recursive=True):
+                      objects.append(obj.object_name)
+                  return sorted(objects)
+
+
+              @app.get("/projections")
+              def list_projections() -> Dict[str, Any]:
+                  objs = _list_projection_objects()
+                  return {"count": len(objs), "objects": objs}
+
+
+              @app.get("/projections/{object_name:path}")
+              def get_projection(object_name: str) -> Dict[str, Any]:
+                  if not object_name.startswith("projections/"):
+                      object_name = f"projections/{object_name}"
+
+                  client = get_minio_client()
+                  bucket = get_bucket_name()
+                  try:
+                      response = client.get_object(bucket, object_name)
+                  except Exception as exc:  # noqa: BLE001
+                      raise HTTPException(status_code=404, detail=f"Projection not found: {object_name}") from exc
+
+                  import json
+
+                  try:
+                      data = json.loads(response.read().decode("utf-8"))
+                  finally:
+                      response.close()
+                      response.release_conn()
+
+                  return data
+
+
+              @app.get("/", response_class=HTMLResponse)
+              @app.get("/ui", response_class=HTMLResponse)
+              async def ui() -> HTMLResponse:
+                  objs = _list_projection_objects()
+                  items = "".join(
+                      f'<li><a href="/ui/view?key={name}">{name}</a></li>' for name in objs
+                  ) or "<li><em>No projections found.</em></li>"
+                  html = f"""
+                  <html>
+                    <head>
+                      <title>ActuaryPOC Projection Viewer</title>
+                      <style>
+                        body {{ font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif; margin: 2rem; }}
+                        code {{ background: #f5f5f5; padding: 0.1rem 0.3rem; }}
+                      </style>
+                    </head>
+                    <body>
+                      <h1>ActuaryPOC Projection Viewer</h1>
+                      <p>Available projection objects in MinIO (<code>projections/</code> prefix):</p>
+                      <ul>
+                        {items}
+                      </ul>
+                    </body>
+                  </html>
+                  """
+                  return HTMLResponse(content=html)
+
+
+              @app.get("/ui/view", response_class=HTMLResponse)
+              async def ui_view(key: str) -> HTMLResponse:
+                  import json
+
+                  data = get_projection(key)
+                  pretty = json.dumps(data, indent=2)
+                  html = f"""
+                  <html>
+                    <head>
+                      <title>Projection: {key}</title>
+                      <style>
+                        body {{ font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif; margin: 2rem; }}
+                        pre {{ background: #f5f5f5; padding: 1rem; border-radius: 4px; overflow-x: auto; }}
+                        a {{ text-decoration: none; color: #0366d6; }}
+                      </style>
+                    </head>
+                    <body>
+                      <p><a href="/ui">&larr; Back to list</a></p>
+                      <h1>Projection object</h1>
+                      <p><code>{key}</code></p>
+                      <pre>{pretty}</pre>
+                    </body>
+                  </html>
+                  """
+                  return HTMLResponse(content=html)
+PY
+              uvicorn ui_server:app --host 0.0.0.0 --port 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: projection-ui
+  namespace: illustrations-poc
+spec:
+  type: NodePort
+  selector:
+    app: projection-ui
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      nodePort: 30301

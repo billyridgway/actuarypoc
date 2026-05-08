@@ -8,19 +8,19 @@ import yaml
 RateType = Literal["guaranteed", "current", "illustrated"]
 
 
-@dataclass(slots=True)
+@dataclass
 class Charge:
     name: str
     formula: str  # Placeholder expression until interpreter is built
 
 
-@dataclass(slots=True)
+@dataclass
 class CreditRate:
     rate_type: RateType
     expression: str
 
 
-@dataclass(slots=True)
+@dataclass
 class PolicyFormula:
     product_type: str
     charges: Sequence[Charge]

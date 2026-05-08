@@ -25,6 +25,7 @@ from actuarypoc.projection.service import (
 SAMPLE_CSV = Path(__file__).resolve().parents[1] / "src" / "actuarypoc" / "sample_data" / "policies.csv"
 PAS_EXPORT_CSV = Path(__file__).resolve().parents[1] / "src" / "actuarypoc" / "sample_data" / "pas_export.csv"
 ACTUARIAL_TABLE_CSV = Path(__file__).resolve().parents[1] / "src" / "actuarypoc" / "sample_data" / "actuarial_tables.csv"
+TERM23_ACTUARIAL_TABLE_CSV = Path(__file__).resolve().parents[1] / "src" / "actuarypoc" / "sample_data" / "actuarial_tables_term23.csv"
 CRM_ACCOUNTS_CSV = Path(__file__).resolve().parents[1] / "src" / "actuarypoc" / "sample_data" / "crm_accounts.csv"
 RATE_CURVE_CSV = Path(__file__).resolve().parents[1] / "src" / "actuarypoc" / "sample_data" / "rate_curves.csv"
 
@@ -96,6 +97,27 @@ def actuarial_table_job():
     run_actuarial_table_ingest()
 
 
+@op
+def run_term23_actuarial_table_ingest() -> str:
+    """Ingest the Term23-specific actuarial table slice.
+
+    This keeps its schema separate from the generic table mock while still
+    landing it in MinIO for Term23 projections.
+    """
+    logger = get_dagster_logger()
+    object_name = ingest_csv(
+        str(TERM23_ACTUARIAL_TABLE_CSV),
+        object_name=f"actuarial_tables_term23/actuarial-table-term23-{int(datetime.utcnow().timestamp())}.json",
+    )
+    logger.info("Uploaded Term23 actuarial table data to %s", object_name)
+    return object_name
+
+
+@job
+def term23_actuarial_table_job():
+    run_term23_actuarial_table_ingest()
+
+
 @job
 def crm_data_job():
     run_crm_data_ingest()
@@ -139,6 +161,7 @@ definitions = Definitions(
         sample_ingestion_job,
         pas_export_job,
         actuarial_table_job,
+        term23_actuarial_table_job,
         crm_data_job,
         rate_curve_job,
         projection_job,
@@ -160,6 +183,12 @@ definitions = Definitions(
             job=actuarial_table_job,
             cron_schedule="15 2 * * *",
             name="daily_actuarial_table_schedule",
+            default_status=DefaultScheduleStatus.STOPPED,
+        ),
+        ScheduleDefinition(
+            job=term23_actuarial_table_job,
+            cron_schedule="20 2 * * *",
+            name="daily_term23_actuarial_table_schedule",
             default_status=DefaultScheduleStatus.STOPPED,
         ),
         ScheduleDefinition(

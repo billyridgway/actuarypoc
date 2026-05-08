@@ -1,0 +1,5 @@
+table_id,product_code,gender,smoker_class,risk_class,face_band,issue_age,duration,qx,nonforfeiture_int_rate,load_factor
+2017-CSO,TERM23,Male,Nontobacco,Standard,1,35,1,0.00080,0.045,0.0020
+2017-CSO,TERM23,Male,Nontobacco,Standard,1,35,2,0.00082,0.045,0.0020
+2017-CSO,TERM23,Female,Nontobacco,Standard,1,35,1,0.00065,0.045,0.0020
+2017-CSO,TERM23,Female,Nontobacco,Standard,1,35,2,0.00067,0.045,0.0020
