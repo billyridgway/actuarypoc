@@ -20,6 +20,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Compute image tag suffix
+        id: vars
+        run: |
+          # Sanitize ref name for use as a Docker tag (replace slashes with dashes).
+          SAFE_REF="${GITHUB_REF_NAME//\//-}"
+          echo "ref_sanitized=${SAFE_REF}" >> "$GITHUB_OUTPUT"
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -40,7 +47,6 @@ jobs:
           push: true
           tags: |
             ghcr.io/${{ github.repository_owner }}/actuarypoc:latest
-            ghcr.io/${{ github.repository_owner }}/actuarypoc:${{ github.ref_name }}
+            ghcr.io/${{ github.repository_owner }}/actuarypoc:${{ steps.vars.outputs.ref_sanitized }}
           cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/actuarypoc:buildcache
           cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/actuarypoc:buildcache,mode=max
-
