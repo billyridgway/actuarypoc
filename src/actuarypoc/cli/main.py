@@ -14,9 +14,11 @@ from actuarypoc.projection.engine import ProjectionEngine
 from actuarypoc.projection.service import build_projection_summary, store_projection
 from actuarypoc.extract.assumptions_extractor import (
     extract_assumption_set_from_doc,
+    extract_assumption_set_from_text,
     assumption_set_to_json,
 )
 from actuarypoc.config.assumptions import AssumptionSet, upsert_assumption_set
+from actuarypoc.storage.minio_client import get_minio_client, get_bucket_name
 
 app = typer.Typer(help="Actuary POC helpers")
 
@@ -212,6 +214,79 @@ def import_assumption(
 
     stored = upsert_assumption_set(asn)
     typer.echo(f"Imported assumption set id={stored.id} product_code={stored.product_code}")
+
+
+@app.command("extract-assumptions-minio")
+def extract_assumptions_minio(
+    doc_prefix: str = typer.Option(
+        ...,
+        "--doc-prefix",
+        envvar="LLM_DOC_PREFIX",
+        help="MinIO prefix under which source docs live (e.g. docs/p12trf/)",
+    ),
+    product_code: str = typer.Option(
+        ...,
+        "--product-code",
+        envvar="LLM_PRODUCT_CODE",
+        help="Target PAS product code for the extracted assumption set",
+    ),
+    set_id: str = typer.Option(
+        ...,
+        "--id",
+        envvar="LLM_ASSUMPTION_ID",
+        help="Identifier for the new assumption set",
+    ),
+    description_hint: str = typer.Option(
+        "",
+        "--description-hint",
+        envvar="LLM_DESCRIPTION_HINT",
+        help="Optional free-text hint about the assumption set",
+    ),
+    model: str = typer.Option(
+        "",
+        "--model",
+        envvar="ASSUMPTION_EXTRACT_MODEL",
+        help="Override OpenAI model (default: gpt-4o-mini)",
+    ),
+):
+    """Extract and upsert an AssumptionSet using a doc stored in MinIO.
+
+    This helper finds the latest object under ``doc_prefix`` in MinIO,
+    downloads its text content, runs the LLM extractor, and upserts the
+    resulting AssumptionSet into the registry.
+    """
+
+    client = get_minio_client()
+    bucket = get_bucket_name()
+
+    latest = None
+    for obj in client.list_objects(bucket, prefix=doc_prefix, recursive=True):
+        if latest is None or obj.last_modified > latest.last_modified:
+            latest = obj
+
+    if latest is None:
+        raise typer.Exit(f"No documents found under prefix '{doc_prefix}'")
+
+    resp = client.get_object(bucket, latest.object_name)
+    try:
+        text = resp.read().decode("utf-8", errors="ignore")
+    finally:
+        resp.close()
+        resp.release_conn()
+
+    asn = extract_assumption_set_from_text(
+        product_code=product_code,
+        text=text,
+        set_id=set_id,
+        description_hint=description_hint or f"LLM-extracted assumptions from {latest.object_name}",
+        model=model or None,
+    )
+
+    stored = upsert_assumption_set(asn)
+    typer.echo(
+        f"Imported assumption set id={stored.id} product_code={stored.product_code} "
+        f"from {latest.object_name}"
+    )
 
 
 if __name__ == "__main__":
