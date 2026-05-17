@@ -12,6 +12,10 @@ from actuarypoc.dsl.policy_dsl import load_formula
 from actuarypoc.pipeline.ingest import ingest_csv
 from actuarypoc.projection.engine import ProjectionEngine
 from actuarypoc.projection.service import build_projection_summary, store_projection
+from actuarypoc.extract.assumptions_extractor import (
+    extract_assumption_set_from_doc,
+    assumption_set_to_json,
+)
 
 app = typer.Typer(help="Actuary POC helpers")
 
@@ -131,6 +135,51 @@ def project_minio(
     )
     key = store_projection(summary, object_name=object_name or None)
     typer.echo(key)
+
+
+@app.command("extract-assumptions")
+def extract_assumptions(
+    doc_path: str = typer.Argument(..., help="Path to source document (PDF or text)"),
+    product_code: str = typer.Option(..., "--product-code", "-p", help="Target PAS product code"),
+    set_id: str = typer.Option(..., "--id", help="Identifier for the new assumption set"),
+    description_hint: str = typer.Option(
+        "",
+        "--description-hint",
+        help="Optional free-text hint about how this assumption set should be described",
+    ),
+    model: str = typer.Option(
+        "",
+        "--model",
+        help="Override OpenAI model (defaults from ASSUMPTION_EXTRACT_MODEL or gpt-4o-mini)",
+    ),
+    output_path: str = typer.Option(
+        "",
+        "--output",
+        "-o",
+        help="Optional path to write the resulting AssumptionSet JSON; prints to stdout when omitted",
+    ),
+):
+    """Extract an AssumptionSet JSON from a filing or product memo using OpenAI.
+
+    This is an offline helper for LLM-assisted parsing. It reads a local
+    document (PDF or text), calls the OpenAI API to produce a single
+    AssumptionSet object, validates it, and then prints or writes the JSON.
+    """
+
+    asn = extract_assumption_set_from_doc(
+        doc_path=doc_path,
+        product_code=product_code,
+        set_id=set_id,
+        description_hint=description_hint or None,
+        model=model or None,
+    )
+
+    payload = assumption_set_to_json(asn)
+    if output_path:
+        Path(output_path).write_text(payload, encoding="utf-8")
+        typer.echo(f"Wrote AssumptionSet JSON to {output_path}")
+    else:
+        typer.echo(payload)
 
 
 if __name__ == "__main__":
