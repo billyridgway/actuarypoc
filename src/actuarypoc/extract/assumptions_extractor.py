@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict
 
-import openai
+from openai import OpenAI
 
 from actuarypoc.config.assumptions import AssumptionSet
 
@@ -70,7 +69,7 @@ def extract_assumption_set_from_text(
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is not set in the environment")
 
-    openai.api_key = api_key
+    client = OpenAI(api_key=api_key)
     model = model or os.getenv("ASSUMPTION_EXTRACT_MODEL", "gpt-4o-mini")
 
     user_prompt = [
@@ -88,13 +87,13 @@ def extract_assumption_set_from_text(
         {"role": "user", "content": "\n".join(user_prompt)},
     ]
 
-    resp = openai.ChatCompletion.create(
+    resp = client.chat.completions.create(
         model=model,
         messages=messages,
         temperature=0.2,
     )
 
-    raw = resp["choices"][0]["message"]["content"]
+    raw = resp.choices[0].message.content or ""
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -161,4 +160,3 @@ def assumption_set_to_json(asn: AssumptionSet) -> str:
     """Serialize an AssumptionSet as pretty JSON string."""
 
     return json.dumps(asn.to_dict(), indent=2, sort_keys=True)
-
