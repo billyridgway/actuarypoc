@@ -1,0 +1,7 @@
+# Synthetic P12TRF term policies for POC
+# Columns aligned with existing term23 sample where possible, plus
+# P12TRF-specific knobs (level_period, risk_class, rider flags).
+policy_number,product_type,form_id,issue_age,gender,smoker_class,risk_class,level_period,face_amount,modal_premium,policy_fee,waiver_rider,waiver_premium,premium_mode,state
+P12TRF100001,p12trf_term,ICC12 P12TRF10,35,M,NS,SUPER_PREFERRED_NON_TOBACCO,10,250000,180.00,65.00,false,0.00,MONTHLY,CA
+P12TRF100002,p12trf_term,ICC12 P12TRF20,45,F,NS,STANDARD_NON_TOBACCO,20,500000,420.00,65.00,true,12.50,MONTHLY,TX
+P12TRF100003,p12trf_term,ICC12 P12TRF30,40,M,S,STANDARD_TOBACCO,30,100000,95.00,65.00,false,0.00,MONTHLY,MT

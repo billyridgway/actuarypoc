@@ -46,16 +46,24 @@ src/actuarypoc
    ```
 
 4. **Run projection stub**
-   ```bash
-   python -m actuarypoc.cli.main project \
+  ```bash
+  python -m actuarypoc.cli.main project \
      '{"premium": 2500, "face_amount": 500000, "interest_rate": 0.045}' \
      src/actuarypoc/dsl/examples/whole_life.yaml
+  ```
+
+   Or, using the bundled **P12TRF term** example derived from the new filings:
+
+   ```bash
+   # Project the first synthetic P12TRF policy using the p12trf_term DSL
+   python -m actuarypoc.cli.main project-p12trf-sample
    ```
 
 ## Dagster orchestration scaffold
 
 A minimal Dagster repository lives under `dagster/`. Current jobs:
 - `sample_ingestion_job` – wraps the basic policy CSV ingest helper.
+- `p12trf_policies_job` – ingests the P12TRF term sample policies (`sample_data/policies_p12trf.csv`) under the `p12trf/` prefix.
 - `pas_export_job` – prototypes the PAS export connector (uses `sample_data/pas_export.csv`).
 - `actuarial_table_job` – ingests actuarial tables (`sample_data/actuarial_tables.csv`).
 - `crm_data_job` – ingests CRM account data (`sample_data/crm_accounts.csv`).

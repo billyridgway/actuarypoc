@@ -15,8 +15,10 @@ from dagster import (
 )
 
 from actuarypoc.pipeline.ingest import ingest_csv
+from actuarypoc.pipeline.pdf_extract import extract_p12trf_filings_to_minio
 from actuarypoc.projection.service import (
     build_projection_summary,
+    build_p12trf_projection_summary,
     get_latest_object_name,
     store_projection,
 )
@@ -28,6 +30,7 @@ ACTUARIAL_TABLE_CSV = Path(__file__).resolve().parents[1] / "src" / "actuarypoc"
 TERM23_ACTUARIAL_TABLE_CSV = Path(__file__).resolve().parents[1] / "src" / "actuarypoc" / "sample_data" / "actuarial_tables_term23.csv"
 CRM_ACCOUNTS_CSV = Path(__file__).resolve().parents[1] / "src" / "actuarypoc" / "sample_data" / "crm_accounts.csv"
 RATE_CURVE_CSV = Path(__file__).resolve().parents[1] / "src" / "actuarypoc" / "sample_data" / "rate_curves.csv"
+P12TRF_POLICIES_CSV = Path(__file__).resolve().parents[1] / "src" / "actuarypoc" / "sample_data" / "policies_p12trf.csv"
 
 
 @op
@@ -35,6 +38,24 @@ def run_sample_ingest() -> str:
     logger = get_dagster_logger()
     object_name = ingest_csv(str(SAMPLE_CSV))
     logger.info("Uploaded sample data to %s", object_name)
+    return object_name
+
+
+@op
+def run_p12trf_policies_ingest() -> str:
+    """Ingest the bundled P12TRF sample policy snapshot.
+
+    Lands under a dedicated ``p12trf/`` prefix so it can be
+    inspected / consumed independently from the generic
+    ``ingest/`` and ``pas_export/`` streams.
+    """
+
+    logger = get_dagster_logger()
+    object_name = ingest_csv(
+        str(P12TRF_POLICIES_CSV),
+        object_name=f"p12trf/policies-{int(datetime.utcnow().timestamp())}.json",
+    )
+    logger.info("Uploaded P12TRF policies to %s", object_name)
     return object_name
 
 
@@ -52,6 +73,11 @@ def run_pas_export_ingest() -> str:
 @job
 def sample_ingestion_job():
     run_sample_ingest()
+
+
+@job
+def p12trf_policies_job():
+    run_p12trf_policies_ingest()
 
 
 @op
@@ -141,6 +167,37 @@ def projection_job():
     generate_projection()
 
 
+@op
+def run_p12trf_filings_extract():
+    logger = get_dagster_logger()
+    objects = extract_p12trf_filings_to_minio()
+    if not objects:
+        logger.warning(
+            "No P12TRF filings were extracted; check P12TRF_FILINGS_ROOT or mounted filings path"
+        )
+    else:
+        logger.info("Extracted %d P12TRF filing texts to MinIO", len(objects))
+    return objects
+
+
+@job
+def p12trf_filings_job():
+    run_p12trf_filings_extract()
+
+
+@op
+def generate_p12trf_projection(context):
+    summary = build_p12trf_projection_summary()
+    object_name = store_projection(summary)
+    context.log.info("Stored P12TRF projection summary at %s", object_name)
+    return object_name
+
+
+@job
+def p12trf_projection_job():
+    generate_p12trf_projection()
+
+
 @sensor(job=projection_job, minimum_interval_seconds=300)
 def pas_projection_sensor(context):
     try:
@@ -159,6 +216,9 @@ def pas_projection_sensor(context):
 definitions = Definitions(
     jobs=[
         sample_ingestion_job,
+        p12trf_policies_job,
+        p12trf_filings_job,
+        p12trf_projection_job,
         pas_export_job,
         actuarial_table_job,
         term23_actuarial_table_job,
@@ -171,6 +231,24 @@ definitions = Definitions(
             job=sample_ingestion_job,
             cron_schedule="0 * * * *",
             name="hourly_sample_ingest_schedule",
+            default_status=DefaultScheduleStatus.STOPPED,
+        ),
+        ScheduleDefinition(
+            job=p12trf_policies_job,
+            cron_schedule="10 * * * *",
+            name="hourly_p12trf_policies_schedule",
+            default_status=DefaultScheduleStatus.STOPPED,
+        ),
+        ScheduleDefinition(
+            job=p12trf_filings_job,
+            cron_schedule="20 * * * *",
+            name="hourly_p12trf_filings_schedule",
+            default_status=DefaultScheduleStatus.STOPPED,
+        ),
+        ScheduleDefinition(
+            job=p12trf_projection_job,
+            cron_schedule="40 * * * *",
+            name="hourly_p12trf_projection_schedule",
             default_status=DefaultScheduleStatus.STOPPED,
         ),
         ScheduleDefinition(

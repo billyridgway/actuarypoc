@@ -158,12 +158,67 @@ def build_projection_summary(pas_prefix: str = "pas_export/",
     return summary
 
 
-def store_projection(summary: Dict[str, Any]) -> str:
+def build_p12trf_projection_summary(policies_prefix: str = "p12trf/") -> Dict[str, Any]:
+    """Build a projection summary for the P12TRF term sample policies.
+
+    This is a POC-specific helper that:
+    - reads the latest object under the ``p12trf/`` prefix (produced by
+      ``p12trf_policies_job``),
+    - uses the P12TRF term DSL (p12trf_term.yaml), and
+    - runs the generic ProjectionEngine on the first policy record.
+
+    It deliberately does not depend on PAS exports so the P12TRF slice can
+    be showcased independently while PAS integration is still evolving.
+    """
+
+    policies_obj, policies_records = _get_records(policies_prefix)
+    if not policies_records:
+        raise RuntimeError("P12TRF policies empty; cannot run projection")
+
+    policy_record = policies_records[0]
+
+    formula_path = _BASE_DSL_DIR / "p12trf_term.yaml"
+    formula = load_formula(str(formula_path))
+
+    # No dedicated P12TRF mortality surface wired yet; this relies on the
+    # same deterministic engine behaviour as the CLI helper, but now runs
+    # entirely inside the Dagster/MinIO cluster path.
+    engine = ProjectionEngine(formula)
+    projection = engine.project(policy_record)
+
+    summary = {
+        "generated_at": datetime.utcnow().isoformat(),
+        "inputs": {
+            "p12trf_policies_object": policies_obj,
+            "policy_number": policy_record.get("policy_number"),
+            "product_type": policy_record.get("product_type"),
+            "formula_path": str(formula_path),
+        },
+        "metadata": {
+            "p12trf_records_count": len(policies_records),
+        },
+        "projection": asdict(projection),
+    }
+    return summary
+
+
+def store_projection(summary: Dict[str, Any], object_name: str | None = None) -> str:
+    """Persist a projection summary to MinIO and return its object key.
+
+    If ``object_name`` is provided, it is used verbatim. This allows callers
+    (e.g. the Kubernetes operator) to choose a deterministic location and then
+    surface that path back in status. When omitted, a timestamp-based name
+    under ``PROJECTION_PREFIX`` is used.
+    """
+
     import io
 
     client = get_minio_client()
     bucket = get_bucket_name()
-    object_name = f"{PROJECTION_PREFIX}projection-{int(datetime.utcnow().timestamp())}.json"
+
+    if object_name is None:
+        object_name = f"{PROJECTION_PREFIX}projection-{int(datetime.utcnow().timestamp())}.json"
+
     encoded = json.dumps(summary, indent=2).encode("utf-8")
 
     client.put_object(
