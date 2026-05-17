@@ -23,6 +23,14 @@ class CSVConnector(DataConnector):
     def fetch(self) -> Iterable[Record]:
         import pandas as pd
 
-        df = pd.read_csv(self.path, delimiter=self.delimiter)
+        # Be tolerant of comment lines and small formatting glitches in early
+        # POC CSVs. Treat lines starting with "#" as comments and skip any
+        # bad lines instead of failing the entire ingest.
+        df = pd.read_csv(
+            self.path,
+            delimiter=self.delimiter,
+            comment="#",
+            on_bad_lines="skip",
+        )
         for row in df.to_dict(orient="records"):
             yield row
