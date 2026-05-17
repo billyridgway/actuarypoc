@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/billyridgway/actuarypoc/assumption_schema.json",
+  "title": "AssumptionSetRegistry",
+  "description": "Schema for actuarial assumption sets used by the Actuary POC projection engine.",
+  "type": "object",
+  "properties": {
+    "assumption_sets": {
+      "type": "array",
+      "description": "List of assumption sets keyed by logical id.",
+      "items": {
+        "$ref": "#/definitions/AssumptionSet"
+      }
+    }
+  },
+  "required": ["assumption_sets"],
+  "additionalProperties": false,
+  "definitions": {
+    "AssumptionSet": {
+      "type": "object",
+      "description": "One coherent set of assumptions for a product code (mortality, DSL, prefixes, governance metadata). This is the primary target for LLM-assisted extraction.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Stable identifier for this assumption set (e.g. 'wl-elite-v1', 'term23-2024q1')."
+        },
+        "product_code": {
+          "type": "string",
+          "description": "PAS / product system code this assumption set applies to (e.g. 'WL-ELITE', 'TERM23-20')."
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable description of what this assumption set represents (source filing, key features, caveats)."
+        },
+        "dsl_file": {
+          "type": "string",
+          "description": "Relative path to the DSL file under src/actuarypoc/dsl/examples/ that implements these assumptions (e.g. 'whole_life.yaml', 'term23_level_term.yaml')."
+        },
+        "actuarial_prefix": {
+          "type": ["string", "null"],
+          "description": "Optional MinIO prefix where the actuarial tables for this assumption set live (e.g. 'actuarial_tables_term23/')."
+        },
+        "status": {
+          "type": "string",
+          "description": "Workflow status of this assumption set.",
+          "enum": ["draft", "approved", "deprecated"],
+          "default": "draft"
+        },
+        "is_current": {
+          "type": "boolean",
+          "description": "Whether this set is the current one for its product_code.",
+          "default": false
+        },
+        "created_at": {
+          "type": ["string", "null"],
+          "description": "ISO-8601 timestamp when this assumption set was first created (UTC).",
+          "format": "date-time"
+        },
+        "created_by": {
+          "type": ["string", "null"],
+          "description": "Free-form identifier of who/what created this set (e.g. 'llm-extractor', 'billy')."
+        },
+        "approved_at": {
+          "type": ["string", "null"],
+          "description": "ISO-8601 timestamp when this assumption set was approved as current (UTC).",
+          "format": "date-time"
+        },
+        "approved_by": {
+          "type": ["string", "null"],
+          "description": "Identifier of the reviewer/approver (e.g. 'billy', 'pricing-committee')."
+        }
+      },
+      "required": ["id", "product_code", "dsl_file"],
+      "additionalProperties": false
+    }
+  }
+}
