@@ -105,6 +105,44 @@ def list_assumption_sets() -> List[AssumptionSet]:
     return [AssumptionSet.from_dict(item) for item in items]
 
 
+def upsert_assumption_set(asn: AssumptionSet) -> AssumptionSet:
+    """Insert or update an AssumptionSet in the MinIO-backed registry.
+
+    - If an entry with the same id exists, it is replaced.
+    - Otherwise, the set is appended.
+    - created_at/created_by are only populated when missing so callers can
+      supply their own values if desired.
+    """
+
+    registry = _load_registry_raw()
+    items = registry.get("assumption_sets", [])
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    # Ensure created_* fields are populated if absent.
+    if asn.created_at is None:
+        asn.created_at = now
+    if asn.created_by is None:
+        asn.created_by = "llm-extractor"
+
+    payload = asn.to_dict()
+
+    replaced = False
+    for idx, item in enumerate(items):
+        if item.get("id") == asn.id:
+            items[idx] = payload
+            replaced = True
+            break
+
+    if not replaced:
+        items.append(payload)
+
+    registry["assumption_sets"] = items
+    _save_registry_raw(registry)
+
+    return asn
+
+
 def get_current_assumption_for_product(product_code: str) -> Optional[AssumptionSet]:
     code = product_code.upper()
     candidates = [

@@ -16,6 +16,7 @@ from actuarypoc.extract.assumptions_extractor import (
     extract_assumption_set_from_doc,
     assumption_set_to_json,
 )
+from actuarypoc.config.assumptions import AssumptionSet, upsert_assumption_set
 
 app = typer.Typer(help="Actuary POC helpers")
 
@@ -180,6 +181,37 @@ def extract_assumptions(
         typer.echo(f"Wrote AssumptionSet JSON to {output_path}")
     else:
         typer.echo(payload)
+
+
+@app.command("import-assumption")
+def import_assumption(
+    path: str = typer.Argument(..., help="Path to AssumptionSet JSON file"),
+    created_by: str = typer.Option(
+        "llm-extractor",
+        "--created-by",
+        help="Identifier for who/what created this set (default: llm-extractor)",
+    ),
+):
+    """Import or update an AssumptionSet in the MinIO-backed registry.
+
+    The JSON file must contain a single object matching the AssumptionSet
+    schema. If a set with the same id already exists, it is replaced; otherwise
+    it is appended. created_at/created_by are populated when missing.
+    """
+
+    p = Path(path)
+    if not p.exists():
+        raise typer.Exit(f"File not found: {path}")
+
+    data = json.loads(p.read_text(encoding="utf-8"))
+    asn = AssumptionSet.from_dict(data)
+
+    # Respect an existing created_by if present, otherwise use the CLI hint.
+    if not asn.created_by:
+        asn.created_by = created_by
+
+    stored = upsert_assumption_set(asn)
+    typer.echo(f"Imported assumption set id={stored.id} product_code={stored.product_code}")
 
 
 if __name__ == "__main__":
