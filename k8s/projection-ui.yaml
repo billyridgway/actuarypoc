@@ -56,6 +56,7 @@ spec:
               from fastapi.responses import HTMLResponse
 
               from actuarypoc.storage.minio_client import get_minio_client, get_bucket_name
+              from actuarypoc.config.assumptions import list_assumption_sets
 
 
               app = FastAPI(title="ActuaryPOC Projection Viewer", version="0.1.0")
@@ -75,10 +76,35 @@ spec:
                   return sorted(objects)
 
 
+              def _list_assumptions() -> List[Dict[str, Any]]:
+                  sets = list_assumption_sets()
+                  return [
+                      {
+                          "id": a.id,
+                          "product_code": a.product_code,
+                          "description": a.description,
+                          "dsl_file": a.dsl_file,
+                          "status": a.status,
+                          "is_current": a.is_current,
+                          "created_at": a.created_at,
+                          "created_by": a.created_by,
+                          "approved_at": a.approved_at,
+                          "approved_by": a.approved_by,
+                      }
+                      for a in sets
+                  ]
+
+
               @app.get("/projections")
               def list_projections() -> Dict[str, Any]:
                   objs = _list_projection_objects()
                   return {"count": len(objs), "objects": objs}
+
+
+              @app.get("/assumptions")
+              def list_assumptions() -> Dict[str, Any]:
+                  items = _list_assumptions()
+                  return {"count": len(items), "assumption_sets": items}
 
 
               @app.get("/projections/{object_name:path}")
@@ -108,9 +134,28 @@ spec:
               @app.get("/ui", response_class=HTMLResponse)
               async def ui() -> HTMLResponse:
                   objs = _list_projection_objects()
+                  assumptions = _list_assumptions()
                   items = "".join(
                       f'<li><a href="/ui/view?key={name}">{name}</a></li>' for name in objs
                   ) or "<li><em>No projections found.</em></li>"
+
+                  if assumptions:
+                      assumption_items = "".join(
+                          (
+                              "<li><strong>{id}</strong> (product_code=<code>{product_code}</code>, "
+                              "status=<code>{status}</code>, "
+                              "is_current=<code>{is_current}</code>)</li>"
+                          ).format(
+                              id=a["id"],
+                              product_code=a["product_code"],
+                              status=a["status"],
+                              is_current=str(a["is_current"]).lower(),
+                          )
+                          for a in assumptions
+                      )
+                  else:
+                      assumption_items = "<li><em>No assumption sets found.</em></li>"
+
                   html = f"""
                   <html>
                     <head>
@@ -125,6 +170,11 @@ spec:
                       <p>Available projection objects in MinIO (<code>projections/</code> prefix):</p>
                       <ul>
                         {items}
+                      </ul>
+                      <h2>Assumption sets</h2>
+                      <p>Assumption sets discovered in the MinIO-backed registry (<code>config/assumption_sets.json</code>):</p>
+                      <ul>
+                        {assumption_items}
                       </ul>
                     </body>
                   </html>
