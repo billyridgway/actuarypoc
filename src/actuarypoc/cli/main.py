@@ -17,7 +17,7 @@ from actuarypoc.extract.assumptions_extractor import (
     extract_assumption_set_from_text,
     assumption_set_to_json,
 )
-from actuarypoc.config.assumptions import AssumptionSet, upsert_assumption_set
+from actuarypoc.config.assumptions import AssumptionSet, upsert_assumption_set, approve_assumption_set
 from actuarypoc.storage.minio_client import get_minio_client, get_bucket_name
 
 app = typer.Typer(help="Actuary POC helpers")
@@ -286,6 +286,40 @@ def extract_assumptions_minio(
     typer.echo(
         f"Imported assumption set id={stored.id} product_code={stored.product_code} "
         f"from {latest.object_name}"
+    )
+
+
+@app.command("approve-assumption")
+def approve_assumption(
+    set_id: str = typer.Argument(..., help="Identifier of the assumption set to approve"),
+    approved_by: str = typer.Option(
+        "human-review",
+        "--approved-by",
+        help="Identifier for who is approving this set (e.g. initials or SSO id)",
+    ),
+):
+    """Mark an assumption set as approved + current for its product.
+
+    This updates the MinIO-backed registry so that:
+
+    - status → "approved"
+    - is_current → true
+    - any other current sets for the same product_code are cleared.
+
+    Projections that call get_current_assumption_for_product(...) will then
+    start using this set automatically for that product.
+    """
+
+    result = approve_assumption_set(set_id, approved_by)
+    if result is None:
+        raise typer.Exit(f"Assumption set not found: {set_id}")
+
+    typer.echo(
+        "Approved assumption set id={id} for product_code={code} as current (status={status})".format(
+            id=result.id,
+            code=result.product_code,
+            status=result.status,
+        )
     )
 
 
