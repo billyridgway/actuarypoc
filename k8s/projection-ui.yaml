@@ -56,7 +56,7 @@ spec:
               from fastapi.responses import HTMLResponse
 
               from actuarypoc.storage.minio_client import get_minio_client, get_bucket_name
-              from actuarypoc.config.assumptions import list_assumption_sets
+              from actuarypoc.config.assumptions import list_assumption_sets, approve_assumption_set
 
 
               app = FastAPI(title="ActuaryPOC Projection Viewer", version="0.1.0")
@@ -107,6 +107,32 @@ spec:
                   return {"count": len(items), "assumption_sets": items}
 
 
+              @app.get("/assumptions/{set_id}/approve", response_class=HTMLResponse)
+              async def approve_assumption_ui(set_id: str, approved_by: str = "ui-approver") -> HTMLResponse:
+                  result = approve_assumption_set(set_id, approved_by)
+                  if result is None:
+                      raise HTTPException(status_code=404, detail=f"Assumption set not found: {set_id}")
+
+                  html = f"""
+                  <html>
+                    <head>
+                      <title>Assumption set approved</title>
+                      <style>
+                        body {{ font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif; margin: 2rem; }}
+                        code {{ background: #f5f5f5; padding: 0.1rem 0.3rem; }}
+                        a {{ text-decoration: none; color: #0366d6; }}
+                      </style>
+                    </head>
+                    <body>
+                      <p><a href="/ui">&larr; Back to list</a></p>
+                      <h1>Assumption set approved</h1>
+                      <p>Approved <code>{result.id}</code> for product_code <code>{result.product_code}</code> as current.</p>
+                    </body>
+                  </html>
+                  """
+                  return HTMLResponse(content=html)
+
+
               @app.get("/projections/{object_name:path}")
               def get_projection(object_name: str) -> Dict[str, Any]:
                   if not object_name.startswith("projections/"):
@@ -144,7 +170,8 @@ spec:
                           (
                               "<li><strong>{id}</strong> (product_code=<code>{product_code}</code>, "
                               "status=<code>{status}</code>, "
-                              "is_current=<code>{is_current}</code>)</li>"
+                              "is_current=<code>{is_current}</code>) "
+                              "[<a href=\"/assumptions/{id}/approve?approved_by=ui\">Approve</a>]</li>"
                           ).format(
                               id=a["id"],
                               product_code=a["product_code"],
