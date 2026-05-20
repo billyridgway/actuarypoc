@@ -1,0 +1,44 @@
+product_type: p12trf_term_risk_class_mapping
+
+# DSL for P12TRF term risk class mapping assumptions.
+#
+# This file encodes the normalized risk class mapping from the
+# "Risk Class Mapping - Term - PET" filing (ICC12 P12TRF10/15/20/30).
+#
+# The mapping itself lives under meta.risk_class_mapping; the charge and
+# credit_rate stubs allow this DSL to be loaded by the existing
+# PolicyFormula loader, even though the primary purpose here is to
+# surface the mapping used by the assumption set.
+
+meta:
+  form_ids:
+    - ICC12 P12TRF10
+    - ICC12 P12TRF15
+    - ICC12 P12TRF20
+    - ICC12 P12TRF30
+
+  risk_class_mapping:
+    super_preferred_nonsmoker: SUPER_PREFERRED_NON_TOBACCO
+    preferred_plus_nonsmoker:  PREFERRED_NON_TOBACCO
+    preferred_nonsmoker:       STANDARD_PLUS_NON_TOBACCO
+    standard_nonsmoker:        STANDARD_NON_TOBACCO
+    preferred_smoker:          PREFERRED_TOBACCO
+    standard_smoker:           STANDARD_TOBACCO
+    rated:                     RATED
+
+charges:
+  - name: risk_premium
+    formula: "face_amount / 1000 * q_2017_cso(age, duration, gender, smoker_class)"
+
+  - name: policy_fee
+    formula: "policy_fee"
+
+  - name: waiver_of_premium_rider
+    formula: "waiver_premium"
+
+credit_rates:
+  - rate_type: nonforfeiture
+    expression: "0.045"
+
+  - rate_type: illustrated
+    expression: "portfolio_rate_curve(term_year)"
