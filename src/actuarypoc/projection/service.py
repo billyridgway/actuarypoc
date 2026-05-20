@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -92,7 +93,18 @@ def build_projection_summary(pas_prefix: str = "pas_export/",
                              rate_prefix: str = "rate_curves/",
                              crm_prefix: str = "crm_accounts/",
                              term23_actuarial_prefix: str = "actuarial_tables_term23/") -> Dict[str, Any]:
-    pas_obj, pas_records = _get_records(pas_prefix)
+    # Prefer a local PAS JSON path when provided (e.g. via ConfigMap-mounted file
+    # referenced by PAS_JSON_PATH). This allows clusters to avoid MinIO for PAS
+    # while still using MinIO for actuarial, rates, etc.
+    pas_json_path = os.getenv("PAS_JSON_PATH")
+    if pas_json_path:
+        with open(pas_json_path, "r", encoding="utf-8") as handle:
+            pas_payload = json.load(handle)
+        pas_obj = f"file://{pas_json_path}"
+        pas_records = pas_payload.get("records", [])
+    else:
+        pas_obj, pas_records = _get_records(pas_prefix)
+
     actuarial_obj, actuarial_records = _get_records(actuarial_prefix)
     rate_obj, rate_records = _get_records(rate_prefix)
     crm_obj, crm_records = _get_records(crm_prefix)
@@ -108,29 +120,36 @@ def build_projection_summary(pas_prefix: str = "pas_export/",
 
     policy_record = pas_records[0]
 
-    # Choose the appropriate DSL based on PAS product_code, preferring an
-    # approved/current assumption set when available.
-    product_code = policy_record.get("product_code")
+    # Determine the product identity primarily from the orchestrator (e.g. CR / operator),
+    # falling back to any legacy PAS product_code field if present.
+    product_id = os.getenv("PRODUCT_ID")
+    product_code: str | None = None
     assumption_set = None
     formula_path: Path
 
+    if product_id:
+        product_code = product_id.upper()
+    else:
+        raw_code = policy_record.get("product_code")
+        if raw_code is not None:
+            product_code = str(raw_code).upper()
+
     if product_code is not None:
-        assumption_set = get_current_assumption_for_product(str(product_code))
+        assumption_set = get_current_assumption_for_product(product_code)
 
     if assumption_set is not None and assumption_set.dsl_file:
         formula_path = _BASE_DSL_DIR / assumption_set.dsl_file
     else:
-        formula_path = _resolve_policy_formula_path(str(product_code) if product_code is not None else None)
+        formula_path = _resolve_policy_formula_path(product_code)
 
     formula = load_formula(str(formula_path))
 
     # Build a Term23 mortality surface when data is available; pass it into the engine
     # so it can surface q_x by duration in the projection output.
     mortality_surface = None
-    if product_code is not None:
-        code = str(product_code).upper()
-        if (code.startswith("TERM23") or code.startswith("TERM-23")) and term23_actuarial_records:
-            mortality_surface = build_term23_surface(term23_actuarial_records)
+    code = (product_code or "").upper()
+    if (code.startswith("TERM23") or code.startswith("TERM-23")) and term23_actuarial_records:
+        mortality_surface = build_term23_surface(term23_actuarial_records)
 
     engine = ProjectionEngine(formula, mortality_surface=mortality_surface)
     projection = engine.project(policy_record)
@@ -144,6 +163,7 @@ def build_projection_summary(pas_prefix: str = "pas_export/",
             "crm_object": crm_obj,
             "term23_actuarial_object": term23_actuarial_obj,
             "policy_id": policy_record.get("policy_id"),
+            "product_id": product_id,
             "product_code": product_code,
             "formula_path": str(formula_path),
             "assumption_set_id": getattr(assumption_set, "id", None),

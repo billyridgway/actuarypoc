@@ -1,7 +1,7 @@
-policy_id,holder_name,product_code,issue_date,status,premium_mode,premium_amount,face_amount,rider_codes,last_update
-WL-11002,Alicia Gomez,WL-ELITE,2018-06-15,InForce,Annual,3100.00,450000,"LTC,TERM",2026-05-01
-UL-22390,Jordan Patel,UL-FLEX,2020-09-03,InForce,Monthly,420.50,600000,"TERM",2026-05-01
-TERM-44510,Rachel Chen,TERM-20,2022-02-27,Lapsed,Annual,950.00,350000,"",2026-03-10
-WL-11887,Marcus King,WL-ELITE,2017-11-12,InForce,Quarterly,875.25,800000,"CHILD",2026-04-22
-UL-30991,Sofia Alvarez,UL-RETIRE,2019-05-09,Pending,Monthly,515.75,525000,"LTC",2026-05-02
-TERM23-90001,John Example,TERM23-20,2024-01-15,InForce,Annual,750.00,250000,"",2026-05-02
+policy_id,holder_name,issue_date,status,premium_mode,premium_amount,face_amount,rider_codes,last_update
+WL-11002,Alicia Gomez,2018-06-15,InForce,Annual,3100.00,450000,"LTC,TERM",2026-05-01
+UL-22390,Jordan Patel,2020-09-03,InForce,Monthly,420.50,600000,"TERM",2026-05-01
+TERM-44510,Rachel Chen,2022-02-27,Lapsed,Annual,950.00,350000,"",2026-03-10
+WL-11887,Marcus King,2017-11-12,InForce,Quarterly,875.25,800000,"CHILD",2026-04-22
+UL-30991,Sofia Alvarez,2019-05-09,Pending,Monthly,515.75,525000,"LTC",2026-05-02
+TERM23-90001,John Example,2024-01-15,InForce,Annual,750.00,250000,"",2026-05-02
