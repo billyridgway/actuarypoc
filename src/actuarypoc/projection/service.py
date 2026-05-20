@@ -12,6 +12,7 @@ from actuarypoc.projection.mortality import build_term23_surface
 from actuarypoc.config.assumptions import get_current_assumption_for_product
 from actuarypoc.storage.minio_client import get_bucket_name, get_minio_client
 
+# Default prefix for projection objects when no override is supplied.
 PROJECTION_PREFIX = "projections/"
 _BASE_DSL_DIR = Path(__file__).resolve().parents[1] / "dsl" / "examples"
 DEFAULT_POLICY_FORMULA_PATH = _BASE_DSL_DIR / "whole_life.yaml"
@@ -205,19 +206,33 @@ def build_p12trf_projection_summary(policies_prefix: str = "p12trf/") -> Dict[st
 def store_projection(summary: Dict[str, Any], object_name: str | None = None) -> str:
     """Persist a projection summary to MinIO and return its object key.
 
-    If ``object_name`` is provided, it is used verbatim. This allows callers
-    (e.g. the Kubernetes operator) to choose a deterministic location and then
-    surface that path back in status. When omitted, a timestamp-based name
-    under ``PROJECTION_PREFIX`` is used.
+    Priority for the target object name:
+
+    1. If ``object_name`` is provided (e.g. via the CLI ``--object-name``
+       option or the ``PROJECTION_OBJECT_NAME`` environment variable), it is
+       used *verbatim*. This is the path that the Kubernetes operator Job
+       should reference in status.
+    2. Otherwise, look for ``PROJECTIONS_PREFIX`` in the environment and use
+       that as the base prefix.
+    3. If neither is set, fall back to :data:`PROJECTION_PREFIX`.
+
+    In the non-explicit case we append a timestamped filename of the form
+    ``projection-<ts>.json`` under the chosen prefix.
     """
 
     import io
+    import os
 
     client = get_minio_client()
     bucket = get_bucket_name()
 
-    if object_name is None:
-        object_name = f"{PROJECTION_PREFIX}projection-{int(datetime.utcnow().timestamp())}.json"
+    if not object_name:
+        # Allow callers (e.g. Jobs) to steer the prefix without having to
+        # construct a full object key themselves.
+        prefix = os.getenv("PROJECTIONS_PREFIX", PROJECTION_PREFIX)
+        if not prefix.endswith("/"):
+            prefix = prefix + "/"
+        object_name = f"{prefix}projection-{int(datetime.utcnow().timestamp())}.json"
 
     encoded = json.dumps(summary, indent=2).encode("utf-8")
 

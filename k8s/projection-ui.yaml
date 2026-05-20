@@ -38,6 +38,11 @@ spec:
               value: "illuminet"
             - name: MINIO_SECURE
               value: "false"
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: openai-api-key
+                  key: api-key
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -46,14 +51,21 @@ spec:
               rm -rf /app && git clone https://github.com/billyridgway/actuarypoc.git /app
               cd /app
               git checkout ${GIT_REF:-main} >/dev/null
-              pip install --no-cache-dir -r requirements.txt fastapi
+              pip install --no-cache-dir -r requirements.txt
               cat << 'PY' > /app/ui_server.py
               from __future__ import annotations
 
+              import json
+              import os
+              import shutil
+              import tempfile
+              import uuid
+              from pathlib import Path
               from typing import Any, Dict, List
 
-              from fastapi import FastAPI, HTTPException
+              from fastapi import FastAPI, HTTPException, UploadFile, File, Form
               from fastapi.responses import HTMLResponse
+              from openai import OpenAI
 
               from actuarypoc.storage.minio_client import get_minio_client, get_bucket_name
               from actuarypoc.config.assumptions import list_assumption_sets, approve_assumption_set
@@ -145,8 +157,6 @@ spec:
                   except Exception as exc:  # noqa: BLE001
                       raise HTTPException(status_code=404, detail=f"Projection not found: {object_name}") from exc
 
-                  import json
-
                   try:
                       data = json.loads(response.read().decode("utf-8"))
                   finally:
@@ -154,6 +164,271 @@ spec:
                       response.release_conn()
 
                   return data
+
+
+              # --- AI-assisted upload flow ---
+
+              BASE_UPLOAD_DIR = Path("/tmp/actuary_uploads")
+              BASE_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+
+              def _save_and_unzip_files(upload_id: str, files: List[UploadFile]) -> Path:
+                  """Save uploaded files and unzip into a per-upload directory.
+
+                  Returns the root directory containing the unzipped contents.
+                  """
+
+                  root = BASE_UPLOAD_DIR / upload_id
+                  raw_dir = root / "raw"
+                  unzip_dir = root / "unzipped"
+                  raw_dir.mkdir(parents=True, exist_ok=True)
+                  unzip_dir.mkdir(parents=True, exist_ok=True)
+
+                  import zipfile
+
+                  for f in files:
+                      raw_path = raw_dir / f.filename
+                      with raw_path.open("wb") as out:
+                          shutil.copyfileobj(f.file, out)
+
+                      if zipfile.is_zipfile(raw_path):
+                          with zipfile.ZipFile(raw_path) as z:
+                              z.extractall(unzip_dir)
+                      else:
+                          # Non-zip: place directly under unzipped root.
+                          target = unzip_dir / f.filename
+                          target.parent.mkdir(parents=True, exist_ok=True)
+                          shutil.copy2(raw_path, target)
+
+                  return unzip_dir
+
+
+              def _iter_candidate_files(root: Path) -> List[Dict[str, Any]]:
+                  """Return metadata + small text sample for files we might keep."""
+
+                  from PyPDF2 import PdfReader
+
+                  candidates: List[Dict[str, Any]] = []
+                  for path in root.rglob("*"):
+                      if not path.is_file():
+                          continue
+
+                      rel_path = str(path.relative_to(root))
+                      suffix = path.suffix.lower()
+
+                      if suffix not in {".pdf", ".txt", ".md"}:
+                          continue
+
+                      sample_text = ""
+                      try:
+                          if suffix in {".txt", ".md"}:
+                              sample_text = path.read_text(encoding="utf-8", errors="ignore")[:4000]
+                          elif suffix == ".pdf":
+                              reader = PdfReader(str(path))
+                              chunks: List[str] = []
+                              for i, page in enumerate(reader.pages):
+                                  if i >= 3:
+                                      break
+                                  try:
+                                      chunks.append(page.extract_text() or "")
+                                  except Exception:
+                                      continue
+                              sample_text = "\n".join(chunks)[:4000]
+                      except Exception:
+                          continue
+
+                      if not sample_text.strip():
+                          continue
+
+                      candidates.append(
+                          {
+                              "relative_path": rel_path,
+                              "filename": path.name,
+                              "sample_text": sample_text,
+                          }
+                      )
+
+                  return candidates
+
+
+              def _classify_files_with_ai(product_code: str, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+                  """Use OpenAI to suggest which files to keep for assumptions/LLM docs."""
+
+                  api_key = os.getenv("OPENAI_API_KEY")
+                  if not api_key:
+                      raise RuntimeError("OPENAI_API_KEY is not set in the environment")
+
+                  client = OpenAI(api_key=api_key)
+                  model = os.getenv("ASSUMPTION_EXTRACT_MODEL", "gpt-4o-mini")
+
+                  # Trim to a reasonable number of files to keep token use bounded.
+                  max_files = 40
+                  trimmed = candidates[:max_files]
+
+                  instructions = (
+                      "You are helping an actuary triage product filing documents for a life insurance product.\n"
+                      "For each file, decide whether it is useful for configuring product assumptions and specs: "
+                      "actuarial memos, statements of variability (SOV), rate tables, benefit descriptions, risk class mappings, etc.\n\n"
+                      "Return ONLY JSON: a list with one object per file, in the same order, each with keys: "
+                      "relative_path, keep_recommended (true/false), relevance ('core'|'supporting'|'irrelevant'), reason (short string)."
+                  )
+
+                  files_payload = [
+                      {
+                          "relative_path": c["relative_path"],
+                          "filename": c["filename"],
+                          "sample_text": c["sample_text"][:1000],
+                      }
+                      for c in trimmed
+                  ]
+
+                  user_prompt = {
+                      "product_code": product_code,
+                      "files": files_payload,
+                  }
+
+                  messages = [
+                      {"role": "system", "content": instructions},
+                      {"role": "user", "content": json.dumps(user_prompt)},
+                  ]
+
+                  resp = client.chat.completions.create(
+                      model=model,
+                      messages=messages,
+                      temperature=0,
+                  )
+
+                  raw = resp.choices[0].message.content or "[]"
+                  try:
+                      data = json.loads(raw)
+                  except json.JSONDecodeError:
+                      # Fallback: wrap in list if it's a single object, otherwise mark all as maybe.
+                      return [
+                          {
+                              "relative_path": c["relative_path"],
+                              "filename": c["filename"],
+                              "keep_recommended": False,
+                              "relevance": "unknown",
+                              "reason": "LLM classification failed; manual review required.",
+                          }
+                          for c in trimmed
+                      ]
+
+                  # Ensure we always include path/filename from our side.
+                  results: List[Dict[str, Any]] = []
+                  for c, r in zip(trimmed, data):
+                      results.append(
+                          {
+                              "relative_path": c["relative_path"],
+                              "filename": c["filename"],
+                              "keep_recommended": bool(r.get("keep_recommended", False)),
+                              "relevance": r.get("relevance", "unknown"),
+                              "reason": r.get("reason", ""),
+                          }
+                      )
+
+                  return results
+
+
+              @app.post("/api/upload/analyze")
+              async def upload_analyze(
+                  product_code: str = Form(...),
+                  files: List[UploadFile] = File(...),
+              ) -> Dict[str, Any]:
+                  """Accept raw SERFF zips/PDFs, return AI suggestions for which to keep."""
+
+                  upload_id = str(uuid.uuid4())
+                  root = _save_and_unzip_files(upload_id, files)
+                  candidates = _iter_candidate_files(root)
+                  if not candidates:
+                      return {
+                          "upload_id": upload_id,
+                          "product_code": product_code,
+                          "files": [],
+                          "message": "No candidate PDF/txt files found in upload.",
+                      }
+
+                  classified = _classify_files_with_ai(product_code, candidates)
+                  return {
+                      "upload_id": upload_id,
+                      "product_code": product_code,
+                      "files": classified,
+                  }
+
+
+              @app.post("/api/upload/confirm")
+              async def upload_confirm(
+                  upload_id: str = Form(...),
+                  product_code: str = Form(...),
+                  keep: List[str] = Form(...),
+              ) -> Dict[str, Any]:
+                  """Convert confirmed files to text and upload under docs/<product>/..."""
+
+                  root = BASE_UPLOAD_DIR / upload_id / "unzipped"
+                  if not root.exists():
+                      raise HTTPException(status_code=400, detail="Unknown or expired upload_id")
+
+                  from PyPDF2 import PdfReader
+                  from actuarypoc.storage.minio_client import ensure_bucket
+
+                  client = get_minio_client()
+                  ensure_bucket(client)
+                  bucket = get_bucket_name()
+
+                  written: List[str] = []
+                  errors: List[Dict[str, str]] = []
+
+                  for rel in keep:
+                      path = root / rel
+                      if not path.exists() or not path.is_file():
+                          errors.append({"relative_path": rel, "error": "File not found in upload"})
+                          continue
+
+                      suffix = path.suffix.lower()
+                      text = ""
+                      try:
+                          if suffix in {".txt", ".md"}:
+                              text = path.read_text(encoding="utf-8", errors="ignore")
+                          elif suffix == ".pdf":
+                              reader = PdfReader(str(path))
+                              chunks: List[str] = []
+                              for page in reader.pages:
+                                  try:
+                                      chunks.append(page.extract_text() or "")
+                                  except Exception:
+                                      continue
+                              text = "\n".join(chunks)
+                          else:
+                              errors.append({"relative_path": rel, "error": f"Unsupported file type: {suffix}"})
+                              continue
+                      except Exception as exc:  # noqa: BLE001
+                          errors.append({"relative_path": rel, "error": f"Extraction failed: {exc}"})
+                          continue
+
+                      if not text.strip():
+                          errors.append({"relative_path": rel, "error": "Extracted text was empty"})
+                          continue
+
+                      object_name = f"docs/{product_code}/{rel}.txt"
+                      data_bytes = text.encode("utf-8")
+                      import io
+
+                      client.put_object(
+                          bucket,
+                          object_name,
+                          data=io.BytesIO(data_bytes),
+                          length=len(data_bytes),
+                          content_type="text/plain; charset=utf-8",
+                      )
+                      written.append(object_name)
+
+                  # Best-effort cleanup of temp files for this upload.
+                  try:
+                      shutil.rmtree(BASE_UPLOAD_DIR / upload_id)
+                  except Exception:
+                      pass
+
+                  return {"written": written, "errors": errors}
 
 
               @app.get("/", response_class=HTMLResponse)
@@ -183,6 +458,17 @@ spec:
                   else:
                       assumption_items = "<li><em>No assumption sets found.</em></li>"
 
+                  # Basic link to the upload UI endpoint (can be a separate SPA later).
+                  upload_html = """
+                  <h2>Upload filings for AI triage</h2>
+                  <form action="/api/upload/analyze" method="post" enctype="multipart/form-data">
+                    <label>Product code: <input type="text" name="product_code" value="P12TRF" /></label><br/><br/>
+                    <label>Files (zips and/or PDFs): <input type="file" name="files" multiple /></label><br/><br/>
+                    <button type="submit">Analyze files</button>
+                  </form>
+                  <p><em>Note: this endpoint returns JSON; a richer HTML review UI can be added on top.</em></p>
+                  """
+
                   html = f"""
                   <html>
                     <head>
@@ -203,6 +489,7 @@ spec:
                       <ul>
                         {assumption_items}
                       </ul>
+                      {upload_html}
                     </body>
                   </html>
                   """
@@ -211,8 +498,6 @@ spec:
 
               @app.get("/ui/view", response_class=HTMLResponse)
               async def ui_view(key: str) -> HTMLResponse:
-                  import json
-
                   data = get_projection(key)
                   pretty = json.dumps(data, indent=2)
                   html = f"""
@@ -234,7 +519,7 @@ spec:
                   </html>
                   """
                   return HTMLResponse(content=html)
-PY
+              PY
               uvicorn ui_server:app --host 0.0.0.0 --port 8080
 ---
 apiVersion: v1
