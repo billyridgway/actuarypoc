@@ -11,7 +11,13 @@ from actuarypoc.connectors.base import CSVConnector
 from actuarypoc.dsl.policy_dsl import load_formula
 from actuarypoc.pipeline.ingest import ingest_csv
 from actuarypoc.projection.engine import ProjectionEngine
-from actuarypoc.projection.service import build_projection_summary, store_projection
+from actuarypoc.projection.service import (
+    build_projection_summary,
+    store_projection,
+    store_json_metadata,
+    build_audit_from_summary,
+    build_input_snapshot_from_summary,
+)
 from actuarypoc.extract.assumptions_extractor import (
     extract_assumption_set_from_doc,
     extract_assumption_set_from_text,
@@ -120,6 +126,18 @@ def project_minio(
         envvar="PROJECTION_OBJECT_NAME",
         help="Full MinIO object key to write; defaults under projections/ if empty",
     ),
+    audit_object_name: str = typer.Option(
+        "",
+        "--audit-object-name",
+        envvar="AUDIT_OBJECT_NAME",
+        help="Optional MinIO object key for a sanitized audit document",
+    ),
+    input_snapshot_object_name: str = typer.Option(
+        "",
+        "--input-snapshot-object-name",
+        envvar="INPUT_SNAPSHOT_OBJECT_NAME",
+        help="Optional MinIO object key for an input snapshot document",
+    ),
 ):
     """Build a projection summary from MinIO inputs and persist it.
 
@@ -137,6 +155,14 @@ def project_minio(
         term23_actuarial_prefix=term23_actuarial_prefix,
     )
     key = store_projection(summary, object_name=object_name or None)
+    # Optionally emit separate audit + input snapshot artefacts. These are
+    # derived from the summary and are intentionally metadata-only.
+    if audit_object_name:
+        audit_doc = build_audit_from_summary(summary)
+        store_json_metadata(audit_doc, audit_object_name)
+    if input_snapshot_object_name:
+        snapshot_doc = build_input_snapshot_from_summary(summary)
+        store_json_metadata(snapshot_doc, input_snapshot_object_name)
     typer.echo(key)
 
 

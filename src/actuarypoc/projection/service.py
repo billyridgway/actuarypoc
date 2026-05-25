@@ -264,3 +264,56 @@ def store_projection(summary: Dict[str, Any], object_name: str | None = None) ->
         content_type="application/json",
     )
     return object_name
+
+
+def store_json_metadata(payload: Dict[str, Any], object_name: str) -> str:
+    """Persist a small, sanitized JSON document to MinIO.
+
+    This helper is intended for audit / snapshot artefacts. Callers are
+    expected to pass only metadata (object keys, counts, timestamps, ids),
+    not raw PAS records or policyholder-level values.
+    """
+
+    import io
+
+    client = get_minio_client()
+    bucket = get_bucket_name()
+
+    encoded = json.dumps(payload, indent=2).encode("utf-8")
+    client.put_object(
+        bucket,
+        object_name,
+        data=io.BytesIO(encoded),
+        length=len(encoded),
+        content_type="application/json",
+    )
+    return object_name
+
+
+def build_audit_from_summary(summary: Dict[str, Any]) -> Dict[str, Any]:
+    """Derive a lightweight audit document from a projection summary.
+
+    The audit intentionally mirrors only high-level metadata and input
+    wiring; the full projection payload is omitted to keep this artefact
+    small and free of policyholder-level values.
+    """
+
+    inputs = summary.get("inputs", {})
+    metadata = summary.get("metadata", {})
+    engine_version = os.getenv("ENGINE_VERSION") or os.getenv("ILLUSTRATION_ENGINE_VERSION")
+
+    return {
+        "generated_at": summary.get("generated_at"),
+        "engine_version": engine_version,
+        "inputs": inputs,
+        "metadata": metadata,
+    }
+
+
+def build_input_snapshot_from_summary(summary: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a minimal snapshot of which inputs were used for a run."""
+
+    return {
+        "generated_at": summary.get("generated_at"),
+        "inputs": summary.get("inputs", {}),
+    }
