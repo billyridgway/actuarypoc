@@ -12,12 +12,19 @@ RateType = Literal["guaranteed", "current", "illustrated"]
 class Charge:
     name: str
     formula: str  # Placeholder expression until interpreter is built
+    # Optional human-readable description of the charge; ignored by the engine
+    # but useful for documentation / UI.
+    description: str | None = None
+    # Whether this charge is optional (e.g. rider) in the product design.
+    optional: bool = False
 
 
 @dataclass
 class CreditRate:
     rate_type: RateType
     expression: str
+    # Optional description field for documentation; ignored by the engine.
+    description: str | None = None
 
 
 @dataclass
