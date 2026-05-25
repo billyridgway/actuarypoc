@@ -36,9 +36,20 @@ spec:
             - name: POSTGRES_DB
               value: illustrations
             - name: POSTGRES_USER
-              value: illustrator
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_USER
             - name: POSTGRES_PASSWORD
-              value: illustrator
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_DSN
           volumeMounts:
             - name: postgres-data
               mountPath: /var/lib/postgresql/data
