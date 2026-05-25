@@ -71,12 +71,43 @@ class TestP12TRFGolden(unittest.TestCase):
                 self.assertTrue(all(v >= 0 for v in result.cash_values))
                 self.assertTrue(all(v >= 0 for v in result.death_benefits))
 
+                # Cash-value catastrophic drop check: allow normal variation,
+                # but flag extremely large downward jumps as likely numeric
+                # blow-ups (e.g. 10k → -500k or 10k → near-zero when large).
+                cvs = result.cash_values
+                for i in range(1, len(cvs)):
+                    prev_v = cvs[i - 1]
+                    cur_v = cvs[i]
+                    # Heuristic: drop of > 90% and more than 100k in
+                    # absolute terms is suspicious for this POC.
+                    if prev_v > 0 and cur_v >= 0:
+                        if cur_v < prev_v * 0.1 and (prev_v - cur_v) > 100000:
+                            self.fail(
+                                f"cash_values catastrophic drop between years {i} and {i+1}: "
+                                f"{prev_v} -> {cur_v}"
+                            )
+
                 # Mortality rates must be between 0 and 1.
                 if result.mortality_rates is not None:
                     self.assertTrue(
                         all(0.0 <= v <= 1.0 for v in result.mortality_rates),
                         "mortality_rates outside [0,1]",
                     )
+
+                    # Basic mortality-curve sanity: on average, later durations
+                    # should not have dramatically lower mortality than the
+                    # earliest durations.
+                    positive_q = [v for v in result.mortality_rates if v > 0]
+                    if len(positive_q) >= 6:
+                        early = positive_q[:3]
+                        late = positive_q[-3:]
+                        early_avg = sum(early) / len(early)
+                        late_avg = sum(late) / len(late)
+                        if early_avg > 0 and late_avg < early_avg * 0.5:
+                            self.fail(
+                                "mortality curve late average much lower than early "
+                                "average; check table wiring"
+                            )
 
                 # Survival probabilities: 0..1 and monotone non-increasing.
                 if result.survival_probabilities is not None:
@@ -140,14 +171,23 @@ class TestP12TRFGolden(unittest.TestCase):
                 self.assertEqual(len(result.death_benefits), horizon)
 
                 # When metrics are eventually populated, this is where we will
-                # add true golden checks, for example:
+                # add true golden checks. Metrics should be a mapping from
+                # metric name → object with at least a "value" and optional
+                # "tolerance", for example:
                 #
-                # if "cash_value_year_10" in metrics:
-                #     self.assertAlmostEqual(
-                #         result.cash_values[9],
-                #         metrics["cash_value_year_10"],
-                #         places=2,
-                #     )
+                # "cash_value_year_10": {"value": 14291.83, "tolerance": 0.01}
+                #
+                # Example usage once trusted expected values are available:
+                #
+                # for name, spec in metrics.items():
+                #     value = spec["value"]
+                #     tol = spec.get("tolerance", 0.01)
+                #     if name == "cash_value_year_10":
+                #         self.assertAlmostEqual(
+                #             result.cash_values[9],
+                #             value,
+                #             delta=tol,
+                #         )
                 #
                 # For now, metrics is expected to be empty or partial, and we
                 # intentionally do not assert on any numeric values.
