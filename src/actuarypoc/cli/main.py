@@ -148,45 +148,67 @@ def project_minio(
     capture it if desired.
     """
 
-    summary = build_projection_summary(
-        pas_prefix=pas_prefix,
-        actuarial_prefix=actuarial_prefix,
-        rate_prefix=rate_prefix,
-        crm_prefix=crm_prefix,
-        term23_actuarial_prefix=term23_actuarial_prefix,
-    )
-    key = store_projection(summary, object_name=object_name or None)
-    # Optionally emit separate audit + input snapshot artefacts. These are
-    # derived from the summary and are intentionally metadata-only.
-    if audit_object_name:
-        audit_doc = build_audit_from_summary(summary)
-        store_json_metadata(audit_doc, audit_object_name)
-    if input_snapshot_object_name:
-        snapshot_doc = build_input_snapshot_from_summary(summary)
-        store_json_metadata(snapshot_doc, input_snapshot_object_name)
-
-    # Best-effort: record this run in Postgres when configured so that
-    # illustration history can be queried. We rely on the operator to
-    # provide a stable RUN_ID and PRODUCT_ID when running in-cluster.
     run_id = os.getenv("RUN_ID")
     product_id = os.getenv("PRODUCT_ID") or ""
     project_name = os.getenv("PROJECT_NAME")
-    try:
-        if run_id and product_id:
-            record_illustration_run(
-                run_id=run_id,
-                product_id=product_id,
-                project_name=project_name,
-                status="succeeded",
-                projection_object_path=key,
-                audit_object_path=audit_object_name or None,
-                input_snapshot_path=input_snapshot_object_name or None,
-            )
-    except Exception:
-        # Do not fail the projection if Postgres is unavailable.
-        pass
 
-    typer.echo(key)
+    try:
+        summary = build_projection_summary(
+            pas_prefix=pas_prefix,
+            actuarial_prefix=actuarial_prefix,
+            rate_prefix=rate_prefix,
+            crm_prefix=crm_prefix,
+            term23_actuarial_prefix=term23_actuarial_prefix,
+        )
+        key = store_projection(summary, object_name=object_name or None)
+        # Optionally emit separate audit + input snapshot artefacts. These are
+        # derived from the summary and are intentionally metadata-only.
+        if audit_object_name:
+            audit_doc = build_audit_from_summary(summary)
+            store_json_metadata(audit_doc, audit_object_name)
+        if input_snapshot_object_name:
+            snapshot_doc = build_input_snapshot_from_summary(summary)
+            store_json_metadata(snapshot_doc, input_snapshot_object_name)
+
+        # Best-effort: record this run in Postgres when configured so that
+        # illustration history can be queried. We rely on the operator to
+        # provide a stable RUN_ID and PRODUCT_ID when running in-cluster.
+        try:
+            if run_id and product_id:
+                record_illustration_run(
+                    run_id=run_id,
+                    product_id=product_id,
+                    project_name=project_name,
+                    status="succeeded",
+                    projection_object_path=key,
+                    audit_object_path=audit_object_name or None,
+                    input_snapshot_path=input_snapshot_object_name or None,
+                    error=None,
+                )
+        except Exception:
+            # Do not fail the projection if Postgres is unavailable.
+            pass
+
+        typer.echo(key)
+
+    except Exception as exc:
+        # On failure, best-effort record a failed run with the error message.
+        try:
+            if run_id and product_id:
+                record_illustration_run(
+                    run_id=run_id,
+                    product_id=product_id,
+                    project_name=project_name,
+                    status="failed",
+                    projection_object_path=None,
+                    audit_object_path=None,
+                    input_snapshot_path=None,
+                    error=str(exc)[:2000],
+                )
+        except Exception:
+            pass
+        # Re-raise so the CLI/Job still fails visibly.
+        raise
 
 
 @app.command("extract-assumptions")
