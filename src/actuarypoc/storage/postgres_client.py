@@ -8,6 +8,12 @@ from typing import Any, Dict, Optional
 import psycopg
 
 
+# Simple in-process counter for write failures. In the POC we don't yet
+# expose this via Prometheus, but logs will include failures and this can
+# be wired into metrics later.
+_POSTGRES_WRITE_FAILURES = 0
+
+
 _DDL = """
 CREATE TABLE IF NOT EXISTS products (
     product_id text PRIMARY KEY,
@@ -46,8 +52,21 @@ CREATE TABLE IF NOT EXISTS illustration_runs (
     completed_at timestamptz,
     projection_object_path text,
     audit_object_path text,
-    input_snapshot_path text
+    input_snapshot_path text,
+    error text
 );
+
+-- Indexes for common query patterns.
+CREATE INDEX IF NOT EXISTS idx_illustration_runs_product
+    ON illustration_runs(product_id);
+CREATE INDEX IF NOT EXISTS idx_illustration_runs_created
+    ON illustration_runs(created_at);
+
+CREATE INDEX IF NOT EXISTS idx_assumption_sets_product
+    ON assumption_sets(product_id);
+
+CREATE INDEX IF NOT EXISTS idx_documents_product
+    ON documents(product_id);
 
 CREATE TABLE IF NOT EXISTS documents (
     id bigserial PRIMARY KEY,
@@ -102,16 +121,27 @@ def _conn() -> Any:
         yield conn
 
 
+def _note_failure(exc: Exception) -> None:
+    global _POSTGRES_WRITE_FAILURES
+    _POSTGRES_WRITE_FAILURES += 1
+    # For now we just log to stderr; a future iteration can expose this via
+    # a proper /metrics endpoint.
+    print(f"[postgres_client] write failure (count={_POSTGRES_WRITE_FAILURES}): {exc}", flush=True)
+
+
 def ensure_schema() -> None:
     dsn = _get_dsn()
     if not dsn:
         return
     # Best-effort, idempotent DDL.
-    with _conn() as conn:
-        if conn is None:
-            return
-        with conn.cursor() as cur:
-            cur.execute(_DDL)
+    try:
+        with _conn() as conn:
+            if conn is None:
+                return
+            with conn.cursor() as cur:
+                cur.execute(_DDL)
+    except Exception as exc:  # noqa: BLE001
+        _note_failure(exc)
 
 
 def record_assumption_set(
@@ -123,47 +153,53 @@ def record_assumption_set(
     object_hash: str,
 ) -> None:
     ensure_schema()
-    with _conn() as conn:
-        if conn is None:
-            return
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO assumption_sets (id, product_id, status, object_path, object_hash)
-                VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (id) DO UPDATE
-                  SET product_id = EXCLUDED.product_id,
-                      status = EXCLUDED.status,
-                      object_path = EXCLUDED.object_path,
-                      object_hash = EXCLUDED.object_hash
-                """,
-                (set_id, product_id, status, object_path, object_hash),
-            )
+    try:
+        with _conn() as conn:
+            if conn is None:
+                return
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO assumption_sets (id, product_id, status, object_path, object_hash)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (id) DO UPDATE
+                      SET product_id = EXCLUDED.product_id,
+                          status = EXCLUDED.status,
+                          object_path = EXCLUDED.object_path,
+                          object_hash = EXCLUDED.object_hash
+                    """,
+                    (set_id, product_id, status, object_path, object_hash),
+                )
+    except Exception as exc:  # noqa: BLE001
+        _note_failure(exc)
 
 
 def record_approval(*, set_id: str, approved_by: str, comment: str | None = None) -> None:
     ensure_schema()
-    with _conn() as conn:
-        if conn is None:
-            return
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO approvals (assumption_set_id, approved_by, comment)
-                VALUES (%s, %s, %s)
-                """,
-                (set_id, approved_by, comment),
-            )
-            cur.execute(
-                """
-                UPDATE assumption_sets
-                   SET status = 'approved',
-                       approved_by = %s,
-                       approved_at = now()
-                 WHERE id = %s
-                """,
-                (approved_by, set_id),
-            )
+    try:
+        with _conn() as conn:
+            if conn is None:
+                return
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO approvals (assumption_set_id, approved_by, comment)
+                    VALUES (%s, %s, %s)
+                    """,
+                    (set_id, approved_by, comment),
+                )
+                cur.execute(
+                    """
+                    UPDATE assumption_sets
+                       SET status = 'approved',
+                           approved_by = %s,
+                           approved_at = now()
+                     WHERE id = %s
+                    """,
+                    (approved_by, set_id),
+                )
+    except Exception as exc:  # noqa: BLE001
+        _note_failure(exc)
 
 
 def record_illustration_run(
@@ -172,45 +208,58 @@ def record_illustration_run(
     product_id: str,
     project_name: str | None,
     status: str,
-    projection_object_path: str,
+    projection_object_path: str | None = None,
     audit_object_path: str | None = None,
     input_snapshot_path: str | None = None,
+    error: str | None = None,
 ) -> None:
+    """Record or update an illustration run.
+
+    For the POC we treat each call as a completed run (success or failure),
+    and set created_at/completed_at to "now" on first insert.
+    """
+
     ensure_schema()
-    with _conn() as conn:
-        if conn is None:
-            return
-        with conn.cursor() as cur:
-            # Use current time for created_at/completed_at when first recorded.
-            now = time.time()
-            cur.execute(
-                """
-                INSERT INTO illustration_runs (
-                    run_id, product_id, project_name, status,
-                    created_at, completed_at,
-                    projection_object_path, audit_object_path, input_snapshot_path
+    try:
+        with _conn() as conn:
+            if conn is None:
+                return
+            with conn.cursor() as cur:
+                now = time.time()
+                cur.execute(
+                    """
+                    INSERT INTO illustration_runs (
+                        run_id, product_id, project_name, status,
+                        created_at, completed_at,
+                        projection_object_path, audit_object_path, input_snapshot_path,
+                        error
+                    )
+                    VALUES (
+                        %s, %s, %s, %s,
+                        to_timestamp(%s), to_timestamp(%s),
+                        %s, %s, %s,
+                        %s
+                    )
+                    ON CONFLICT (run_id) DO UPDATE
+                      SET status = EXCLUDED.status,
+                          completed_at = EXCLUDED.completed_at,
+                          projection_object_path = EXCLUDED.projection_object_path,
+                          audit_object_path = EXCLUDED.audit_object_path,
+                          input_snapshot_path = EXCLUDED.input_snapshot_path,
+                          error = EXCLUDED.error
+                    """,
+                    (
+                        run_id,
+                        product_id,
+                        project_name,
+                        status,
+                        now,
+                        now,
+                        projection_object_path,
+                        audit_object_path,
+                        input_snapshot_path,
+                        error,
+                    ),
                 )
-                VALUES (
-                    %s, %s, %s, %s,
-                    to_timestamp(%s), to_timestamp(%s),
-                    %s, %s, %s
-                )
-                ON CONFLICT (run_id) DO UPDATE
-                  SET status = EXCLUDED.status,
-                      completed_at = EXCLUDED.completed_at,
-                      projection_object_path = EXCLUDED.projection_object_path,
-                      audit_object_path = EXCLUDED.audit_object_path,
-                      input_snapshot_path = EXCLUDED.input_snapshot_path
-                """,
-                (
-                    run_id,
-                    product_id,
-                    project_name,
-                    status,
-                    now,
-                    now,
-                    projection_object_path,
-                    audit_object_path,
-                    input_snapshot_path,
-                ),
-            )
+    except Exception as exc:  # noqa: BLE001
+        _note_failure(exc)
