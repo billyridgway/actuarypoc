@@ -4,9 +4,15 @@ import io
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from hashlib import sha256
 from typing import Any, Dict, List, Optional
 
 from actuarypoc.storage.minio_client import get_bucket_name, get_minio_client
+from actuarypoc.storage.postgres_client import (
+    ensure_schema as ensure_pg_schema,
+    record_approval,
+    record_assumption_set,
+)
 
 
 ASSUMPTION_REGISTRY_OBJECT = "config/assumption_sets.json"
@@ -119,6 +125,9 @@ def upsert_assumption_set(asn: AssumptionSet) -> AssumptionSet:
 
     now = datetime.now(timezone.utc).isoformat()
 
+    # Best-effort ensure the SQL schema exists when Postgres is configured.
+    ensure_pg_schema()
+
     # Ensure created_* fields are populated if absent.
     if asn.created_at is None:
         asn.created_at = now
@@ -139,6 +148,23 @@ def upsert_assumption_set(asn: AssumptionSet) -> AssumptionSet:
 
     registry["assumption_sets"] = items
     _save_registry_raw(registry)
+
+    # Also mirror the registry entry into Postgres when configured so that
+    # approvals and history can be queried relationally. We treat the JSON
+    # representation as the canonical payload and hash it for integrity.
+    try:
+        encoded = json.dumps(payload, sort_keys=True).encode("utf-8")
+        object_hash = sha256(encoded).hexdigest()
+        record_assumption_set(
+            set_id=asn.id,
+            product_id=asn.product_code,
+            status=asn.status,
+            object_path=ASSUMPTION_REGISTRY_OBJECT,
+            object_hash=object_hash,
+        )
+    except Exception:
+        # Postgres is best-effort for the POC; do not break on DB issues.
+        pass
 
     return asn
 
@@ -187,5 +213,12 @@ def approve_assumption_set(set_id: str, approved_by: str) -> Optional[Assumption
 
     registry["assumption_sets"] = items
     _save_registry_raw(registry)
+
+    # Mirror approval into Postgres when available.
+    try:
+        ensure_pg_schema()
+        record_approval(set_id=set_id, approved_by=approved_by)
+    except Exception:
+        pass
 
     return AssumptionSet.from_dict(found)
