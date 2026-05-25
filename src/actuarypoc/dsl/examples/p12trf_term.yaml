@@ -1,0 +1,73 @@
+product_type: p12trf_term
+
+# Derived from Pacific Life ICC12 P12TRF term product (P12TRF10/15/20/30)
+# This is a level-premium term to age 95 with guaranteed level periods of
+# 10/15/20/30 years and no cash values (NAIC nonforfeiture 9(G) exception).
+#
+# This DSL skeleton is intentionally minimal – it establishes the knobs we
+# know about from the actuarial memo + SOV so we can wire in tables later.
+
+meta:
+  form_ids:
+    - ICC12 P12TRF10
+    - ICC12 P12TRF15
+    - ICC12 P12TRF20
+    - ICC12 P12TRF30
+  maturity_age: 95
+  level_premium_durations: [10, 15, 20, 30]
+  min_face_amount: 25000
+
+  # Issue age ranges by level period (from memo)
+  issue_ages:
+    "10": { min: 18, max: 75 }
+    "15": { min: 18, max: 70 }
+    "20": { min: 18, max: 65 }
+    "30": { min: 18, max: 50 }
+
+  # Risk class mapping normalized from "Risk Class Mapping - Term - PET"
+  risk_class_mapping:
+    super_preferred_nonsmoker: SUPER_PREFERRED_NON_TOBACCO
+    preferred_plus_nonsmoker: PREFERRED_NON_TOBACCO
+    preferred_nonsmoker: STANDARD_PLUS_NON_TOBACCO
+    standard_nonsmoker: STANDARD_NON_TOBACCO
+    preferred_smoker: PREFERRED_TOBACCO
+    standard_smoker: STANDARD_TOBACCO
+    rated: RATED
+
+charges:
+  - name: risk_premium
+    description: |
+      Base term mortality charge per $1,000 of amount of insurance.
+      Uses 2017 Loaded CSO Smoker Distinct Ultimate (ANB), M/F, N/S as
+      specified in the actuarial memo. Actual table wiring is deferred to
+      the actuarial_tables connector.
+    formula: "face_amount / 1000 * q_2017_cso(age, duration, gender, smoker_class)"
+
+  - name: policy_fee
+    description: |
+      Uniform per-policy fee in all years, within the SOV-stated range of
+      $0–$120. The actual fee can be parameterized via product config.
+    formula: "policy_fee"
+
+  - name: waiver_of_premium_rider
+    optional: true
+    description: |
+      Waiver of Premium rider charge, present only if the R12TPF rider is
+      attached. Rider rating / factors are table-driven.
+    formula: "waiver_premium"
+
+credit_rates:
+  - rate_type: nonforfeiture
+    description: "Nonforfeiture discount rate used in testing (4.5%)."
+    expression: "0.045"
+
+  - rate_type: illustrated
+    description: |
+      Placeholder for a portfolio rate curve; even though the product has no
+      cash value, we keep an illustration rate for consistency with other
+      products / scenarios.
+    expression: "portfolio_rate_curve(term_year)"
+
+flags:
+  has_cash_value: false
+  convertible: true  # per SOV conversion period fields; details TBD

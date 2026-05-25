@@ -1,0 +1,4 @@
+policy_id,product_type,issue_age,premium,face_amount,interest_rate,mortality_table
+WL-1001,whole_life,35,2500,500000,0.045,2015-vbt
+UL-2042,universal_life,48,4000,750000,0.052,2015-vbt
+TERM-3301,term_20,41,900,250000,0.038,2015-vbt

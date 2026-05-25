@@ -1,0 +1,6 @@
+account_id,advisor_id,client_name,client_segment,email,last_touch_date,preferred_product
+ACCT-1001,ADV-01,Liam Carter,MassAffluent,liam.carter@example.com,2026-04-28,WL-ELITE
+ACCT-1002,ADV-02,Elena Patel,HighNetWorth,elena.patel@example.com,2026-04-22,UL-FLEX
+ACCT-1003,ADV-01,Carlos Ramirez,MassAffluent,carlos.ramirez@example.com,2026-05-01,TERM-20
+ACCT-1004,ADV-03,Mina Cho,HighNetWorth,mina.cho@example.com,2026-04-30,UL-RETIRE
+ACCT-1005,ADV-02,Aaron Blake,EmergingAffluent,aaron.blake@example.com,2026-04-18,WL-ELITE

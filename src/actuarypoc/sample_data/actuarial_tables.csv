@@ -1,0 +1,9 @@
+table_id,version,gender,age,mortality_rate,interest_rate_basis,load_factor
+VBT-2015,Base,Male,35,0.00072,0.035,0.002
+VBT-2015,Base,Female,35,0.00058,0.035,0.002
+VBT-2015,Base,Male,45,0.00134,0.035,0.0025
+VBT-2015,Base,Female,45,0.00101,0.035,0.0025
+VBT-2015,Preferred,Male,55,0.00205,0.037,0.0015
+VBT-2015,Preferred,Female,55,0.00172,0.037,0.0015
+VBT-2015,Standard,Male,65,0.00492,0.040,0.003
+VBT-2015,Standard,Female,65,0.00388,0.040,0.003

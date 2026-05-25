@@ -1,0 +1,11 @@
+product_type: whole_life
+charges:
+  - name: base_mortality
+    formula: "face_amount * mortality_rate(age, table='2015-vbt')"
+  - name: expense_charge
+    formula: "0.02 * premium"
+credit_rates:
+  - rate_type: guaranteed
+    expression: "min(portfolio_rate, 0.035)"
+  - rate_type: current
+    expression: "portfolio_rate - 0.003"

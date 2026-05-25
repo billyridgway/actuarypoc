@@ -1,0 +1,53 @@
+name: Build and push actuarypoc image
+
+on:
+  push:
+    branches:
+      - main
+      - feature/projection-trigger
+
+  workflow_dispatch: {}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute image tag suffix
+        id: vars
+        run: |
+          # Sanitize ref name for use as a Docker tag (replace slashes with dashes).
+          SAFE_REF="${GITHUB_REF_NAME//\//-}"
+          echo "ref_sanitized=${SAFE_REF}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/actuarypoc:latest
+            ghcr.io/${{ github.repository_owner }}/actuarypoc:${{ steps.vars.outputs.ref_sanitized }}
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/actuarypoc:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/actuarypoc:buildcache,mode=max

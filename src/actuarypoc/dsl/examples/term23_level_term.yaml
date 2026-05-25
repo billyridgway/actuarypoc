@@ -1,0 +1,29 @@
+product_type: term23_level_term
+
+# Derived from ICC23 SN 174 N Term23v3 (non-convertible) actuarial memo
+# High-level structure only – detailed rating/loads still to be wired to tables
+
+charges:
+  - name: risk_premium
+    # Uses 2017 CSO, age-nearest, gender- and smoker-distinct as specified in memo
+    # q_2017_cso is a placeholder for a table-driven lookup keyed by age, duration, gender, and smoker class
+    formula: "face_amount / 1000 * q_2017_cso(age, duration, gender, smoker_class)"
+
+  - name: expense_load
+    # Simple placeholder to capture per-policy + per-premium expenses
+    formula: "per_policy_expense + premium * expense_ratio"
+
+  - name: premium_change_load
+    # Captures the potential for premium changes after the initial level period (still conceptual)
+    formula: "max(0, adjusted_premium_after_level_period - initial_level_premium)"
+
+credit_rates:
+  # Term product has no cash values in the memo’s nonforfeiture testing, but we keep
+  # an explicit discount/illustration rate here so the projection engine can evolve
+  - rate_type: guaranteed
+    # 4.50% is used in the NAIC nonforfeiture testing per the memo
+    expression: "0.045"
+
+  - rate_type: illustrated
+    # Placeholder for a portfolio rate curve coming from the rate_curves connector
+    expression: "portfolio_rate_curve(term_year)"
