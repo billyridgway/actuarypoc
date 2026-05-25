@@ -11,7 +11,7 @@ Actuarial/illustration sandbox that wires together:
 The goal is to have a small but realistic playground for how a future
 illustration platform could hang together: PAS exports, filings, actuarial
 inputs, and CRM data flowing into MinIO, then through a DSL‑driven projection
-engine and orchestration layer (Dagster / Kubernetes Jobs).
+engine and Kubernetes Jobs (typically launched by the illustration operator).
 
 ---
 
@@ -31,14 +31,12 @@ This repo is intentionally **POC‑level** and opinionated around a single
   - An **assumptions pipeline** that uses OpenAI to extract an
     `AssumptionSet` from a filing / doc and stores it in a MinIO‑backed
     registry, with an explicit approval step.
-  - A minimal **Dagster** repo that exercises the above pieces as jobs,
-    schedules, and sensors.
 - **What it assumes exists**
   - MinIO or S3‑compatible storage reachable with credentials in `.env`.
   - (For LLM workflows) an OpenAI API key and model permissions compatible
     with the extraction helpers.
-  - For cluster use: a Kubernetes environment that can run the Dagster
-    deployment in `k8s/dagster-dev.yaml` and mount this repo.
+  - For cluster use: a Kubernetes environment that can run Kubernetes Jobs
+    (e.g. those launched by the illustration operator) against this image.
 - **Out of scope (for now)**
   - Production‑grade data governance, lineage tracking, and auditability.
   - Rich UI / quoting front‑end – this is backend plumbing.
@@ -97,23 +95,20 @@ POC adds an "assumption registry" pattern:
 This is what the illustration operator uses when you enable LLM extraction
 for a product.
 
-### 4. Orchestration with Dagster
+### 4. Orchestration with Kubernetes Jobs
 
-The `dagster/` repo wires the above into jobs/schedules:
+In the current architecture, orchestration is handled by Kubernetes Jobs
+rather than Dagster:
 
-- `sample_ingestion_job` – wraps the basic policy CSV ingest helper.
-- `p12trf_policies_job` – ingests the P12TRF term sample policies under the
-  `p12trf/` prefix.
-- `pas_export_job`, `actuarial_table_job`, `crm_data_job`, `rate_curve_job` –
-  keep the PAS/actuarial/CRM/rate prefixes fresh.
-- `projection_job` – reads the most recent PAS/actuarial/rate/CRM snapshots
-  and writes a projection summary JSON to the `projections/` prefix.
+- The illustration operator creates Jobs that:
+  - ingest or refresh sample data into MinIO when needed, then
+  - call the `actuarypoc` CLI (e.g. `project-minio`) to write projection
+    artefacts under the `projections/` prefix.
+- Assumptions extraction is also run via one‑shot Jobs that call the
+  `extract-assumptions-minio` CLI helper.
 
-A `pas_projection_sensor` watches for new PAS snapshots and triggers
-`projection_job` so that each export gets a projection summary.
-
-The `k8s/dagster-dev.yaml` manifest runs Dagster in‑cluster in the
-`illustrations-poc` namespace.
+Dagster was previously used as an orchestration POC; those manifests and
+jobs have been superseded by this Job‑driven flow.
 
 ---
 
@@ -132,7 +127,7 @@ src/actuarypoc
 └── storage/            # MinIO helpers
 ```
 
-Dagster lives under `dagster/`, and k8s manifests under `k8s/`.
+Kubernetes manifests live under `k8s/`.
 
 ---
 
@@ -176,46 +171,6 @@ Dagster lives under `dagster/`, and k8s manifests under `k8s/`.
 
 ---
 
-## Dagster orchestration scaffold
-
-A minimal Dagster repository lives under `dagster/`. Run any job locally with:
-
-```bash
-pip install -r requirements.txt
-export $(cat .env | xargs)
-dagster job execute -f dagster/repository.py -j sample_ingestion_job
-```
-
-You can also launch the Dagster UI with:
-
-```bash
-dagster dev -f dagster/repository.py
-```
-
-The sample schedules (`hourly_sample_ingest_schedule`,
-`daily_pas_export_schedule`, etc.) are registered but default to `STOPPED`
-so they won't burn storage—enable/disable with the standard Dagster CLI, e.g.:
-
-```bash
-dagster schedule start -f dagster/repository.py -n hourly_sample_ingest_schedule
-```
-
-A `pas_projection_sensor` watches for new PAS snapshots in MinIO and
-automatically kicks off `projection_job`, ensuring each fresh export gets a
-projection summary stored under `projections/`.
-
-### Cluster deployment
-
-`k8s/dagster-dev.yaml` runs Dagster inside the `illustrations-poc` namespace
-(NodePort `dagster-dev`, port `30300`). It clones this repo, installs deps,
-points at in-cluster MinIO, and exposes the Dagster UI/daemon for
-orchestration. To redeploy:
-
-```bash
-kubectl --kubeconfig ~/.openclaw/workspace/.kube/pi-k3s.yaml apply -f k8s/dagster-dev.yaml
-```
-
----
 
 ## Next Steps
 
@@ -223,5 +178,4 @@ kubectl --kubeconfig ~/.openclaw/workspace/.kube/pi-k3s.yaml apply -f k8s/dagste
 - Implement schema registry / mapping templates.
 - Expand DSL compiler + interpreter (LLM-assisted extraction).
 - Replace projection stub with actuarial-grade simulation engine.
-- Extend Dagster repository with additional assets/jobs + k8s deployment
-  manifests.
+- Extend the Kubernetes Job patterns and UI to cover more scenarios.

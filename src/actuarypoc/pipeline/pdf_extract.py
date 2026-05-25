@@ -2,11 +2,11 @@ from __future__ import annotations
 
 """Helpers to extract text from P12TRF filing PDFs.
 
-These functions are designed to run inside the Dagster pod in the k8s
-cluster. They assume that the P12TRF filings (ZIPs or PDFs) are present in
-(or mounted into) the container filesystem, typically via a git checkout
-of this repo plus a sibling/overlay directory that holds the SERFF
-packets.
+These functions are designed to run inside a Kubernetes pod (for example,
+within the same image used by the illustration Jobs). They assume that the
+P12TRF filings (ZIPs or PDFs) are present in (or mounted into) the
+container filesystem, typically via a git checkout of this repo plus a
+sibling/overlay directory that holds the SERFF packets.
 
 For the POC we treat this as a simple, reproducible way to:
 - read the key P12TRF filing PDFs

@@ -203,7 +203,7 @@ def build_p12trf_projection_summary(policies_prefix: str = "p12trf/") -> Dict[st
 
     # No dedicated P12TRF mortality surface wired yet; this relies on the
     # same deterministic engine behaviour as the CLI helper, but now runs
-    # entirely inside the Dagster/MinIO cluster path.
+    # entirely inside the Kubernetes/MinIO cluster path.
     engine = ProjectionEngine(formula)
     projection = engine.project(policy_record)
 
