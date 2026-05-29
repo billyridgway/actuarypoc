@@ -19,6 +19,8 @@ from actuarypoc.projection.service import (
     store_json_metadata,
     build_audit_from_summary,
     build_input_snapshot_from_summary,
+    build_audit_record_from_summary,
+    store_audit_record,
 )
 from actuarypoc.storage.postgres_client import record_illustration_run
 from actuarypoc.extract.assumptions_extractor import (
@@ -257,6 +259,23 @@ def project_minio(
         if input_snapshot_object_name:
             snapshot_doc = build_input_snapshot_from_summary(summary)
             store_json_metadata(snapshot_doc, input_snapshot_object_name)
+
+        # Persist a canonical AuditRecord when we have enough identifiers to
+        # write it meaningfully. This is a metadata-only document that avoids
+        # embedding raw PAS or projection data.
+        try:
+            product_code = (summary.get("inputs", {}) or {}).get("product_code") or (os.getenv("PRODUCT_ID") or "")
+            if run_id and product_code:
+                audit_record = build_audit_record_from_summary(
+                    summary,
+                    projection_object=key,
+                    audit_object=audit_object_name or None,
+                    input_snapshot_object=input_snapshot_object_name or None,
+                )
+                store_audit_record(audit_record, product_code=product_code, run_id=run_id)
+        except Exception:
+            # Do not fail the projection if AuditRecord writing fails.
+            pass
 
         # Best-effort: record this run in Postgres when configured so that
         # illustration history can be queried. We rely on the operator to

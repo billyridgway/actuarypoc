@@ -7,6 +7,7 @@ export interface RunDetail {
   assumptions: Assumptions;
   audit_sources: AuditSources;
   projection_summary: ProjectionSummary;
+  audit_summary?: AuditSummary | null;
 }
 
 export interface RunInfo {
@@ -104,6 +105,17 @@ export interface AuditSources {
     risk_mapping?: string;
     premiums?: string;
   };
+}
+
+export interface AuditSummary {
+  run_id: string;
+  audit_record_object: string;
+  product_code: string;
+  assumption_set_ids: string[];
+  dsl_file?: string | null;
+  engine_version?: string | null;
+  runner_image?: string | null;
+  created_at?: string | null;
 }
 
 export interface Assumptions {

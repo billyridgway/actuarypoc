@@ -1,0 +1,75 @@
+{
+  "product_definition_version": "1.0.0-poc",
+  "product_definition_id": "P12TRF-def-v1-poc",
+  "product_code": "P12TRF",
+  "carrier_id": "carrier-pacific-life-poc",  
+  "marketing_name": "Pacific Life ICC12 P12TRF Term (POC)",
+  "version": "1.0.0-poc",
+
+  "form_numbers": [
+    "ICC12 P12TRF (placeholder)"
+  ],
+
+  "jurisdictions": [
+    "US-POC"  
+  ],
+
+  "issue_age_limits": {
+    "min": 18,
+    "max": 75,
+    "note": "POC approximate range; not based on actual filed limits."
+  },
+
+  "underwriting_classes": [
+    "Preferred NT (POC)",
+    "Standard NT (POC)",
+    "Smoker (POC)"
+  ],
+
+  "riders": [
+    "waiver_of_premium (placeholder)",
+    "child_term (placeholder)"
+  ],
+
+  "dsl": {
+    "file": "src/actuarypoc/dsl/examples/p12trf_term.yaml",
+    "hash": "sha256-PLACEHOLDER",  
+    "meta": {
+      "premium_table_prefix": "premium_tables/P12TRF/ (planned)",
+      "source_filing_ids": [
+        "P12TRF-2020-01 (placeholder)"
+      ]
+    }
+  },
+
+  "premium_tables": [
+    {
+      "kind": "level_term_premium (POC synthetic)",
+      "object": "premium_tables/P12TRF/p12trf_premiums.synthetic.csv (planned mapping)",
+      "source_filing_id": "P12TRF-2020-01 (placeholder)"
+    }
+  ],
+
+  "assumption_sets": [
+    {
+      "id": "term-risk-class-mapping-v1",  
+      "source_filing_id": "P12TRF-2020-01 (placeholder)",
+      "role": "risk_class_mapping (POC)"
+    }
+  ],
+
+  "filing_refs": [
+    {
+      "filing_id": "P12TRF-2020-01 (placeholder)",
+      "serff_tracking_id": "SERFF-PLACEHOLDER",
+      "note": "No real SERFF filing wired yet; this is a POC stand-in."
+    }
+  ],
+
+  "illustration_config": {
+    "default_horizon_years": 40,
+    "allowed_modes": ["adhoc"],
+    "supports_pas_configmap": true,
+    "notes": "POC illustration configuration; may change as the platform evolves."
+  }
+}

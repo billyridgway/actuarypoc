@@ -138,6 +138,9 @@ Kubernetes manifests live under `k8s/`.
    cd actuarypoc
    python3 -m venv .venv && source .venv/bin/activate
    pip install -r requirements.txt
+   # For development and tests:
+   pip install pytest
+   pip install -e .
    ```
 
 2. **Configure environment**
@@ -168,6 +171,15 @@ Kubernetes manifests live under `k8s/`.
    # Project the first synthetic P12TRF policy using the p12trf_term DSL
    python -m actuarypoc.cli.main project-p12trf-sample
    ```
+
+---
+
+## Developer notes
+
+For a more complete dev setup (including running pytest and the project
+health CLI), see:
+
+- `docs/dev-setup.md`
 
 ---
 

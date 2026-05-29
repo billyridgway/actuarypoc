@@ -5,7 +5,7 @@ import os
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from actuarypoc.dsl.policy_dsl import load_formula
 from actuarypoc.projection.engine import ProjectionEngine
@@ -261,6 +261,12 @@ def build_projection_summary(pas_prefix: str = "pas_export/",
     engine = ProjectionEngine(formula, mortality_surface=mortality_surface)
     projection = engine.project(policy_record)
 
+    # Capture stable identifiers and environment hints alongside the
+    # projection summary. These are used by the AuditRecord writer and
+    # the RunDetail / UI layers but remain metadata-only.
+    run_id = os.getenv("RUN_ID") or None
+    env = os.getenv("ILLUSTRATION_ENVIRONMENT") or os.getenv("ENVIRONMENT") or None
+
     summary = {
         "generated_at": datetime.utcnow().isoformat(),
         "inputs": {
@@ -275,12 +281,14 @@ def build_projection_summary(pas_prefix: str = "pas_export/",
             "product_code": product_code,
             "formula_path": str(formula_path),
             "assumption_set_id": getattr(assumption_set, "id", None),
+            "run_id": run_id,
         },
         "metadata": {
             "actuarial_records_count": len(actuarial_records),
             "term23_actuarial_records_count": len(term23_actuarial_records),
             "rate_records_count": len(rate_records),
             "crm_records_count": len(crm_records),
+            "environment": env,
         },
         "warnings": warnings,
         "projection": asdict(projection),
@@ -439,3 +447,105 @@ def build_input_snapshot_from_summary(summary: Dict[str, Any]) -> Dict[str, Any]
         "generated_at": summary.get("generated_at"),
         "inputs": summary.get("inputs", {}),
     }
+
+
+def build_audit_record_from_summary(
+    summary: Dict[str, Any],
+    projection_object: str,
+    audit_object: Optional[str] = None,
+    input_snapshot_object: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build a canonical-ish AuditRecord from a projection summary.
+
+    This implementation focuses on the subset of fields that are safely
+    available today, as described in docs/audit-model.md:
+
+    - audit_version
+    - run_id (from RUN_ID env, when set)
+    - product_code (from summary inputs)
+    - environment (from ILLUSTRATION_ENVIRONMENT/ENVIRONMENT env, optional)
+    - engine_version (from ENGINE_VERSION/ILLUSTRATION_ENGINE_VERSION env)
+    - runner_image (from RUNNER_IMAGE env, optional)
+    - assumption_set_id (from summary inputs)
+    - dsl_file (from summary inputs.formula_path)
+    - input object keys (PAS, actuarial, rates, CRM, premium table)
+    - projection_object, audit_object, input_snapshot_object
+    - created_at / generated_at
+
+    It deliberately does **not** embed raw PAS data, projection arrays, or
+    any policyholder-level details. FilingRecord and ProductDefinition links
+    are left empty for now.
+    """
+
+    inputs = summary.get("inputs", {}) or {}
+
+    run_id = os.getenv("RUN_ID") or None
+    product_code = inputs.get("product_code") or None
+    environment = os.getenv("ILLUSTRATION_ENVIRONMENT") or os.getenv("ENVIRONMENT") or None
+    engine_version = os.getenv("ENGINE_VERSION") or os.getenv("ILLUSTRATION_ENGINE_VERSION") or None
+    runner_image = os.getenv("RUNNER_IMAGE") or None
+    assumption_set_id = inputs.get("assumption_set_id") or None
+    formula_path = inputs.get("formula_path") or None
+
+    created_at = summary.get("generated_at") or datetime.utcnow().isoformat()
+
+    record: Dict[str, Any] = {
+        "audit_version": "1.0",
+        "run_id": run_id,
+        "product": {
+            "product_code": product_code,
+            "product_definition_id": None,
+        },
+        "filings": [],  # FilingRecord links planned but not implemented
+        "assumptions": [],
+        "engine": {
+            "engine_version": engine_version,
+            "runner_image": runner_image,
+        },
+        "inputs": {
+            "pas_export": inputs.get("pas_object"),
+            "actuarial_tables": inputs.get("actuarial_object"),
+            "term23_actuarial": inputs.get("term23_actuarial_object"),
+            "rate_curves": inputs.get("rate_object"),
+            "crm_accounts": inputs.get("crm_object"),
+            "premium_table": inputs.get("premium_table_object"),
+        },
+        "outputs": {
+            "projection_object": projection_object,
+            "audit_object": audit_object,
+            "input_snapshot_object": input_snapshot_object,
+        },
+        "environment": environment,
+        "created_at": created_at,
+    }
+
+    if assumption_set_id:
+        record["assumptions"].append(
+            {
+                "assumption_set_id": assumption_set_id,
+                "role": None,
+                "status": None,
+            }
+        )
+
+    if formula_path:
+        record.setdefault("dsl", {})["file"] = formula_path
+
+    return record
+
+
+def store_audit_record(record: Dict[str, Any], product_code: str, run_id: str) -> str:
+    """Persist an AuditRecord JSON to MinIO under the canonical key.
+
+    The object key is:
+
+        audit/<product_code>/<run_id>/audit_record.json
+
+    Callers are expected to ensure that product_code and run_id are
+    meaningful and non-empty when this is invoked.
+    """
+
+    safe_product = product_code or "unknown-product"
+    safe_run_id = run_id or "unknown-run"
+    object_name = f"audit/{safe_product}/{safe_run_id}/audit_record.json"
+    return store_json_metadata(record, object_name)

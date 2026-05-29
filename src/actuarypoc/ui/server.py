@@ -219,6 +219,52 @@ def _load_pas_record(pas_ref: Optional[str], policy_id: Optional[str]) -> Option
     return records[0]
 
 
+def _build_audit_summary(product_code: str, run_id: str) -> Optional[Dict[str, Any]]:
+    """Load a small AuditRecord summary for a given product/run.
+
+    This reads ``audit/<product_code>/<run_id>/audit_record.json`` when
+    present and extracts only metadata fields that are safe for the
+    RunDetail/UI layer. Missing or invalid objects result in ``None``.
+    """
+
+    if not product_code or not run_id:
+        return None
+
+    object_name = f"audit/{product_code}/{run_id}/audit_record.json"
+
+    try:
+        record = _load_json_from_minio(object_name)
+    except HTTPException:
+        # No AuditRecord for this run – treat as "no audit" rather than
+        # failing the RunDetail API.
+        return None
+    except Exception:
+        return None
+
+    product = record.get("product") or {}
+    engine = record.get("engine") or {}
+    assumptions = record.get("assumptions") or []
+    dsl = record.get("dsl") or {}
+
+    assumption_ids: List[str] = []
+    for a in assumptions or []:
+        if isinstance(a, dict):
+            asn_id = a.get("assumption_set_id")
+            if asn_id:
+                assumption_ids.append(str(asn_id))
+
+    return {
+        "run_id": record.get("run_id") or run_id,
+        "audit_record_object": object_name,
+        "product_code": product.get("product_code") or product_code,
+        "assumption_set_ids": assumption_ids,
+        "dsl_file": dsl.get("file"),
+        "engine_version": engine.get("engine_version"),
+        "runner_image": engine.get("runner_image"),
+        "created_at": record.get("created_at") or record.get("generated_at"),
+    }
+
+
 def _build_run_detail(object_name: str, data: Dict[str, Any]) -> Dict[str, Any]:
     """Construct a RunDetail-style payload from a stored projection summary.
 
@@ -231,6 +277,9 @@ def _build_run_detail(object_name: str, data: Dict[str, Any]) -> Dict[str, Any]:
     projection = data.get("projection", {}) or {}
     metadata = data.get("metadata", {}) or {}
     warnings = data.get("warnings", []) or []
+
+    # Stable run identifier for downstream artefacts.
+    run_id = str(inputs.get("run_id") or object_name)
 
     # 1) Policy input via PAS
     pas_ref = inputs.get("pas_object")
@@ -416,7 +465,7 @@ def _build_run_detail(object_name: str, data: Dict[str, Any]) -> Dict[str, Any]:
 
     # 8) Build RunDetail payload
     run_info = {
-        "run_id": inputs.get("run_id") or object_name,
+        "run_id": run_id,
         # Execution status: this endpoint only reads existing snapshots, so
         # by the time we get here the run itself has succeeded. Trust
         # concerns are reported separately via trust_status.
@@ -426,7 +475,7 @@ def _build_run_detail(object_name: str, data: Dict[str, Any]) -> Dict[str, Any]:
         "product_code": product_code,
         "product_type": product_type,
         "policy_id": policy_id or policy_number,
-        "environment": "unknown",
+        "environment": metadata.get("environment") or "unknown",
         "triggered_by": inputs.get("triggered_by") or "unknown",
     }
 
@@ -490,6 +539,13 @@ def _build_run_detail(object_name: str, data: Dict[str, Any]) -> Dict[str, Any]:
         "mismatch": mismatch,
     }
 
+    # Optional AuditRecord summary derived from MinIO, when present. Missing
+    # or unreadable records simply result in a null audit_summary field.
+    try:
+        audit_summary = _build_audit_summary(product_code, run_id)
+    except Exception:
+        audit_summary = None
+
     audit_sources = {
         "objects": {
             "pas_object": pas_ref,
@@ -499,7 +555,7 @@ def _build_run_detail(object_name: str, data: Dict[str, Any]) -> Dict[str, Any]:
             "crm_object": inputs.get("crm_object"),
             "premium_table_object": premium_table_object,
             "projection_object": object_name,
-            "audit_object": None,
+            "audit_object": (audit_summary or {}).get("audit_record_object"),
         },
         "documents": {
             "actuarial_memo": source_docs.get("actuarial_memo"),
@@ -529,6 +585,7 @@ def _build_run_detail(object_name: str, data: Dict[str, Any]) -> Dict[str, Any]:
         "assumptions": assumptions_block,
         "audit_sources": audit_sources,
         "projection_summary": projection_summary,
+        "audit_summary": audit_summary,
     }
 
 

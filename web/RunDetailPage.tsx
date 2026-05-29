@@ -15,6 +15,7 @@ export const RunDetailPage: React.FC<RunDetailPageProps> = ({ runDetail }) => {
     assumptions,
     projection_summary,
     audit_sources,
+    audit_summary,
   } = runDetail;
 
   return (
@@ -49,6 +50,11 @@ export const RunDetailPage: React.FC<RunDetailPageProps> = ({ runDetail }) => {
       <section className="card">
         <h2>Projection Graphs</h2>
         <ProjectionGraphs summary={projection_summary} />
+      </section>
+
+      <section className="card">
+        <h2>Audit Information</h2>
+        <AuditSummarySection auditSummary={audit_summary} run={run} />
       </section>
 
       <section className="card">
@@ -405,6 +411,67 @@ const ProjectionGraphs: React.FC<{ summary: RunDetail["projection_summary"] }> =
         </span>
       </div>
     </div>
+  );
+};
+
+const AuditSummarySection: React.FC<{ auditSummary: RunDetail["audit_summary"]; run: RunDetail["run"] }> = ({
+  auditSummary,
+  run,
+}) => {
+  if (!auditSummary) {
+    return <div className="muted">No AuditRecord is available for this run.</div>;
+  }
+
+  const {
+    run_id,
+    product_code,
+    assumption_set_ids,
+    dsl_file,
+    engine_version,
+    runner_image,
+    audit_record_object,
+    created_at,
+  } = auditSummary;
+
+  const asnList = assumption_set_ids && assumption_set_ids.length > 0 ? assumption_set_ids.join(", ") : null;
+
+  return (
+    <table className="kv-table">
+      <tbody>
+        <tr>
+          <th>Run ID</th>
+          <td>{run_id || run.run_id}</td>
+        </tr>
+        <tr>
+          <th>Product Code</th>
+          <td>{product_code || run.product_code}</td>
+        </tr>
+        <tr>
+          <th>Assumption Set IDs</th>
+          <td>{asnList || <span className="muted">(none)</span>}</td>
+        </tr>
+        <tr>
+          <th>DSL File</th>
+          <td>{dsl_file || <span className="muted">(unknown)</span>}</td>
+        </tr>
+        <tr>
+          <th>Engine Version</th>
+          <td>{engine_version || run.engine_version || <span className="muted">(unknown)</span>}</td>
+        </tr>
+        <tr>
+          <th>Runner Image</th>
+          <td>{runner_image || <span className="muted">(unknown)</span>}</td>
+        </tr>
+        <tr>
+          <th>Audit Record Object Key</th>
+          <td>{audit_record_object || <span className="muted">(none)</span>}</td>
+        </tr>
+        <tr>
+          <th>Audit Created At</th>
+          <td>{created_at || <span className="muted">(unknown)</span>}</td>
+        </tr>
+      </tbody>
+    </table>
   );
 };
 

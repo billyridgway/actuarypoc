@@ -3,9 +3,12 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from typing import Any, Dict
+import sys
+import types
 
 from fastapi.testclient import TestClient
 
+sys.modules.setdefault("psycopg", types.SimpleNamespace())
 from actuarypoc.ui.server import app
 
 
@@ -124,6 +127,7 @@ credit_rates: []
           "policy_id": "P12TRF100001",
           "product_id": "P12TRF",
           "product_code": "P12TRF",
+          "run_id": "run-123",
           "formula_path": str(formula_path),
           "assumption_set_id": None,
       },
@@ -141,9 +145,28 @@ credit_rates: []
       },
   }
 
+  audit_record = {
+      "audit_version": "1.0",
+      "run_id": "run-123",
+      "product": {"product_code": "P12TRF", "product_definition_id": None},
+      "assumptions": [
+          {"assumption_set_id": "asn-1", "role": None, "status": None},
+      ],
+      "engine": {"engine_version": "test-engine", "runner_image": "test-image"},
+      "inputs": {},
+      "outputs": {
+          "projection_object": "projections/test_projection.json",
+          "audit_object": None,
+          "input_snapshot_object": None,
+      },
+      "environment": "test",
+      "created_at": "2026-05-25T12:34:56Z",
+  }
+
   objects = {
       "premium_tables/p12trf/prem.csv": premium_csv.encode("utf-8"),
       "projections/test_projection.json": json.dumps(projection_payload).encode("utf-8"),
+      "audit/P12TRF/run-123/audit_record.json": json.dumps(audit_record).encode("utf-8"),
   }
 
   fake_client = _FakeMinioClient(objects)
@@ -186,3 +209,19 @@ credit_rates: []
 
   # Projection summary should have years populated.
   assert data["projection_summary"]["years"] == [1, 2]
+
+  # Audit summary should be populated from the AuditRecord JSON.
+  audit_summary = data.get("audit_summary")
+  assert audit_summary is not None
+  assert audit_summary["run_id"] == "run-123"
+  assert audit_summary["product_code"] == "P12TRF"
+  assert audit_summary["assumption_set_ids"] == ["asn-1"]
+  assert audit_summary["engine_version"] == "test-engine"
+  assert audit_summary["runner_image"] == "test-image"
+  assert audit_summary["audit_record_object"] == "audit/P12TRF/run-123/audit_record.json"
+
+  # Audit sources should now include the AuditRecord object key.
+  assert (
+      data["audit_sources"]["objects"].get("audit_object")
+      == "audit/P12TRF/run-123/audit_record.json"
+  )
