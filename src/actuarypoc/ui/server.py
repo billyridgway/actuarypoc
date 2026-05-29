@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
@@ -531,37 +531,31 @@ def _build_run_detail(object_name: str, data: Dict[str, Any]) -> Dict[str, Any]:
 
 @app.get("/", response_class=HTMLResponse)
 @app.get("/ui", response_class=HTMLResponse)
-async def ui() -> HTMLResponse:
-    """Very simple HTML UI for browsing projections."""
-    objs = _list_projection_objects()
-    items = "".join(
-        f'<li><a href="/ui/view?key={name}">{name}</a></li>' for name in objs
-    ) or "<li><em>No projections found.</em></li>"
-    html = f"""
-    <html>
-      <head>
-        <title>ActuaryPOC Projection Viewer</title>
-        <style>
-          body {{ font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif; margin: 2rem; }}
-          code {{ background: #f5f5f5; padding: 0.1rem 0.3rem; }}
-        </style>
-      </head>
-      <body>
-        <h1>ActuaryPOC Projection Viewer</h1>
-        <p>Available projection objects in MinIO (<code>projections/</code> prefix):</p>
-        <ul>
-          {items}
-        </ul>
-      </body>
-    </html>
+async def ui_root() -> HTMLResponse:
+    """Redirect the top-level UI to the React app under /web.
+
+    If projections exist, we default to the most recent object's key so that
+    /ui immediately opens a concrete run in the SPA.
     """
-    return HTMLResponse(content=html)
+    from urllib.parse import quote
+
+    objs = _list_projection_objects()
+    if objs:
+        latest = objs[-1]
+        url = f"/web?key={quote(latest)}"
+    else:
+        url = "/web"
+
+    return RedirectResponse(url=url, status_code=307)
 
 
-@app.get("/", response_class=HTMLResponse)
-@app.get("/ui", response_class=HTMLResponse)
-async def ui(policy_id: Optional[str] = Query(None, description="Filter by policy_id")) -> HTMLResponse:
-    """HTML UI for browsing projections, optionally filtered by policy_id."""
+@app.get("/ui/list", response_class=HTMLResponse)
+async def ui_list(policy_id: Optional[str] = Query(None, description="Filter by policy_id")) -> HTMLResponse:
+    """Basic HTML listing of projections, kept as a debugging aid.
+
+    The richer, production-oriented UI is served by the React app under /web;
+    this endpoint remains as a quick way to eyeball available objects.
+    """
     objs = _list_projection_objects()
 
     summaries = []
@@ -574,11 +568,11 @@ async def ui(policy_id: Optional[str] = Query(None, description="Filter by polic
         summaries.append(summary)
 
     if not summaries:
-        rows = "<tr><td colspan='4'><em>No projections found.</em></td></tr>"
+        rows = "<tr><td colspan='5'><em>No projections found.</em></td></tr>"
     else:
         rows = "".join(
             f"<tr>"
-            f"<td><a href='/ui/view?key={s['object_name']}'>{s['object_name']}</a></td>"
+            f"<td><a href='/web?key={s['object_name']}'>{s['object_name']}</a></td>"
             f"<td>{s.get('policy_id') or ''}</td>"
             f"<td>{s.get('product_code') or ''}</td>"
             f"<td>{s.get('assumption_set_id') or ''}</td>"
@@ -601,10 +595,11 @@ async def ui(policy_id: Optional[str] = Query(None, description="Filter by polic
       </head>
       <body>
         <h1>ActuaryPOC Projection Viewer</h1>
-        <form method="get" action="/ui">
+        <p>This is the legacy HTML listing. For the full React UI, go to <code>/web?key=...</code>.</p>
+        <form method="get" action="/ui/list">
           <label>Filter by policy_id: <input type="text" name="policy_id" value="{policy_id or ''}" /></label>
           <button type="submit">Apply</button>
-          <a href="/ui">Clear</a>
+          <a href="/ui/list">Clear</a>
         </form>
         <table>
           <thead>
