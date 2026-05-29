@@ -18,14 +18,12 @@ spec:
       restartPolicy: Always
       containers:
         - name: projection-ui
-          image: python:3.11-slim
+          image: ghcr.io/billyridgway/actuarypoc:main
           ports:
             - containerPort: 8080
           env:
-            - name: GIT_REF
-              value: "main"
             - name: PYTHONPATH
-              value: /app/src
+              value: /opt/dagster/app/src
             - name: MINIO_ENDPOINT
               value: "minio.minio-system.svc.cluster.local:9000"
             - name: MINIO_ACCESS_KEY
@@ -46,25 +44,13 @@ spec:
                 secretKeyRef:
                   name: openai-api-key
                   key: api-key
-          command: ["/bin/sh", "-c"]
+          command: ["uvicorn"]
           args:
-            - |
-              set -e
-              export DEBIAN_FRONTEND=noninteractive
-              apt-get update && apt-get install -y git nodejs npm
-              rm -rf /app && git clone https://github.com/billyridgway/actuarypoc.git /app
-              cd /app
-              git checkout ${GIT_REF:-main} >/dev/null
-              pip install --no-cache-dir -r requirements.txt
-              if [ -d web ]; then
-                cd web
-                npm install
-                npm run build
-                cd /app
-              else
-                echo "[projection-ui] 'web/' directory not found in repo; skipping React build."
-              fi
-              uvicorn actuarypoc.ui.server:app --host 0.0.0.0 --port 8080
+            - actuarypoc.ui.server:app
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8080"
 ---
 apiVersion: v1
 kind: Service
