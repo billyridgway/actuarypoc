@@ -17,8 +17,11 @@ app = FastAPI(title="ActuaryPOC Projection Viewer", version="0.1.0")
 
 
 # Mount built React UI (if present) under /web. This expects `vite build`
-# to have been run in the `web/` directory, producing `web/dist`.
-_DIST_DIR = Path(__file__).resolve().parents[2] / "web" / "dist"
+# to have been run in the `web/` directory at the project root, producing
+# `web/dist`. In the Docker image we build the UI from `/opt/dagster/app/web`,
+# so at runtime the dist directory is `/opt/dagster/app/web/dist`.
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_DIST_DIR = _PROJECT_ROOT / "web" / "dist"
 if _DIST_DIR.exists():  # pragma: no cover - environment dependent
     app.mount("/web", StaticFiles(directory=_DIST_DIR, html=True), name="web")
 
