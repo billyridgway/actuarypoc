@@ -11,6 +11,8 @@ from actuarypoc.connectors.base import CSVConnector
 from actuarypoc.dsl.policy_dsl import load_formula
 from actuarypoc.pipeline.ingest import ingest_csv
 from actuarypoc.projection.engine import ProjectionEngine
+from actuarypoc.projection.mortality import build_term23_surface
+from actuarypoc.projection.premium import load_premium_table_from_csv, PremiumLookupService, select_face_band
 from actuarypoc.projection.service import (
     build_projection_summary,
     store_projection,
@@ -101,8 +103,94 @@ def project_p12trf_sample(years: int = 40):
         raise typer.Exit("No records found in policies_p12trf.csv")
 
     formula = load_formula(str(dsl_path))
-    engine = ProjectionEngine(formula)
+
+    # Try to build a Term23 mortality surface from the bundled sample data so
+    # that the P12TRF sample projection uses real q_x-driven survival instead
+    # of a flat approximation. If the file is missing we gracefully fall back
+    # to the original behaviour.
+    term23_path = base / "sample_data" / "actuarial_tables_term23.csv"
+    term23_records = list(CSVConnector(str(term23_path)).fetch()) if term23_path.exists() else []
+    mortality_surface = build_term23_surface(term23_records) if term23_records else None
+
+    # Optional premium lookup: use a synthetic P12TRF grid for POC wiring so
+    # we can compare table-derived premiums against the PAS modal premium.
+    premium_table = None
+    premium_sample_rel = (formula.meta or {}).get("premium_table_sample_csv") if getattr(formula, "meta", None) else None
+    if premium_sample_rel:
+        premium_csv = base / premium_sample_rel
+        if premium_csv.exists():
+            premium_table = load_premium_table_from_csv(str(premium_csv))
+
+    premium_service = PremiumLookupService(premium_table) if premium_table is not None else None
+
+    # Derive a face band from DSL/meta configuration so banding remains
+    # data-driven and product-specific thresholds do not leak into Python.
+    try:
+        face_amount = float(record.get("face_amount", 0))
+    except (TypeError, ValueError):
+        face_amount = 0.0
+    face_band = select_face_band(getattr(formula, "meta", {}) or {}, face_amount) or 1
+
+    warnings: list[str] = []
+
+    # Compute a table-derived premium when we have a premium grid available.
+    if premium_service is not None:
+        try:
+            issue_age = int(record.get("issue_age", 0))
+        except (TypeError, ValueError):
+            issue_age = 0
+        gender = str(record.get("gender", ""))
+        risk_class = str(record.get("risk_class", ""))
+        try:
+            level_period = int(record.get("level_period", 0))
+        except (TypeError, ValueError):
+            level_period = 0
+
+        table_p_per_1000 = premium_service.premium_per_1000(
+            issue_age=issue_age,
+            gender=gender,
+            risk_class=risk_class,
+            face_band=face_band,
+            level_period=level_period,
+        )
+
+        if table_p_per_1000 is not None and face_amount > 0:
+            annual_table_premium = float(table_p_per_1000) * (face_amount / 1000.0)
+            # Simple POC modalisation: assume MONTHLY = annual / 12 when
+            # premium_mode is MONTHLY; otherwise treat PAS modal_premium as
+            # already annual.
+            mode = str(record.get("premium_mode", "")).upper()
+            if mode == "MONTHLY":
+                expected_modal = annual_table_premium / 12.0
+            else:
+                expected_modal = annual_table_premium
+
+            try:
+                pas_modal = float(record.get("modal_premium", 0.0))
+            except (TypeError, ValueError):
+                pas_modal = 0.0
+
+            diff = abs(expected_modal - pas_modal)
+            material_threshold = max(0.01, 0.001 * expected_modal)
+            if diff > material_threshold:
+                warnings.append(
+                    "premium_mismatch: table-derived expected_modal={} vs PAS modal_premium={}".format(
+                        round(expected_modal, 6), round(pas_modal, 6)
+                    )
+                )
+
+            # Precedence rule for POC: use table premium for projections when
+            # available, but keep PAS modal premium as an observed input.
+            record["premium"] = annual_table_premium
+
+    engine = ProjectionEngine(formula, mortality_surface=mortality_surface)
     result = engine.project(record, horizon=years)
+
+    # Surface any premium warnings before the raw result so humans can see
+    # why the projection may differ from PAS inputs.
+    for msg in warnings:
+        typer.echo(f"WARNING: {msg}")
+
     typer.echo(result)
 
 

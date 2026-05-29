@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from actuarypoc.dsl.policy_dsl import CreditRate, PolicyFormula
-from actuarypoc.projection.mortality import Term23MortalitySurface
+from actuarypoc.projection.mortality import Term23MortalitySurface, resolve_mortality_risk_class
 
 
 @dataclass
@@ -78,7 +78,11 @@ class ProjectionEngine:
         # from the policy_record and pull q_x per duration when a Term23 surface exists.
         gender = str(policy_record.get("gender", "Male"))
         smoker_class = str(policy_record.get("smoker_class", "Nontobacco"))
-        risk_class = str(policy_record.get("risk_class", "Standard"))
+        raw_risk_class = str(policy_record.get("risk_class", "Standard"))
+        # Map raw PAS / product risk classes into the labels expected by the
+        # mortality surface using any DSL-provided mapping. This keeps product
+        # specifics in DSL/meta instead of Python.
+        risk_class = resolve_mortality_risk_class(self.formula, raw_risk_class)
 
         # Face banding per memo: 1: 200k-999,999; 2: 1M-2,999,999; 3: 3M-50M
         try:

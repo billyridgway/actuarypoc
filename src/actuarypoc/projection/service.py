@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Tuple
 from actuarypoc.dsl.policy_dsl import load_formula
 from actuarypoc.projection.engine import ProjectionEngine
 from actuarypoc.projection.mortality import build_term23_surface
+from actuarypoc.projection.premium import PremiumLookupService, build_premium_table, select_face_band
 from actuarypoc.config.assumptions import get_current_assumption_for_product
 from actuarypoc.storage.minio_client import get_bucket_name, get_minio_client
 
@@ -151,6 +152,112 @@ def build_projection_summary(pas_prefix: str = "pas_export/",
     if (code.startswith("TERM23") or code.startswith("TERM-23")) and term23_actuarial_records:
         mortality_surface = build_term23_surface(term23_actuarial_records)
 
+    # Optional premium lookup via a generic premium_table meta block. This is
+    # intentionally product-agnostic: Python reads meta["premium_table"] and
+    # applies it without knowing which product is being projected.
+    warnings: list[str] = []
+    premium_table_cfg = getattr(formula, "meta", None) or {}
+    premium_table_cfg = premium_table_cfg.get("premium_table") if isinstance(premium_table_cfg, dict) else None
+
+    premium_service: PremiumLookupService | None = None
+    premium_table_object: str | None = None
+    if isinstance(premium_table_cfg, dict) and premium_table_cfg.get("source") == "minio" and premium_table_cfg.get("format") == "csv":
+        prefix = premium_table_cfg.get("prefix")
+        if prefix:
+            client = get_minio_client()
+            bucket = get_bucket_name()
+            # Reuse the same "latest object under prefix" convention as other
+            # inputs, but interpret the payload as CSV instead of JSON.
+            latest = None
+            for obj in client.list_objects(bucket, prefix=prefix, recursive=True):
+                if latest is None or obj.last_modified > latest.last_modified:
+                    latest = obj
+            if latest is not None:
+                premium_table_object = latest.object_name
+                resp = client.get_object(bucket, latest.object_name)
+                try:
+                    import csv
+                    import io as _io
+
+                    text = resp.read().decode("utf-8", errors="ignore")
+                    reader = csv.DictReader(_io.StringIO(text))
+                    records = list(reader)
+                finally:
+                    resp.close()
+                    resp.release_conn()
+
+                table = build_premium_table(records)
+                if table is not None:
+                    premium_service = PremiumLookupService(table)
+
+    # If a premium table is available, compute a table-derived premium,
+    # compare it to PAS modal_premium, and, when materially different,
+    # emit a warning while using the table premium for projections.
+    if premium_service is not None:
+        try:
+            face_amount = float(policy_record.get("face_amount", 0) or 0.0)
+        except (TypeError, ValueError):
+            face_amount = 0.0
+
+        face_band = select_face_band(getattr(formula, "meta", {}) or {}, face_amount)
+
+        if face_band is not None and face_amount > 0:
+            try:
+                issue_age = int(policy_record.get("issue_age", 0) or 0)
+            except (TypeError, ValueError):
+                issue_age = 0
+            gender = str(policy_record.get("gender", ""))
+            risk_class = str(policy_record.get("risk_class", ""))
+            try:
+                level_period = int(policy_record.get("level_period", 0) or 0)
+            except (TypeError, ValueError):
+                level_period = 0
+
+            table_p_per_1000 = premium_service.premium_per_1000(
+                issue_age=issue_age,
+                gender=gender,
+                risk_class=risk_class,
+                face_band=face_band,
+                level_period=level_period,
+            )
+
+            if table_p_per_1000 is not None:
+                annual_table_premium = float(table_p_per_1000) * (face_amount / 1000.0)
+
+                basis = str(premium_table_cfg.get("basis", "annual_per_1000"))
+                modalization = premium_table_cfg.get("modalization", {}) if isinstance(premium_table_cfg, dict) else {}
+
+                mode = str(policy_record.get("premium_mode", "")).upper()
+                rule = str(modalization.get(mode, "none")).lower()
+
+                # Currently only one basis is supported; others would be added
+                # here in a data-driven way.
+                annual = annual_table_premium if basis == "annual_per_1000" else annual_table_premium
+
+                if rule == "divide_by_12":
+                    expected_modal = annual / 12.0
+                else:
+                    expected_modal = annual
+
+                try:
+                    pas_modal = float(policy_record.get("modal_premium", 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    pas_modal = 0.0
+
+                diff = abs(expected_modal - pas_modal)
+                material_threshold = max(0.01, 0.001 * expected_modal)
+                if diff > material_threshold:
+                    warnings.append(
+                        "premium_mismatch: table-derived expected_modal={} vs PAS modal_premium={}".format(
+                            round(expected_modal, 6), round(pas_modal, 6)
+                        )
+                    )
+
+                # Precedence rule for POC/operator path: use table premium for
+                # projections when available, but keep PAS modal premium as an
+                # observed input in the summary.
+                policy_record["premium"] = annual
+
     engine = ProjectionEngine(formula, mortality_surface=mortality_surface)
     projection = engine.project(policy_record)
 
@@ -162,6 +269,7 @@ def build_projection_summary(pas_prefix: str = "pas_export/",
             "rate_object": rate_obj,
             "crm_object": crm_obj,
             "term23_actuarial_object": term23_actuarial_obj,
+            "premium_table_object": premium_table_object,
             "policy_id": policy_record.get("policy_id"),
             "product_id": product_id,
             "product_code": product_code,
@@ -174,6 +282,7 @@ def build_projection_summary(pas_prefix: str = "pas_export/",
             "rate_records_count": len(rate_records),
             "crm_records_count": len(crm_records),
         },
+        "warnings": warnings,
         "projection": asdict(projection),
     }
     return summary
@@ -201,16 +310,27 @@ def build_p12trf_projection_summary(policies_prefix: str = "p12trf/") -> Dict[st
     formula_path = _BASE_DSL_DIR / "p12trf_term.yaml"
     formula = load_formula(str(formula_path))
 
-    # No dedicated P12TRF mortality surface wired yet; this relies on the
-    # same deterministic engine behaviour as the CLI helper, but now runs
-    # entirely inside the Kubernetes/MinIO cluster path.
-    engine = ProjectionEngine(formula)
+    # Reuse the Term23 actuarial slice (when present) to drive a thin 2017 CSO
+    # mortality surface for the P12TRF sample as well. This keeps the P12TRF
+    # projection consistent with the CLI helper and avoids a flat
+    # survival=1 approximation.
+    try:
+        term23_actuarial_obj, term23_actuarial_records = _get_records("actuarial_tables_term23/")
+    except RuntimeError:
+        term23_actuarial_obj, term23_actuarial_records = None, []
+
+    mortality_surface = None
+    if term23_actuarial_records:
+        mortality_surface = build_term23_surface(term23_actuarial_records)
+
+    engine = ProjectionEngine(formula, mortality_surface=mortality_surface)
     projection = engine.project(policy_record)
 
     summary = {
         "generated_at": datetime.utcnow().isoformat(),
         "inputs": {
             "p12trf_policies_object": policies_obj,
+            "term23_actuarial_object": term23_actuarial_obj,
             "policy_number": policy_record.get("policy_number"),
             "product_type": policy_record.get("product_type"),
             "formula_path": str(formula_path),
@@ -300,6 +420,7 @@ def build_audit_from_summary(summary: Dict[str, Any]) -> Dict[str, Any]:
 
     inputs = summary.get("inputs", {})
     metadata = summary.get("metadata", {})
+    warnings = summary.get("warnings", [])
     engine_version = os.getenv("ENGINE_VERSION") or os.getenv("ILLUSTRATION_ENGINE_VERSION")
 
     return {
@@ -307,6 +428,7 @@ def build_audit_from_summary(summary: Dict[str, Any]) -> Dict[str, Any]:
         "engine_version": engine_version,
         "inputs": inputs,
         "metadata": metadata,
+        "warnings": warnings,
     }
 
 

@@ -4,12 +4,23 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
 
 from actuarypoc.storage.minio_client import get_minio_client, get_bucket_name
 from actuarypoc.config.assumptions import list_assumption_sets, approve_assumption_set
+from actuarypoc.dsl.policy_dsl import load_formula
+from actuarypoc.projection.premium import PremiumLookupService, build_premium_table, select_face_band
 
 
 app = FastAPI(title="ActuaryPOC Projection Viewer", version="0.1.0")
+
+
+# Mount built React UI (if present) under /web. This expects `vite build`
+# to have been run in the `web/` directory, producing `web/dist`.
+_DIST_DIR = Path(__file__).resolve().parents[2] / "web" / "dist"
+if _DIST_DIR.exists():  # pragma: no cover - environment dependent
+    app.mount("/web", StaticFiles(directory=_DIST_DIR, html=True), name="web")
 
 
 @app.get("/health")
@@ -62,6 +73,33 @@ def _load_projection_summary(object_name: str) -> Optional[Dict[str, Any]]:
     }
 
 
+def _load_json_from_minio(object_name: str) -> Dict[str, Any]:
+    """Load a JSON object from MinIO by key.
+
+    Raises HTTPException if the object cannot be found or parsed.
+    """
+
+    import json
+    from json import JSONDecodeError
+
+    client = get_minio_client()
+    bucket = get_bucket_name()
+    try:
+        response = client.get_object(bucket, object_name)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=404, detail=f"Object not found: {object_name}") from exc
+
+    try:
+        data = json.loads(response.read().decode("utf-8"))
+    except JSONDecodeError as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Invalid JSON object: {object_name}") from exc
+    finally:
+        response.close()
+        response.release_conn()
+
+    return data
+
+
 @app.get("/projections")
 def list_projections() -> Dict[str, Any]:
     """Return a list of available projection JSON objects in MinIO."""
@@ -91,6 +129,404 @@ def get_projection(object_name: str) -> Dict[str, Any]:
         response.release_conn()
 
     return data
+
+
+@app.get("/api/run-detail/{object_name:path}")
+def api_run_detail(object_name: str) -> Dict[str, Any]:
+    """Return a RunDetail-style JSON payload for a given projection object.
+
+    This is a UI-facing endpoint: it interprets existing projection snapshots
+    and associated inputs; it does not trigger new projections.
+    """
+
+    if not object_name.startswith("projections/"):
+        object_name = f"projections/{object_name}"
+
+    data = get_projection(object_name)
+    return _build_run_detail(object_name, data)
+
+
+@app.get("/api/run-detail")
+def api_run_detail_query(key: str = Query(..., description="Projection object key under projections/")) -> Dict[str, Any]:
+    """Query-param variant of run-detail endpoint.
+
+    This is friendlier for front-ends that want to pass an object key as a
+    query parameter instead of part of the path.
+    """
+
+    object_name = key
+    if not object_name.startswith("projections/"):
+        object_name = f"projections/{object_name}"
+
+    data = get_projection(object_name)
+    return _build_run_detail(object_name, data)
+
+
+def _load_pas_record(pas_ref: Optional[str], policy_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Load a single PAS record used for a run, if available.
+
+    pas_ref is either a MinIO object key or a file:// path to a local JSON
+    document with a top-level "records" list.
+    """
+
+    if not pas_ref:
+        return None
+
+    import json
+    from json import JSONDecodeError
+    import os
+
+    # File-based PAS snapshot
+    if pas_ref.startswith("file://"):
+        path = pas_ref[len("file://") :]
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, JSONDecodeError):  # pragma: no cover - defensive
+            return None
+    else:
+        # MinIO-based PAS snapshot
+        client = get_minio_client()
+        bucket = get_bucket_name()
+        try:
+            response = client.get_object(bucket, pas_ref)
+        except Exception:  # noqa: BLE001
+            return None
+        try:
+            payload = json.loads(response.read().decode("utf-8"))
+        except JSONDecodeError:  # noqa: BLE001
+            return None
+        finally:
+            response.close()
+            response.release_conn()
+
+    records = payload.get("records", []) if isinstance(payload, dict) else []
+    if not records:
+        return None
+
+    # Prefer an exact policy_id match when available.
+    if policy_id:
+        for rec in records:
+            if str(rec.get("policy_id")) == str(policy_id) or str(rec.get("policy_number")) == str(policy_id):
+                return rec
+
+    # Fallback: just take the first record.
+    return records[0]
+
+
+def _build_run_detail(object_name: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    """Construct a RunDetail-style payload from a stored projection summary.
+
+    This endpoint is intentionally read-only and UI-focused: it does not
+    write anything back to MinIO; it interprets existing projection snapshots
+    and associated inputs.
+    """
+
+    inputs = data.get("inputs", {}) or {}
+    projection = data.get("projection", {}) or {}
+    metadata = data.get("metadata", {}) or {}
+    warnings = data.get("warnings", []) or []
+
+    # 1) Policy input via PAS
+    pas_ref = inputs.get("pas_object")
+    policy_id = inputs.get("policy_id")
+    pas_rec = _load_pas_record(pas_ref, policy_id)
+
+    policy_number = str(pas_rec.get("policy_number") if pas_rec else policy_id or "")
+    product_code = str(inputs.get("product_code") or pas_rec.get("product_code") if pas_rec else "")
+    product_type = str(pas_rec.get("product_type") if pas_rec else "")
+
+    def _num(rec: Optional[Dict[str, Any]], key: str, default: float = 0.0) -> float:
+        if not rec:
+            return default
+        try:
+            return float(rec.get(key, default) or default)
+        except (TypeError, ValueError):
+            return default
+
+    def _int(rec: Optional[Dict[str, Any]], key: str, default: int = 0) -> int:
+        if not rec:
+            return default
+        try:
+            return int(rec.get(key, default) or default)
+        except (TypeError, ValueError):
+            return default
+
+    issue_age = _int(pas_rec, "issue_age", 0)
+    gender = str(pas_rec.get("gender") if pas_rec else "")
+    smoker_class = str(pas_rec.get("smoker_class") if pas_rec else "")
+    risk_class = str(pas_rec.get("risk_class") if pas_rec else "")
+    face_amount = _num(pas_rec, "face_amount", 0.0)
+    level_period = _int(pas_rec, "level_period", 0)
+    premium_mode = str(pas_rec.get("premium_mode") if pas_rec else "")
+    pas_modal_premium = _num(pas_rec, "modal_premium", 0.0)
+
+    # 2) Formula + meta for premium table + docs
+    formula_path = inputs.get("formula_path")
+    formula_meta: Dict[str, Any] = {}
+    try:
+        if formula_path:
+            formula = load_formula(str(formula_path))
+            formula_meta = getattr(formula, "meta", {}) or {}
+    except Exception:
+        formula_meta = {}
+
+    premium_table_cfg = formula_meta.get("premium_table") if isinstance(formula_meta, dict) else None
+
+    premium_service: Optional[PremiumLookupService] = None
+    premium_table_object: Optional[str] = inputs.get("premium_table_object")
+
+    # Build a premium lookup service from MinIO when premium_table is configured.
+    if isinstance(premium_table_cfg, dict) and premium_table_cfg.get("source") == "minio" and premium_table_cfg.get("format") == "csv":
+        import csv
+        import io as _io
+
+        client = get_minio_client()
+        bucket = get_bucket_name()
+
+        # Prefer the exact object recorded in the projection summary when present.
+        obj_name = premium_table_object
+        if not obj_name:
+            prefix = premium_table_cfg.get("prefix")
+            if prefix:
+                latest = None
+                for obj in client.list_objects(bucket, prefix=prefix, recursive=True):
+                    if latest is None or obj.last_modified > latest.last_modified:
+                        latest = obj
+                if latest is not None:
+                    obj_name = latest.object_name
+
+        if obj_name:
+            try:
+                response = client.get_object(bucket, obj_name)
+                text = response.read().decode("utf-8", errors="ignore")
+                reader = csv.DictReader(_io.StringIO(text))
+                records = list(reader)
+                table = build_premium_table(records)
+                if table is not None:
+                    premium_service = PremiumLookupService(table)
+                    premium_table_object = obj_name
+            except Exception:
+                premium_service = None
+            finally:
+                try:
+                    response.close()
+                    response.release_conn()
+                except Exception:
+                    pass
+
+    # 3) Premium reconciliation
+    table_p_per_1000: Optional[float] = None
+    annual_table_premium: Optional[float] = None
+    expected_modal: Optional[float] = None
+    mismatch: Optional[Dict[str, Any]] = None
+
+    if premium_service is not None and face_amount > 0:
+        face_band = select_face_band(formula_meta, face_amount)
+        if face_band is not None:
+            table_p_per_1000 = premium_service.premium_per_1000(
+                issue_age=issue_age,
+                gender=gender,
+                risk_class=risk_class,
+                face_band=face_band,
+                level_period=level_period,
+            )
+            if table_p_per_1000 is not None:
+                annual_table_premium = float(table_p_per_1000) * (face_amount / 1000.0)
+
+                basis = str(premium_table_cfg.get("basis", "annual_per_1000")) if premium_table_cfg else "annual_per_1000"
+                modalization = premium_table_cfg.get("modalization", {}) if isinstance(premium_table_cfg, dict) else {}
+                mode = premium_mode.upper()
+                rule = str(modalization.get(mode, "none")).lower() if isinstance(modalization, dict) else "none"
+
+                annual = annual_table_premium if basis == "annual_per_1000" else annual_table_premium
+                if rule == "divide_by_12":
+                    expected_modal = annual / 12.0
+                else:
+                    expected_modal = annual
+
+                diff = abs((expected_modal or 0.0) - pas_modal_premium)
+                threshold = max(0.01, 0.001 * (expected_modal or 0.0))
+                material = diff > threshold
+                if material:
+                    mismatch = {
+                        "code": "premium_mismatch",
+                        "expected_modal": expected_modal,
+                        "pas_modal": pas_modal_premium,
+                        "threshold": threshold,
+                        "material": True,
+                        "source": "premium_table",
+                    }
+
+    # 4) Trust status
+    trust_reasons: List[str] = []
+    trust_status = "clean"
+
+    if isinstance(premium_table_cfg, dict) and premium_service is None:
+        trust_status = "missing_premium_table"
+        trust_reasons.append("missing_premium_table")
+    if mismatch and mismatch.get("material"):
+        trust_status = "warnings_found"
+        trust_reasons.append("premium_mismatch")
+    if warnings:
+        if trust_status == "clean":
+            trust_status = "warnings_found"
+        if "warnings_present" not in trust_reasons:
+            trust_reasons.append("warnings_present")
+
+    # 5) Audit docs from DSL meta
+    source_docs = formula_meta.get("source_documents", {}) if isinstance(formula_meta, dict) else {}
+
+    # 6) Projection summary mapping
+    proj_years = projection.get("years", []) or []
+    proj_cash = projection.get("cash_values", []) or []
+    proj_db = projection.get("death_benefits", []) or []
+    proj_qx = projection.get("mortality_rates", []) or []
+    proj_surv = projection.get("survival_probabilities", []) or []
+    net_level_premium = projection.get("net_level_premium")
+
+    # 7) Assumptions block (simple summary of the assumption set used, when known).
+    assumption_set_id = inputs.get("assumption_set_id")
+    assumptions_block: Dict[str, Any] = {
+        "assumption_set_id": assumption_set_id,
+        "status": None,
+        "approved_by": None,
+        "approved_at": None,
+    }
+
+    if assumption_set_id:
+        try:
+            # list_assumption_sets returns AssumptionSet instances; we only
+            # need a minimal subset of fields for the UI.
+            for a in list_assumption_sets():
+                if a.id == assumption_set_id:
+                    assumptions_block["status"] = a.status
+                    assumptions_block["approved_by"] = a.approved_by
+                    assumptions_block["approved_at"] = a.approved_at
+                    break
+        except Exception:
+            # If the registry is unavailable, we still return the id and
+            # leave the other fields as None rather than failing the run.
+            pass
+
+    # 8) Build RunDetail payload
+    run_info = {
+        "run_id": inputs.get("run_id") or object_name,
+        # Execution status: this endpoint only reads existing snapshots, so
+        # by the time we get here the run itself has succeeded. Trust
+        # concerns are reported separately via trust_status.
+        "status": "succeeded",
+        "created_at": data.get("generated_at"),
+        "engine_version": metadata.get("engine_version") or "unknown",
+        "product_code": product_code,
+        "product_type": product_type,
+        "policy_id": policy_id or policy_number,
+        "environment": "unknown",
+        "triggered_by": inputs.get("triggered_by") or "unknown",
+    }
+
+    trust = {
+        "status": trust_status,
+        "headline": f"Trust Status: {trust_status.replace('_', ' ').title()}",
+        "reasons": trust_reasons,
+    }
+
+    policy_input = {
+        "identifiers": {
+            "policy_number": policy_number,
+            "product_code": product_code,
+            "product_type": product_type,
+        },
+        "core_fields": {
+            "issue_age": issue_age,
+            "gender": gender,
+            "smoker_class": smoker_class,
+            "risk_class": risk_class,
+            "face_amount": face_amount,
+            "level_period": level_period,
+            "premium_mode": premium_mode,
+        },
+        "pas_premium": {
+            "modal_premium": pas_modal_premium,
+            "currency": "USD",
+        },
+        "raw_record": None,
+    }
+
+    table_premium = None
+    if table_p_per_1000 is not None and annual_table_premium is not None and expected_modal is not None:
+        table_premium = {
+            "per_1000": table_p_per_1000,
+            "basis": premium_table_cfg.get("basis", "annual_per_1000") if isinstance(premium_table_cfg, dict) else "annual_per_1000",
+            "annual_premium": annual_table_premium,
+            "expected_modal_premium": expected_modal,
+            "modalization_rule": "divide_by_12" if premium_mode.upper() == "MONTHLY" else "none",
+            "mode": premium_mode,
+            "currency": "USD",
+            "premium_table_is_synthetic": bool(formula_meta.get("premium_table_sample_csv")),
+            "premium_table_label": "Synthetic premium grid (NOT FILED RATES)" if formula_meta.get("premium_table_sample_csv") else None,
+            "source": {
+                "type": "premium_table",
+                "object": premium_table_object,
+                "prefix": (premium_table_cfg or {}).get("prefix") if isinstance(premium_table_cfg, dict) else None,
+                "value_column": (premium_table_cfg or {}).get("value_column", "premium_per_1000") if isinstance(premium_table_cfg, dict) else "premium_per_1000",
+                "keys": (premium_table_cfg or {}).get("keys", []) if isinstance(premium_table_cfg, dict) else [],
+            },
+        }
+
+    premium_comparison = {
+        "table_premium": table_premium,
+        "pas_premium": {
+            "modal_premium": pas_modal_premium,
+            "mode": premium_mode,
+            "currency": "USD",
+        },
+        "used_for_projection": "table_annual_premium" if table_premium else "pas_premium",
+        "mismatch": mismatch,
+    }
+
+    audit_sources = {
+        "objects": {
+            "pas_object": pas_ref,
+            "actuarial_object": inputs.get("actuarial_object"),
+            "term23_actuarial_object": inputs.get("term23_actuarial_object"),
+            "rate_object": inputs.get("rate_object"),
+            "crm_object": inputs.get("crm_object"),
+            "premium_table_object": premium_table_object,
+            "projection_object": object_name,
+            "audit_object": None,
+        },
+        "documents": {
+            "actuarial_memo": source_docs.get("actuarial_memo"),
+            "risk_mapping": source_docs.get("risk_mapping"),
+            "premiums": source_docs.get("premiums"),
+        },
+    }
+
+    projection_summary = {
+        "years": proj_years,
+        "cash_values": proj_cash,
+        "death_benefits": proj_db,
+        "mortality_rates": proj_qx or None,
+        "survival_probabilities": proj_surv or None,
+        "net_level_premium": net_level_premium,
+        "links": {
+            "projection_object": object_name,
+        },
+    }
+
+    return {
+        "run": run_info,
+        "trust_status": trust,
+        "policy_input": policy_input,
+        "premium_comparison": premium_comparison,
+        "warnings": warnings,
+        "assumptions": assumptions_block,
+        "audit_sources": audit_sources,
+        "projection_summary": projection_summary,
+    }
 
 
 @app.get("/", response_class=HTMLResponse)

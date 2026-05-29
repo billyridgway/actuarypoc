@@ -6,6 +6,8 @@ product_type: p12trf_term
 #
 # This DSL skeleton is intentionally minimal – it establishes the knobs we
 # know about from the actuarial memo + SOV so we can wire in tables later.
+# Over time this should converge toward a faithful product spec that can be
+# checked against the filing.
 
 meta:
   form_ids:
@@ -13,9 +15,33 @@ meta:
     - ICC12 P12TRF15
     - ICC12 P12TRF20
     - ICC12 P12TRF30
+  source_documents:
+    actuarial_memo: "docs/p12trf/ICC12_P12TRF_Actuarial_Memo.pdf"
+    risk_mapping: "docs/p12trf/Risk_Class_Mapping_Term_PET.pdf"
+    premiums: "docs/p12trf/P12TRF_Rate_Grids.pdf"
+  # For local POC wiring only: path to a synthetic premium grid that matches
+  # the PremiumTable schema. NOT FILED RATES.
+  premium_table_sample_csv: "sample_data/p12trf_premiums.synthetic.csv"
+  # Generic premium table configuration used by the MinIO/operator path.
+  premium_table:
+    source: minio
+    prefix: "premium_tables/p12trf/"
+    format: csv
+    keys:
+      - issue_age
+      - gender
+      - risk_class
+      - face_band
+      - level_period
+    value_column: premium_per_1000
+    basis: annual_per_1000
+    modalization:
+      MONTHLY: divide_by_12
+      ANNUAL: none
   maturity_age: 95
   level_premium_durations: [10, 15, 20, 30]
   min_face_amount: 25000
+  max_face_amount: null  # no explicit maximum per SOV; constrained by underwriting
 
   # Issue age ranges by level period (from memo)
   issue_ages:
@@ -23,6 +49,16 @@ meta:
     "15": { min: 18, max: 70 }
     "20": { min: 18, max: 65 }
     "30": { min: 18, max: 50 }
+
+  # Risk classes (from SOV) and normalized mapping used by the engine.
+  filed_risk_classes:
+    - SUPER_PREFERRED_NONSMOKER
+    - PREFERRED_PLUS_NONSMOKER
+    - PREFERRED_NONSMOKER
+    - STANDARD_NONSMOKER
+    - PREFERRED_SMOKER
+    - STANDARD_SMOKER
+    - RATED
 
   # Risk class mapping normalized from "Risk Class Mapping - Term - PET"
   risk_class_mapping:
@@ -34,7 +70,64 @@ meta:
     standard_smoker: STANDARD_TOBACCO
     rated: RATED
 
+  # Mapping from raw PAS / product risk classes to the mortality table
+  # risk_class labels used in the Term23 2017 CSO slice.
+  #
+  # POC limitation: all P12TRF risk classes map to Standard until full
+  # risk-class-specific mortality tables are available. This keeps the
+  # Python engine generic; product-specific behaviour lives in DSL/meta
+  # and actuarial tables, not in code branches.
+  mortality_risk_class_mapping:
+    SUPER_PREFERRED_NON_TOBACCO: Standard
+    PREFERRED_NON_TOBACCO: Standard
+    STANDARD_PLUS_NON_TOBACCO: Standard
+    STANDARD_NON_TOBACCO: Standard
+    PREFERRED_TOBACCO: Standard
+    STANDARD_TOBACCO: Standard
+    RATED: Standard
+
+  # Face-amount banding used by both mortality and premium tables. Keeping
+  # this in DSL/meta avoids hidden product-specific thresholds in Python.
+  face_bands:
+    - band: 1
+      min: 0
+      max: 999999
+    - band: 2
+      min: 1000000
+      max: 2999999
+    - band: 3
+      min: 3000000
+      max: null
+
+  # Level-period premium structures. Premiums are level for the chosen
+  # period (10/15/20/30) and then increase annually thereafter; actual
+  # numeric grids live in actuarial_tables and are keyed by these fields.
+  premium_structure:
+    mode: level_then_annual_increase
+    per_1000: true
+    depends_on:
+      - issue_age
+      - gender
+      - risk_class
+      - face_band
+      - level_period
+
+  # Policy fee behaviour (from SOV): uniform per-policy fee, between 0 and
+  # 120, same in all years. Actual value is provided via config/registry.
+  policy_fee:
+    min: 0
+    max: 120
+    default: 65
+
+  # Level periods available by form id, per the SOV.
+  forms_by_level_period:
+    "10": ICC12 P12TRF10
+    "15": ICC12 P12TRF15
+    "20": ICC12 P12TRF20
+    "30": ICC12 P12TRF30
+
 charges:
+  # Base coverage (term to age 95, no cash values)
   - name: risk_premium
     description: |
       Base term mortality charge per $1,000 of amount of insurance.
@@ -56,6 +149,15 @@ charges:
       attached. Rider rating / factors are table-driven.
     formula: "waiver_premium"
 
+  # Placeholder for Accelerated Death Benefit (Terminal Illness) rider.
+  - name: accelerated_death_benefit_rider
+    optional: true
+    description: |
+      Accelerated Death Benefit Rider for Terminal Illness (R12TTI). The
+      charge is currently ignored in the POC engine but is modelled here so
+      that future cashflow logic can recognise its presence.
+    formula: "0.0  # TODO: model ADB charges explicitly"
+
 credit_rates:
   - rate_type: nonforfeiture
     description: "Nonforfeiture discount rate used in testing (4.5%)."
@@ -69,5 +171,12 @@ credit_rates:
     expression: "portfolio_rate_curve(term_year)"
 
 flags:
+  # This product is nonforfeiture-exempt (Section 9(G)); no cash values are
+  # payable and the engine should not surface any nonforfeiture reserves as
+  # policyowner-accessible cash values.
   has_cash_value: false
-  convertible: true  # per SOV conversion period fields; details TBD
+
+  # Conversion feature exists; details (conversion period by age/term) are
+  # noted in the SOV and should eventually be surfaced here in a structured
+  # way for UI / validation. For the POC we only flag convertibility.
+  convertible: true

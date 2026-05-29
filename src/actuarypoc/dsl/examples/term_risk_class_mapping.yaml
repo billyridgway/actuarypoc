@@ -16,6 +16,8 @@ meta:
     - ICC12 P12TRF15
     - ICC12 P12TRF20
     - ICC12 P12TRF30
+  source_documents:
+    risk_mapping: "docs/p12trf/Risk_Class_Mapping_Term_PET.pdf"
 
   risk_class_mapping:
     super_preferred_nonsmoker: SUPER_PREFERRED_NON_TOBACCO

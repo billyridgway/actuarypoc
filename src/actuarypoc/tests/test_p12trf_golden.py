@@ -26,6 +26,7 @@ import unittest
 from actuarypoc.connectors.base import CSVConnector
 from actuarypoc.dsl.policy_dsl import load_formula
 from actuarypoc.projection.engine import ProjectionEngine
+from actuarypoc.projection.mortality import build_term23_surface
 
 
 # Base is the actuarypoc package root: src/actuarypoc
@@ -39,7 +40,13 @@ class TestP12TRFGolden(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.formula = load_formula(str(P12TRF_DSL))
-        cls.engine = ProjectionEngine(cls.formula)
+        # For P12TRF we want real 2017 CSO-driven survival probabilities, not
+        # a flat q_x=0 approximation. Build a thin Term23 surface from the
+        # bundled sample data and feed it into the engine.
+        term23_path = BASE / "sample_data" / "actuarial_tables_term23.csv"
+        term23_records = list(CSVConnector(str(term23_path)).fetch())
+        cls.mortality_surface = build_term23_surface(term23_records)
+        cls.engine = ProjectionEngine(cls.formula, mortality_surface=cls.mortality_surface)
         cls.policies = list(CSVConnector(str(SAMPLE_POLICIES)).fetch())
 
     def test_sample_policies_available(self) -> None:
@@ -139,6 +146,67 @@ class TestP12TRFGolden(unittest.TestCase):
                 # TODO: as P12TRF behaviour is nailed down, replace or augment
                 # these invariants with true golden values (e.g. specific
                 # reserves, PVs, or benefit patterns) per policy.
+
+    def test_p12trf100001_survival_uses_mortality_table(self) -> None:
+        """Check that P12TRF100001 survival probabilities follow q_x math.
+
+        This specifically guards the regression where P12TRF projections used
+        a flat survival=1 approximation instead of 2017 CSO rates.
+        """
+
+        surface = getattr(self, "mortality_surface", None)
+        if surface is None:
+            self.skipTest("No Term23 mortality surface available")
+
+        # Pull the golden mortality points for a 35-year-old male NS Standard
+        # from the thin Term23 slice.
+        q1 = surface.q_2017_cso(
+            gender="Male",
+            smoker_class="Nontobacco",
+            risk_class="Standard",
+            face_band=1,
+            issue_age=35,
+            duration=1,
+        )
+        q2 = surface.q_2017_cso(
+            gender="Male",
+            smoker_class="Nontobacco",
+            risk_class="Standard",
+            face_band=1,
+            issue_age=35,
+            duration=2,
+        )
+        self.assertIsNotNone(q1)
+        self.assertIsNotNone(q2)
+
+        q1_val = float(q1)
+        q2_val = float(q2)
+
+        # Survival to start of policy years t under annual q_x is:
+        # S(0) = 1
+        # S(1) = (1 - q1)
+        # S(2) = (1 - q1) * (1 - q2)
+        s0 = 1.0
+        s1 = s0 * (1.0 - q1_val)
+        s2 = s1 * (1.0 - q2_val)
+
+        # Locate P12TRF100001 in the sample policies.
+        target = None
+        for rec in self.policies:
+            if rec.get("policy_number") == "P12TRF100001":
+                target = rec
+                break
+        self.assertIsNotNone(target, "P12TRF100001 not found in sample policies")
+
+        result = self.engine.project(target, horizon=10)
+        probs = result.survival_probabilities or []
+        self.assertGreaterEqual(len(probs), 3)
+
+        # Engine stores survival probability at the *start* of each policy
+        # year, so index 0 is S(0), index 1 is S(1), etc.
+        self.assertAlmostEqual(probs[0], s0, places=10)
+        self.assertAlmostEqual(probs[1], s1, places=10)
+        self.assertAlmostEqual(probs[2], s2, places=10)
 
     def test_golden_case_scaffolding(self) -> None:
         """Scaffolding for JSON-based golden tests.

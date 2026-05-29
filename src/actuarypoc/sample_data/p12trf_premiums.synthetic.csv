@@ -1,0 +1,11 @@
+# Synthetic P12TRF premium grid for POC.
+#
+# NOT FILED RATES. FOR POC WIRING ONLY.
+#
+# Columns align with the PremiumTable schema used by PremiumLookupService.
+# Values are illustrative only and should be replaced with carrier-provided
+# rate grids for any production use.
+issue_age,gender,risk_class,face_band,level_period,premium_per_1000
+35,M,SUPER_PREFERRED_NON_TOBACCO,1,10,0.80
+45,F,STANDARD_NON_TOBACCO,1,20,1.10
+40,M,STANDARD_TOBACCO,1,30,1.60

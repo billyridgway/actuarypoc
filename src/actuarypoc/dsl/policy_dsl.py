@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Sequence
+from typing import Any, Literal, Sequence
 
 import yaml
 
@@ -32,6 +32,11 @@ class PolicyFormula:
     product_type: str
     charges: Sequence[Charge]
     credit_rates: Sequence[CreditRate]
+    # Optional free-form metadata section from the DSL. This allows product
+    # files to surface additional structured assumptions (e.g. risk class
+    # mappings) without the projection engine having to know every field
+    # upfront.
+    meta: dict[str, Any] | None = None
 
 
 def load_formula(path: str) -> PolicyFormula:
@@ -45,4 +50,5 @@ def load_formula(path: str) -> PolicyFormula:
         product_type=data["product_type"],
         charges=charges,
         credit_rates=rates,
+        meta=data.get("meta"),
     )
