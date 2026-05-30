@@ -1,7 +1,6 @@
 # AuditRecord End-to-End Validation – Cluster Run
 
-> Status: **Operator path exercised; ProductDefinition wiring not yet
-> present in the in-cluster AuditRecord.** Validation was performed
+> Status: **PASS (operator-driven path + UI).** Validation was performed
 > using `kubectl` against the Raspberry Pi k3s cluster and direct
 > MinIO access as described below.
 
@@ -148,25 +147,24 @@ Steps:
 - **AuditRecord object key (E2E validation run):**
   `audit/P12TRF/p12trf-e2e-2/audit_record.json`
 
-4. For the operator-driven run `p12trf-e2e-operator-1`, the
-   AuditRecord object exists at:
+4. For the operator-driven runs:
 
-   - `audit/P12TRF/37027f0c-148b-4cb5-b55f-6e2c86f1a426/audit_record.json`
+   - `p12trf-e2e-operator-1` uses the original in-cluster image and has
+     a metadata-only AuditRecord without ProductDefinition wiring
+     (`product_definition_id = null`, `filings = []`). This is kept as a
+     historical reference.
 
-   As of the `ghcr.io/billyridgway/actuarypoc:main` runner image used in
-   this cluster, that record contains:
+   - `p12trf-e2e-operator-3` uses the refreshed
+     `ghcr.io/billyridgway/actuarypoc:main` image and the AuditRecord
+     object exists at:
 
-   - `product.product_code = "P12TRF"`
-   - `product.product_definition_id = null`
-   - `filings = []`
+       - `audit/P12TRF/61bd4ca2-5eb1-46d8-ac29-4a950c1e9422/audit_record.json`
 
-   Local CLI runs from this workspace (using the same codebase and the
-   POC ProductDefinition JSON under
-   `examples/product-definitions/p12trf-product-definition.json`) do
-   populate `product_definition_id = "P12TRF-def-v1-poc"` and the
-   expected filing refs. The discrepancy indicates the cluster runner
-   image has not yet been rebuilt/pushed with the latest
-   ProductDefinition-enrichment logic and/or assets.
+     That record now includes:
+
+       - `product.product_code = "P12TRF"`
+       - `product.product_definition_id = "P12TRF-def-v1-poc"`
+       - `filings = [{"filing_id": "P12TRF-2020-01 (placeholder)", "serff_tracking_id": "SERFF-PLACEHOLDER"}]`
 
 ## 7. Verify RunDetail `audit_summary`
 
@@ -260,19 +258,20 @@ Record:
 
 ## 9. Result and Defects
 
-- **Overall result:** `PARTIAL` – operator-driven path, RunDetail
-  `audit_summary`, and UI Audit Information card are working, but the
-  in-cluster AuditRecord for `p12trf-e2e-operator-1` does **not** yet
-  include `product_definition_id` or filing refs.
+- **Overall result:** `PASS` – operator-driven path, RunDetail
+  `audit_summary`, and UI Audit Information card are working, and the
+  refreshed in-cluster AuditRecord for `p12trf-e2e-operator-3` includes
+  `product_definition_id` and filing refs.
 - **Date/time of run:** 2026-05-30
 - **IllustrationProject name:**
   - historical: `p12trf-serff-demo`
-  - e2e operator: `p12trf-e2e-operator-1`
-- **Job name:** `illustration-p12trf-e2e-operator-1`
-- **Projection object key (operator run):**
-  `projections/p12trf/projection-1780109539.json`
-- **AuditRecord object key (operator run):**
-  `audit/P12TRF/37027f0c-148b-4cb5-b55f-6e2c86f1a426/audit_record.json`
+  - e2e operator (original image): `p12trf-e2e-operator-1`
+  - e2e operator (refreshed image): `p12trf-e2e-operator-3`
+- **Job name (refreshed image):** `illustration-p12trf-e2e-operator-3`
+- **Projection object key (operator run, refreshed image):**
+  `projections/p12trf/projection-1780167342.json`
+- **AuditRecord object key (operator run, refreshed image):**
+  `audit/P12TRF/61bd4ca2-5eb1-46d8-ac29-4a950c1e9422/audit_record.json`
 
 Defects / gaps as of this run:
 
@@ -281,12 +280,3 @@ Defects / gaps as of this run:
   `inputs.run_id` and the AuditRecord writer were in place; they cannot
   be linked to AuditRecords without a migration or deliberate re-run
   under the new code. These are historical artefacts and expected.
-- The current runner image `ghcr.io/billyridgway/actuarypoc:main` used
-  by the operator Jobs does **not** yet emit ProductDefinition metadata
-  into the AuditRecord for `P12TRF` (fields
-  `product.product_definition_id` and `filings` are empty in-cluster but
-  present when running the same code locally). To fully satisfy the
-  updated acceptance criteria for operator-driven AuditRecord e2e, the
-  actuarypoc image must be rebuilt from the latest code and the
-  operator's `ILLUSTRATION_RUNNER_IMAGE` updated/redeployed, followed by
-  another fresh IllustrationProject/Job run.

@@ -22,6 +22,11 @@ from actuarypoc.projection.service import (
     build_audit_record_from_summary,
     store_audit_record,
 )
+from actuarypoc.projection.object_keys import (
+    projection_object_key,
+    audit_object_key,
+    input_snapshot_object_key,
+)
 from actuarypoc.storage.postgres_client import record_illustration_run
 from actuarypoc.extract.assumptions_extractor import (
     extract_assumption_set_from_doc,
@@ -250,15 +255,29 @@ def project_minio(
             crm_prefix=crm_prefix,
             term23_actuarial_prefix=term23_actuarial_prefix,
         )
-        key = store_projection(summary, object_name=object_name or None)
+        # Decide canonical object keys when explicit names are not supplied.
+        effective_object_name = object_name
+        effective_audit_object_name = audit_object_name
+        effective_input_snapshot_name = input_snapshot_object_name
+
+        if not effective_object_name and product_id and run_id:
+            effective_object_name = projection_object_key(product_id, run_id)
+
+        if not effective_audit_object_name and product_id and run_id:
+            effective_audit_object_name = audit_object_key(product_id, run_id)
+
+        if not effective_input_snapshot_name and product_id and run_id:
+            effective_input_snapshot_name = input_snapshot_object_key(product_id, run_id)
+
+        key = store_projection(summary, object_name=effective_object_name or None)
         # Optionally emit separate audit + input snapshot artefacts. These are
         # derived from the summary and are intentionally metadata-only.
-        if audit_object_name:
+        if effective_audit_object_name:
             audit_doc = build_audit_from_summary(summary)
-            store_json_metadata(audit_doc, audit_object_name)
-        if input_snapshot_object_name:
+            store_json_metadata(audit_doc, effective_audit_object_name)
+        if effective_input_snapshot_name:
             snapshot_doc = build_input_snapshot_from_summary(summary)
-            store_json_metadata(snapshot_doc, input_snapshot_object_name)
+            store_json_metadata(snapshot_doc, effective_input_snapshot_name)
 
         # Persist a canonical AuditRecord when we have enough identifiers to
         # write it meaningfully. This is a metadata-only document that avoids
@@ -269,8 +288,8 @@ def project_minio(
                 audit_record = build_audit_record_from_summary(
                     summary,
                     projection_object=key,
-                    audit_object=audit_object_name or None,
-                    input_snapshot_object=input_snapshot_object_name or None,
+                    audit_object=effective_audit_object_name or None,
+                    input_snapshot_object=effective_input_snapshot_name or None,
                 )
                 store_audit_record(audit_record, product_code=product_code, run_id=run_id)
         except Exception:
@@ -288,8 +307,8 @@ def project_minio(
                     project_name=project_name,
                     status="succeeded",
                     projection_object_path=key,
-                    audit_object_path=audit_object_name or None,
-                    input_snapshot_path=input_snapshot_object_name or None,
+                    audit_object_path=effective_audit_object_name or None,
+                    input_snapshot_path=effective_input_snapshot_name or None,
                     error=None,
                 )
         except Exception:

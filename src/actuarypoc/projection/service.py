@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from actuarypoc.dsl.policy_dsl import load_formula
 from actuarypoc.projection.engine import ProjectionEngine
 from actuarypoc.projection.mortality import build_term23_surface
+from actuarypoc.projection.object_keys import audit_record_object_key
 from actuarypoc.projection.premium import PremiumLookupService, build_premium_table, select_face_band
 from actuarypoc.config.assumptions import get_current_assumption_for_product
 from actuarypoc.storage.minio_client import get_bucket_name, get_minio_client
@@ -622,7 +623,5 @@ def store_audit_record(record: Dict[str, Any], product_code: str, run_id: str) -
     meaningful and non-empty when this is invoked.
     """
 
-    safe_product = product_code or "unknown-product"
-    safe_run_id = run_id or "unknown-run"
-    object_name = f"audit/{safe_product}/{safe_run_id}/audit_record.json"
+    object_name = audit_record_object_key(product_code, run_id)
     return store_json_metadata(record, object_name)
