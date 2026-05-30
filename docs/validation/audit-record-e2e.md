@@ -1,6 +1,7 @@
 # AuditRecord End-to-End Validation – Cluster Run
 
-> Status: **Completed from this runtime.** Validation was performed
+> Status: **Operator path exercised; ProductDefinition wiring not yet
+> present in the in-cluster AuditRecord.** Validation was performed
 > using `kubectl` against the Raspberry Pi k3s cluster and direct
 > MinIO access as described below.
 
@@ -147,6 +148,26 @@ Steps:
 - **AuditRecord object key (E2E validation run):**
   `audit/P12TRF/p12trf-e2e-2/audit_record.json`
 
+4. For the operator-driven run `p12trf-e2e-operator-1`, the
+   AuditRecord object exists at:
+
+   - `audit/P12TRF/37027f0c-148b-4cb5-b55f-6e2c86f1a426/audit_record.json`
+
+   As of the `ghcr.io/billyridgway/actuarypoc:main` runner image used in
+   this cluster, that record contains:
+
+   - `product.product_code = "P12TRF"`
+   - `product.product_definition_id = null`
+   - `filings = []`
+
+   Local CLI runs from this workspace (using the same codebase and the
+   POC ProductDefinition JSON under
+   `examples/product-definitions/p12trf-product-definition.json`) do
+   populate `product_definition_id = "P12TRF-def-v1-poc"` and the
+   expected filing refs. The discrepancy indicates the cluster runner
+   image has not yet been rebuilt/pushed with the latest
+   ProductDefinition-enrichment logic and/or assets.
+
 ## 7. Verify RunDetail `audit_summary`
 
 From a machine that can reach the projection UI NodePort
@@ -174,55 +195,39 @@ Confirm the JSON includes an `audit_summary` block with metadata only, e.g.:
 }
 ```
 
-For the E2E run triggered via the local CLI (using the same MinIO
-prefixes as the Jobs), we verified that:
+For the E2E runs we triggered:
 
-- `projections/p12trf/p12trf-e2e-2.json` exists and contains
-  `inputs.run_id = "p12trf-e2e-2"` and `inputs.product_code = "P12TRF"`.
-- `audit/P12TRF/p12trf-e2e-2/audit_record.json` exists and contains the
-  expected metadata-only fields (`audit_version`, `run_id`,
-  `product.product_code`, `engine`, `inputs`, `outputs`, `dsl.file`,
-  `created_at`, etc.).
+- Local CLI run (`p12trf-e2e-2`) verified that:
+  - `projections/p12trf/p12trf-e2e-2.json` exists and contains
+    `inputs.run_id = "p12trf-e2e-2"` and
+    `inputs.product_code = "P12TRF"`.
+  - `audit/P12TRF/p12trf-e2e-2/audit_record.json` exists and contains
+    the expected metadata-only fields (`audit_version`, `run_id`,
+    `product.product_code`, `engine`, `inputs`, `outputs`, `dsl.file`,
+    `created_at`, etc.).
 
-However, the currently deployed `projection-ui` build does **not** yet
-load persisted AuditRecords, so `/api/run-detail` still returns
-`audit_summary: null` even when an AuditRecord exists.
+- Operator-driven run (`p12trf-e2e-operator-1`) verified that:
+  - The illustration Job uses
+    `ghcr.io/billyridgway/actuarypoc:main` as the runner image.
+  - `projections/p12trf/projection-1780109539.json` exists and is the
+    projection object for `run_id = 37027f0c-148b-4cb5-b55f-6e2c86f1a426`.
+  - `audit/P12TRF/37027f0c-148b-4cb5-b55f-6e2c86f1a426/audit_record.json`
+    exists and contains a metadata-only AuditRecord.
+  - `/api/run-detail?key=projections/p12trf/projection-1780109539.json`
+    returns a populated `audit_summary`:
 
-Example (redacted) RunDetail excerpt for the E2E projection:
-
-```jsonc
-{
-  "run": {
-    "run_id": "p12trf-e2e-2",
-    "status": "succeeded",
-    "created_at": "2026-05-29T22:53:49.421320",
-    "engine_version": "unknown",
-    "product_code": "P12TRF",
-    "product_type": "None",
-    "policy_id": "WL-11002",
-    "environment": "unknown",
-    "triggered_by": "unknown"
-  },
-  "audit_summary": null,
-  "audit_sources": {
-    "objects": {
-      "pas_object": "pas_export/pas_export-1779282547.json",
-      "actuarial_object": "actuarial_tables/actuarial_tables-1779282548.json",
-      "term23_actuarial_object": "actuarial_tables_term23/actuarial_tables_term23-1779282549.json",
-      "rate_object": "rate_curves/rate_curves-1779282552.json",
-      "crm_object": "crm_accounts/crm_accounts-1779282551.json",
-      "premium_table_object": null,
-      "projection_object": "projections/p12trf/p12trf-e2e-2.json",
-      "audit_object": null
-    },
-    "documents": {
-      "actuarial_memo": null,
-      "risk_mapping": null,
-      "premiums": null
+    ```jsonc
+    {
+      "run_id": "37027f0c-148b-4cb5-b55f-6e2c86f1a426",
+      "audit_record_object": "audit/P12TRF/37027f0c-148b-4cb5-b55f-6e2c86f1a426/audit_record.json",
+      "product_code": "P12TRF",
+      "assumption_set_ids": ["term-risk-class-mapping-v1"],
+      "dsl_file": "/opt/dagster/app/src/actuarypoc/dsl/examples/term_risk_class_mapping.yaml",
+      "engine_version": null,
+      "runner_image": null,
+      "created_at": "2026-05-30T02:52:19.343116"
     }
-  }
-}
-```
+    ```
 
 ## 8. Verify React UI – Audit Information Card
 
@@ -248,29 +253,40 @@ Example (redacted) RunDetail excerpt for the E2E projection:
 
 Record:
 
-- **Screenshot path or link:** *(manual step; at time of this
-  validation the UI Audit Information card still shows "No AuditRecord
-  is available for this run." because `audit_summary` is null.)*
+- **Screenshot path or link:** *(manual step; with the updated
+  projection-ui image, the Audit Information card now renders the
+  AuditRecord metadata for
+  `projections/p12trf/projection-1780109539.json`.)*
 
 ## 9. Result and Defects
 
-- **Overall result:** `FAIL` (for this milestone)
-- **Date/time of run:** 2026-05-29
-- **IllustrationProject name:** `p12trf-serff-demo`
-- **Job name:** `illustration-p12trf-serff-demo` (historical), plus
-  local E2E CLI projection `p12trf-e2e-2`.
-- **Projection object key:** `projections/p12trf/p12trf-e2e-2.json`
-- **AuditRecord object key:** `audit/P12TRF/p12trf-e2e-2/audit_record.json`
+- **Overall result:** `PARTIAL` – operator-driven path, RunDetail
+  `audit_summary`, and UI Audit Information card are working, but the
+  in-cluster AuditRecord for `p12trf-e2e-operator-1` does **not** yet
+  include `product_definition_id` or filing refs.
+- **Date/time of run:** 2026-05-30
+- **IllustrationProject name:**
+  - historical: `p12trf-serff-demo`
+  - e2e operator: `p12trf-e2e-operator-1`
+- **Job name:** `illustration-p12trf-e2e-operator-1`
+- **Projection object key (operator run):**
+  `projections/p12trf/projection-1780109539.json`
+- **AuditRecord object key (operator run):**
+  `audit/P12TRF/37027f0c-148b-4cb5-b55f-6e2c86f1a426/audit_record.json`
 
-If any step failed, record defects here with enough detail to
-investigate in code and/or operator wiring (no secrets, no raw PAS
-exports):
+Defects / gaps as of this run:
 
-- `projection-ui` RunDetail endpoint does not yet load
-  `audit/<product_code>/<run_id>/audit_record.json` and therefore
-  returns `audit_summary: null` even when an AuditRecord exists.
 - Existing in-cluster projections (e.g.
   `projections/p12trf/projection-1779282554.json`) were generated before
   `inputs.run_id` and the AuditRecord writer were in place; they cannot
-  be linked to AuditRecords without a migration or re-run under the new
-  code.
+  be linked to AuditRecords without a migration or deliberate re-run
+  under the new code. These are historical artefacts and expected.
+- The current runner image `ghcr.io/billyridgway/actuarypoc:main` used
+  by the operator Jobs does **not** yet emit ProductDefinition metadata
+  into the AuditRecord for `P12TRF` (fields
+  `product.product_definition_id` and `filings` are empty in-cluster but
+  present when running the same code locally). To fully satisfy the
+  updated acceptance criteria for operator-driven AuditRecord e2e, the
+  actuarypoc image must be rebuilt from the latest code and the
+  operator's `ILLUSTRATION_RUNNER_IMAGE` updated/redeployed, followed by
+  another fresh IllustrationProject/Job run.

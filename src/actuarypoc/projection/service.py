@@ -449,6 +449,74 @@ def build_input_snapshot_from_summary(summary: Dict[str, Any]) -> Dict[str, Any]
     }
 
 
+def load_product_definition_for_code(product_code: str) -> Optional[Dict[str, Any]]:
+    """Return the ProductDefinition payload for a given product code, if any.
+
+    This helper owns the details of how local POC product definitions are
+    packaged and where they live on disk so that callers do not need to know
+    about hard-coded file-system paths.
+    """
+
+    code = (product_code or "").upper()
+
+    try:
+        if code == "P12TRF":
+            # The POC ProductDefinition for P12TRF is shipped under
+            # actuarypoc/examples/product-definitions/ in the source tree.
+            base = (
+                Path(__file__)
+                .resolve()
+                .parents[1]
+                / ".."
+                / ".."
+                / "examples"
+                / "product-definitions"
+            )
+            pd_path = base / "p12trf-product-definition.json"
+            if pd_path.exists():
+                with pd_path.open("r", encoding="utf-8") as handle:
+                    return json.load(handle)
+    except Exception:
+        # Best-effort only; failures here should not break callers.
+        return None
+
+    return None
+
+
+def enrich_audit_record_with_product_definition(
+    record: Dict[str, Any], product_definition: Optional[Dict[str, Any]]
+) -> None:
+    """Best-effort enrichment of an AuditRecord using ProductDefinition data.
+
+    Mutates ``record`` in-place. Safe to call with ``product_definition`` set
+    to ``None``.
+    """
+
+    if not product_definition:
+        return
+
+    # Ensure the product container exists.
+    record.setdefault("product", {})
+
+    pd_id = product_definition.get("product_definition_id")
+    if pd_id:
+        record["product"]["product_definition_id"] = pd_id
+
+    filings: List[Dict[str, Any]] = []
+    for ref in product_definition.get("filing_refs", []) or []:
+        if not isinstance(ref, dict):
+            continue
+        filings.append(
+            {
+                "filing_id": ref.get("filing_id"),
+                "serff_tracking_id": ref.get("serff_tracking_id"),
+            }
+        )
+
+    if filings:
+        record["filings"] = filings
+
+
 def build_audit_record_from_summary(
     summary: Dict[str, Any],
     projection_object: str,
@@ -473,8 +541,7 @@ def build_audit_record_from_summary(
     - created_at / generated_at
 
     It deliberately does **not** embed raw PAS data, projection arrays, or
-    any policyholder-level details. FilingRecord and ProductDefinition links
-    are left empty for now.
+    any policyholder-level details.
     """
 
     inputs = summary.get("inputs", {}) or {}
@@ -496,7 +563,7 @@ def build_audit_record_from_summary(
             "product_code": product_code,
             "product_definition_id": None,
         },
-        "filings": [],  # FilingRecord links planned but not implemented
+        "filings": [],
         "assumptions": [],
         "engine": {
             "engine_version": engine_version,
@@ -530,6 +597,16 @@ def build_audit_record_from_summary(
 
     if formula_path:
         record.setdefault("dsl", {})["file"] = formula_path
+
+    # Best-effort wiring to ProductDefinition + FilingRecord based on the
+    # local POC product definitions.
+    try:
+        product_definition = load_product_definition_for_code(product_code or "")
+        enrich_audit_record_with_product_definition(record, product_definition)
+    except Exception:
+        # Do not let ProductDefinition/FilingRecord wiring break audit
+        # record generation; this is a best-effort enrichment.
+        pass
 
     return record
 
