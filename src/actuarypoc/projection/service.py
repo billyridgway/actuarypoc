@@ -14,6 +14,7 @@ from actuarypoc.projection.object_keys import audit_record_object_key
 from actuarypoc.projection.premium import PremiumLookupService, build_premium_table, select_face_band
 from actuarypoc.config.assumptions import get_current_assumption_for_product
 from actuarypoc.storage.minio_client import get_bucket_name, get_minio_client
+from actuarypoc.version import get_engine_version
 
 # Default prefix for projection objects when no override is supplied.
 PROJECTION_PREFIX = "projections/"
@@ -430,7 +431,7 @@ def build_audit_from_summary(summary: Dict[str, Any]) -> Dict[str, Any]:
     inputs = summary.get("inputs", {})
     metadata = summary.get("metadata", {})
     warnings = summary.get("warnings", [])
-    engine_version = os.getenv("ENGINE_VERSION") or os.getenv("ILLUSTRATION_ENGINE_VERSION")
+    engine_version = get_engine_version()
 
     return {
         "generated_at": summary.get("generated_at"),
@@ -550,7 +551,7 @@ def build_audit_record_from_summary(
     run_id = os.getenv("RUN_ID") or None
     product_code = inputs.get("product_code") or None
     environment = os.getenv("ILLUSTRATION_ENVIRONMENT") or os.getenv("ENVIRONMENT") or None
-    engine_version = os.getenv("ENGINE_VERSION") or os.getenv("ILLUSTRATION_ENGINE_VERSION") or None
+    engine_version = get_engine_version()
     runner_image = os.getenv("RUNNER_IMAGE") or None
     assumption_set_id = inputs.get("assumption_set_id") or None
     formula_path = inputs.get("formula_path") or None

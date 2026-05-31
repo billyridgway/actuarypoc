@@ -251,8 +251,18 @@ This ADR documents what was validated by the **`p12trf-e2e-operator-3`** run and
   - CLI-focused run: `projections/p12trf/p12trf-e2e-2.json`
   - Operator run 1: `projections/p12trf/projection-1780109539.json`
   - Operator run 3: `projections/p12trf/projection-1780167342.json`
+  - Operator run 5 (this ADR update):
 
-  The exact filename pattern (`projection-<timestamp>.json` vs `p12trf-e2e-<n>.json`) is an implementation detail; the **contract** is that:
+    ```text
+    projections/p12trf/8dd5042e-7a4d-4fa7-bb33-2457b9653620/projection.json
+    ```
+
+    with matching:
+
+    - `IllustrationProject.status.projectionObject`
+    - `AuditRecord.outputs.projection_object`
+
+  The exact filename pattern (`projection-<timestamp>.json` vs `p12trf-e2e-<n>.json` vs `<RUN_ID>/projection.json`) is an implementation detail; the **contract** is that:
   - The CRD status and UI/API both refer to the **full object key**.
   - That key resolves in MinIO and includes `inputs.run_id` and `inputs.product_code`.
 
@@ -294,6 +304,7 @@ This ADR documents what was validated by the **`p12trf-e2e-operator-3`** run and
   - `projections/p12trf/p12trf-e2e-2.json`
   - `projections/p12trf/projection-1780109539.json`
   - `projections/p12trf/projection-1780167342.json`
+  - `projections/p12trf/8dd5042e-7a4d-4fa7-bb33-2457b9653620/projection.json` (p12trf-e2e-operator-5, canonical `<RUN_ID>/projection.json` form)
 
 **AuditRecord objects**
 
@@ -303,10 +314,11 @@ This ADR documents what was validated by the **`p12trf-e2e-operator-3`** run and
   audit/<PRODUCT_CODE>/<RUN_ID>/audit_record.json
   ```
 
-- Example validated:
+- Examples validated:
 
   ```text
-  audit/P12TRF/61bd4ca2-5eb1-46d8-ac29-4a950c1e9422/audit_record.json
+  audit/P12TRF/61bd4ca2-5eb1-46d8-ac29-4a950c1e9422/audit_record.json   # p12trf-e2e-operator-3
+  audit/P12TRF/8dd5042e-7a4d-4fa7-bb33-2457b9653620/audit_record.json   # p12trf-e2e-operator-5
   ```
 
 **Other audit-related objects**
@@ -329,14 +341,18 @@ These additional objects are not part of the public API contract yet but are pro
 
 ## Known Gaps and Limitations
 
-The following are **not** solved by the p12trf-e2e-operator-3 validation and remain explicit gaps:
+The following were **not** solved by the original p12trf-e2e-operator-3 validation. Items that have since been addressed are called out explicitly.
 
 1. **Historical projections without AuditRecords**
    - Older projection objects (e.g. `projections/p12trf/projection-1779282554.json`) pre-date `inputs.run_id` and the AuditRecord writer. They cannot be retro-linked to AuditRecords without a migration or re-run.
 
-2. **CRD `projectionObject` vs. actual projection key**
-   - `IllustrationProject.status.projectionObject` currently uses a `.../<RUN_ID>/projection.json` path, while the actual projection key is a flat `projection-<timestamp>.json` under the product prefix.
-   - RunDetail and the UI use the actual key; the CRD status link is best-effort and may not always resolve.
+2. **CRD `projectionObject` vs. actual projection key** (**resolved for new runs**)
+   - Prior to the canonicalization change, `IllustrationProject.status.projectionObject` used a `.../<RUN_ID>/projection.json` path while the actual projection key was a flat `projection-<timestamp>.json` under the product prefix. RunDetail and the UI used the flat key, so the CRD status link was best-effort and could drift.
+   - With the `p12trf-e2e-operator-5` validation run:
+     - `status.projectionObject` is `projections/p12trf/8dd5042e-7a4d-4fa7-bb33-2457b9653620/projection.json`.
+     - `AuditRecord.outputs.projection_object` matches the same key.
+     - The projection object resolves in MinIO and is readable via the RunDetail API and UI.
+   - Remaining caveat: older projection objects that pre-date this change still use the legacy flat `projection-<timestamp>.json` naming and will not be backfilled without a migration or re-run.
 
 3. **Engine version and runner image in AuditRecord**
    - In-cluster `AuditRecord` and `audit_summary` continue to show `engine_version = null` and `runner_image = null`.

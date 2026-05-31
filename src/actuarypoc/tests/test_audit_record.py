@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 import types
 import sys
+from typing import Any, Dict
 
 
 def _get_projection_service():
@@ -118,3 +119,35 @@ def test_build_audit_record_adds_product_definition_and_filings() -> None:
         f.get("filing_id", "").startswith("P12TRF-2020-01") and f.get("serff_tracking_id") == "SERFF-PLACEHOLDER"
         for f in filings or []
     )
+
+
+def test_build_audit_record_includes_engine_and_runner(monkeypatch) -> None:
+    service = _get_projection_service()
+
+    # Clear any pre-existing version env so we exercise the helper + fallback.
+    for name in ("ENGINE_VERSION", "ILLUSTRATION_ENGINE_VERSION"):
+        monkeypatch.delenv(name, raising=False)
+
+    summary: Dict[str, Any] = {
+        "generated_at": "2026-05-29T12:00:00Z",
+        "inputs": {
+            "product_code": "P12TRF",
+        },
+    }
+
+    # Runner image should be taken from RUNNER_IMAGE env.
+    monkeypatch.setenv("RUNNER_IMAGE", "ghcr.io/billyridgway/actuarypoc:main")
+
+    record = service.build_audit_record_from_summary(
+        summary,
+        projection_object="projections/P12TRF/run-123.json",
+    )
+
+    engine = record.get("engine") or {}
+    assert engine.get("runner_image") == "ghcr.io/billyridgway/actuarypoc:main"
+
+    # Engine version should always be a non-empty string, even when env
+    # overrides are not set. The exact value is owned by the version helper.
+    engine_version = engine.get("engine_version")
+    assert isinstance(engine_version, str)
+    assert engine_version != ""
