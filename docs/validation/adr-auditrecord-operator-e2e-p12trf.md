@@ -158,9 +158,9 @@ This ADR documents what was validated by the **`p12trf-e2e-operator-3`** run and
     }
     ```
 
-- For run `61bd4ca2-…`, the runner:
+- For run `61bd4ca2-…` (p12trf-e2e-operator-3), the runner:
   - Detects `product_code = "P12TRF"` from the summary inputs.
-  - Loads the POC ProductDefinition JSON.
+  - Loads the POC ProductDefinition JSON via the local registry helper.
   - Mutates the `AuditRecord` with:
 
     ```json
@@ -173,6 +173,17 @@ This ADR documents what was validated by the **`p12trf-e2e-operator-3`** run and
 **Scope**
 
 - Linkage is **metadata-only**: no SERFF payloads, PDFs, or PAS details are embedded in the `AuditRecord`.
+
+**Registry-backed behaviour (p12trf-e2e-operator-7)**
+
+- After introducing the `ProductDefinition` registry abstraction (commit `5181224`), a fresh operator-driven run `p12trf-e2e-operator-7` was executed using the updated image:
+  - Runner image digest: `ghcr.io/billyridgway/actuarypoc@sha256:e75b5fb0deb61f893d53126df9d2a8e41c6d61d610044a98999e1d533ad241b5`.
+  - `IllustrationProject.status.lastRunId = c8e89f8f-3286-41e7-add6-1d4560bdd666`.
+- For that run:
+  - `audit/P12TRF/c8e89f8f-3286-41e7-add6-1d4560bdd666/audit_record.json` exists in MinIO.
+  - `product.product_definition_id` in the AuditRecord is still `"P12TRF-def-v1-poc"`, now resolved via the registry.
+  - `filings` contains at least one entry with `filing_id` starting with `"P12TRF-2020-01"` and `serff_tracking_id = "SERFF-PLACEHOLDER"`.
+- This confirms that moving from a hard-coded P12TRF lookup to the registry abstraction preserves the existing ProductDefinition + FilingRef wiring for P12TRF.
 
 ---
 
@@ -224,7 +235,7 @@ This ADR documents what was validated by the **`p12trf-e2e-operator-3`** run and
     - `projection_object`: same key as the request `key`.
     - `audit_object`: `audit/P12TRF/61bd4ca2-5eb1-46d8-ac29-4a950c1e9422/audit_record.json`.
   - `projection_summary`: summarized projection arrays and a `links.projection_object` field.
-  - `audit_summary`:
+  - `audit_summary` with ProductDefinition enrichment but **before** engine/runner wiring:
 
     ```json
     {
@@ -238,6 +249,27 @@ This ADR documents what was validated by the **`p12trf-e2e-operator-3`** run and
       "created_at": "2026-05-30T18:55:42.233469"
     }
     ```
+
+- For `p12trf-e2e-operator-6` (engine/runner metadata validation), using:
+
+  ```text
+  key = projections/p12trf/b5bb75ee-c635-4e2d-b0cf-8fd768a94cc5/projection.json
+  ```
+
+  the response includes an `audit_summary` populated from the new AuditRecord wiring:
+
+  ```json
+  {
+    "run_id": "b5bb75ee-c635-4e2d-b0cf-8fd768a94cc5",
+    "audit_record_object": "audit/P12TRF/b5bb75ee-c635-4e2d-b0cf-8fd768a94cc5/audit_record.json",
+    "product_code": "P12TRF",
+    "assumption_set_ids": ["p12trf-llm-v1"],
+    "dsl_file": "/opt/dagster/app/src/actuarypoc/dsl/examples/p12trf_term.yaml",
+    "engine_version": "0.1.0",
+    "runner_image": "ghcr.io/billyridgway/actuarypoc:main",
+    "created_at": "<timestamp>"
+  }
+  ```
 
 **Projection object naming validated**
 
@@ -319,6 +351,7 @@ This ADR documents what was validated by the **`p12trf-e2e-operator-3`** run and
   ```text
   audit/P12TRF/61bd4ca2-5eb1-46d8-ac29-4a950c1e9422/audit_record.json   # p12trf-e2e-operator-3
   audit/P12TRF/8dd5042e-7a4d-4fa7-bb33-2457b9653620/audit_record.json   # p12trf-e2e-operator-5
+  audit/P12TRF/b5bb75ee-c635-4e2d-b0cf-8fd768a94cc5/audit_record.json   # p12trf-e2e-operator-6
   ```
 
 **Other audit-related objects**
@@ -354,9 +387,27 @@ The following were **not** solved by the original p12trf-e2e-operator-3 validati
      - The projection object resolves in MinIO and is readable via the RunDetail API and UI.
    - Remaining caveat: older projection objects that pre-date this change still use the legacy flat `projection-<timestamp>.json` naming and will not be backfilled without a migration or re-run.
 
-3. **Engine version and runner image in AuditRecord**
-   - In-cluster `AuditRecord` and `audit_summary` continue to show `engine_version = null` and `runner_image = null`.
-   - The underlying data (image digest, etc.) exists at the Kubernetes level but is not yet wired through into the AuditRecord and RunDetail.
+3. **Engine version and runner image in AuditRecord** (**resolved for new runs**)
+   - Prior to the `dab7f66` actuarypoc image, in-cluster `AuditRecord` and `audit_summary` showed `engine_version = null` and `runner_image = null`, even though the underlying data existed at the Kubernetes level.
+   - With the refreshed `ghcr.io/billyridgway/actuarypoc:main` image (digest `sha256:c8900032d69d6230ad29223b8d3ba91936c6b614fea3e99a2fb84afb31d44661`) and the updated illustration operator wiring:
+     - The illustration Job for `p12trf-e2e-operator-6` ran with that image digest, as did the `projection-ui` Deployment.
+     - `audit/P12TRF/b5bb75ee-c635-4e2d-b0cf-8fd768a94cc5/audit_record.json` contains:
+
+       ```json
+       "engine": {
+         "engine_version": "0.1.0",
+         "runner_image": "ghcr.io/billyridgway/actuarypoc:main"
+       }
+       ```
+
+     - The corresponding RunDetail response for key
+
+       ```text
+       projections/p12trf/b5bb75ee-c635-4e2d-b0cf-8fd768a94cc5/projection.json
+       ```
+
+       includes an `audit_summary` block with non-null `engine_version` and `runner_image` that match the AuditRecord.
+   - Remaining caveat: older projections (and their AuditRecords) written before this change will continue to show `engine_version = null` and `runner_image = null` unless backfilled.
 
 4. **Single-product ProductDefinition**
    - Only P12TRF has a wired ProductDefinition JSON and filing refs.
