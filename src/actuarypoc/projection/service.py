@@ -15,6 +15,7 @@ from actuarypoc.projection.premium import PremiumLookupService, build_premium_ta
 from actuarypoc.config.assumptions import get_current_assumption_for_product
 from actuarypoc.storage.minio_client import get_bucket_name, get_minio_client
 from actuarypoc.version import get_engine_version
+from actuarypoc.product_registry import get_product_definition
 
 # Default prefix for projection objects when no override is supplied.
 PROJECTION_PREFIX = "projections/"
@@ -451,40 +452,6 @@ def build_input_snapshot_from_summary(summary: Dict[str, Any]) -> Dict[str, Any]
     }
 
 
-def load_product_definition_for_code(product_code: str) -> Optional[Dict[str, Any]]:
-    """Return the ProductDefinition payload for a given product code, if any.
-
-    This helper owns the details of how local POC product definitions are
-    packaged and where they live on disk so that callers do not need to know
-    about hard-coded file-system paths.
-    """
-
-    code = (product_code or "").upper()
-
-    try:
-        if code == "P12TRF":
-            # The POC ProductDefinition for P12TRF is shipped under
-            # actuarypoc/examples/product-definitions/ in the source tree.
-            base = (
-                Path(__file__)
-                .resolve()
-                .parents[1]
-                / ".."
-                / ".."
-                / "examples"
-                / "product-definitions"
-            )
-            pd_path = base / "p12trf-product-definition.json"
-            if pd_path.exists():
-                with pd_path.open("r", encoding="utf-8") as handle:
-                    return json.load(handle)
-    except Exception:
-        # Best-effort only; failures here should not break callers.
-        return None
-
-    return None
-
-
 def enrich_audit_record_with_product_definition(
     record: Dict[str, Any], product_definition: Optional[Dict[str, Any]]
 ) -> None:
@@ -601,9 +568,9 @@ def build_audit_record_from_summary(
         record.setdefault("dsl", {})["file"] = formula_path
 
     # Best-effort wiring to ProductDefinition + FilingRecord based on the
-    # local POC product definitions.
+    # local product registry abstraction.
     try:
-        product_definition = load_product_definition_for_code(product_code or "")
+        product_definition = get_product_definition(product_code or "")
         enrich_audit_record_with_product_definition(record, product_definition)
     except Exception:
         # Do not let ProductDefinition/FilingRecord wiring break audit

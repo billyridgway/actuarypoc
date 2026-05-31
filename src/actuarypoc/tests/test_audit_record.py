@@ -121,6 +121,34 @@ def test_build_audit_record_adds_product_definition_and_filings() -> None:
     )
 
 
+def test_build_audit_record_handles_missing_product_definition(monkeypatch) -> None:
+    service = _get_projection_service()
+
+    # Force the registry lookup to return None so we exercise the
+    # "no ProductDefinition available" path.
+    monkeypatch.setattr(service, "get_product_definition", lambda code: None)
+
+    summary = {
+      "generated_at": "2026-05-29T12:00:00Z",
+      "inputs": {
+        "product_code": "UNKNOWN-PRODUCT",
+        "assumption_set_id": "asn-x",
+        "formula_path": "src/actuarypoc/dsl/examples/unknown.yaml",
+      },
+    }
+
+    record = service.build_audit_record_from_summary(
+        summary,
+        projection_object="projections/UNKNOWN/run-123.json",
+    )
+
+    # Should not raise; product_definition_id remains None and filings empty.
+    assert record["product"].get("product_definition_id") is None
+    filings = record.get("filings") or []
+    assert isinstance(filings, list)
+    assert filings == []
+
+
 def test_build_audit_record_includes_engine_and_runner(monkeypatch) -> None:
     service = _get_projection_service()
 
