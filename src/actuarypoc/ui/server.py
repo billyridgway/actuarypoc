@@ -26,6 +26,358 @@ if _DIST_DIR.exists():  # pragma: no cover - environment dependent
     app.mount("/web", StaticFiles(directory=_DIST_DIR, html=True), name="web")
 
 
+# ---------------------------------------------------------------------------
+# POC: Product Model Review – P12TRF
+#
+# This endpoint assembles a minimal, actuary-facing JSON payload for the
+# Product Model Review UI. For v0.1 it is still POC-focused, but sections
+# such as Product Scope, Scenario Evidence, and internal Rate
+# Reconciliation are now derived from real P12TRF assets where possible
+# instead of being entirely static text.
+# ---------------------------------------------------------------------------
+
+_P12TRF_DEFINITION_PATH = _PROJECT_ROOT / "examples" / "product-definitions" / "p12trf-product-definition.json"
+
+
+def _load_p12trf_definition() -> Dict[str, Any]:
+    import json
+
+    try:
+        with open(_P12TRF_DEFINITION_PATH, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except Exception:
+        # Fall back to a minimal stub if the file cannot be read.
+        return {
+            "product_definition_id": "P12TRF-def-v1-poc",
+            "product_code": "P12TRF",
+            "marketing_name": "P12TRF Term Life (definition missing)",
+            "issue_age_limits": {"min": 0, "max": 0},
+            "riders": [],
+            "filing_refs": [],
+        }
+
+
+def _build_p12trf_scope(defn: Dict[str, Any]) -> Dict[str, Any]:
+    """Build the Product Scope & Gap coverage map from ProductDefinition.
+
+    This replaces static, hard-coded text with values derived from the
+    current ProductDefinition where possible, while remaining honest that
+    riders and other advanced features are not yet modeled.
+    """
+
+    filings = []
+    for ref in defn.get("filing_refs", []) or []:
+        filings.append(
+            {
+                "id": ref.get("filing_id") or "P12TRF-POC",
+                "name": ref.get("note") or "P12TRF filing (POC)",
+            }
+        )
+
+    issue_limits = defn.get("issue_age_limits") or {}
+    min_age = issue_limits.get("min")
+    max_age = issue_limits.get("max")
+
+    features_modeled = [
+        f"Base term life product for {defn.get('product_code', 'P12TRF')}",
+    ]
+    if min_age is not None and max_age is not None:
+        features_modeled.append(f"Issue ages {min_age}–{max_age} (POC range)")
+    features_modeled.append("Level term premiums (POC synthetic rates)")
+
+    riders = defn.get("riders") or []
+    features_not_modeled = []
+    if riders:
+        features_not_modeled.extend([f"Rider not modeled: {r}" for r in riders])
+    features_not_modeled.append("Other advanced features not yet modeled in this POC")
+
+    return {
+        "filings": filings or [
+            {"id": "P12TRF-POC", "name": "P12TRF filing (POC placeholder)"}
+        ],
+        "featuresModeled": features_modeled,
+        "featuresNotModeled": features_not_modeled,
+        "confidence": "medium",
+        "pocLabel": "Scope derived from current P12TRF ProductDefinition (POC).",
+    }
+
+
+_P12TRF_SCENARIO_CONFIG: List[Dict[str, Any]] = [
+    {
+        "id": "S1",
+        "name": "Typical case",
+        # P12TRF operator run 8 (20-year term) – projection object key
+        "projection_key": "projections/p12trf/282101b0-3062-471c-be2f-e414c5dd06f7/projection.json",
+    },
+    {
+        "id": "S2",
+        "name": "Short term, young age",
+        # Earlier P12TRF operator run with 10-year term (placeholder key)
+        "projection_key": "projections/p12trf/b5bb75ee-c635-4e2d-b0cf-8fd768a94cc5/projection.json",
+    },
+    {
+        "id": "S3",
+        "name": "Edge age",
+        # Another 10-year term run at higher issue age (placeholder key)
+        "projection_key": "projections/p12trf/61bd4ca2-5eb1-46d8-ac29-4a950c1e9422/projection.json",
+    },
+]
+
+
+def _build_p12trf_scenarios_and_rates() -> Dict[str, Any]:
+    """Build Scenario Evidence and a small internal rate reconciliation.
+
+    For each configured scenario, this function:
+
+    - Loads the corresponding projection from MinIO using the existing
+      get_projection / _build_run_detail helpers.
+    - Extracts real inputs (age, term, face, class, premium mode) and a
+      short summary of model behavior.
+    - Applies simple, objective checks (e.g. no death benefit after term)
+      to derive a PASS/FAIL status.
+    - Reuses the internal premium_comparison block from RunDetail to
+      generate a small reconciliation sample.
+    """
+
+    scenarios: List[Dict[str, Any]] = []
+    spot_checks: List[Dict[str, Any]] = []
+    exceptions: List[Dict[str, Any]] = []
+
+    for cfg in _P12TRF_SCENARIO_CONFIG:
+        proj_key = cfg["projection_key"]
+        try:
+            data = get_projection(proj_key)
+            rd = _build_run_detail(proj_key, data)
+        except Exception:
+            # If we cannot load this scenario, mark it as unavailable but
+            # keep the rest of the page responsive.
+            scenarios.append(
+                {
+                    "id": cfg["id"],
+                    "name": cfg["name"],
+                    "inputs": {},
+                    "expectedBehavior": [
+                        "Scenario could not be loaded from current P12TRF runs (POC).",
+                    ],
+                    "modelBehaviorSummary": "Unavailable",
+                    "status": "unknown",
+                    "ruleIds": ["rule_death_benefit_term", "rule_level_premiums"],
+                }
+            )
+            continue
+
+        core = (rd.get("policy_input") or {}).get("core_fields") or {}
+        pas_premium = (rd.get("policy_input") or {}).get("pas_premium") or {}
+        proj = rd.get("projection_summary") or {}
+
+        years = proj.get("years") or []
+        death_benefits = proj.get("death_benefits") or []
+        level_period = int(core.get("level_period") or 0)
+        face_amount = float(core.get("face_amount") or 0.0)
+
+        # Objective checks (intentionally simple for POC):
+        #  - no positive death benefit after the level period
+        #  - death benefit during the level period is reasonably close to
+        #    the face amount when non-zero
+        after_term_ok = True
+        during_term_ok = True
+        for year, db in zip(years, death_benefits):
+            try:
+                y = int(year)
+                dbv = float(db or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if y > level_period and dbv > 1e-6:
+                after_term_ok = False
+            if 1 <= y <= level_period and dbv > 1e-6 and face_amount > 0:
+                ratio = dbv / face_amount
+                if ratio < 0.95 or ratio > 1.05:
+                    during_term_ok = False
+
+        status = "pass" if after_term_ok and during_term_ok else "needs_review"
+
+        scenario_inputs = {
+            "age": int(core.get("issue_age") or 0),
+            "sex": (core.get("gender") or "").lower() or "unknown",
+            "smokerClass": str(core.get("smoker_class") or ""),
+            "termYears": level_period,
+            "faceAmount": face_amount,
+            "premiumMode": str(core.get("premium_mode") or "").upper() or "UNKNOWN",
+        }
+
+        behavior_summary_parts: List[str] = []
+        if face_amount > 0 and years:
+            behavior_summary_parts.append(
+                f"Death benefit is approximately level at face amount (${int(face_amount):,}) during the {level_period}-year term."
+            )
+        if not after_term_ok:
+            behavior_summary_parts.append("Non-zero death benefit detected after the level term (should be reviewed).")
+        if not during_term_ok:
+            behavior_summary_parts.append("Death benefit during term deviates materially from face amount (should be reviewed).")
+        if not behavior_summary_parts:
+            behavior_summary_parts.append("Model behavior appears consistent with a level term pattern for this scenario (POC).")
+
+        scenarios.append(
+            {
+                "id": cfg["id"],
+                "name": cfg["name"],
+                "inputs": scenario_inputs,
+                "expectedBehavior": [
+                    f"Flat term coverage for {level_period} years with face amount approximately equal to the death benefit.",
+                    "No death benefit after the end of the level term.",
+                ],
+                "modelBehaviorSummary": " ".join(behavior_summary_parts),
+                "status": status,
+                # Minimal drill-down data so that every PASS can be
+                # explained from the Trust Surface without calling
+                # additional endpoints.
+                "runId": (rd.get("run") or {}).get("run_id"),
+                "projectionKey": proj_key,
+                "checks": {
+                    "noDeathBenefitAfterTerm": after_term_ok,
+                    "deathBenefitApproxFaceDuringTerm": during_term_ok,
+                },
+                "projection": {
+                    "years": years,
+                    "deathBenefits": death_benefits,
+                },
+                "ruleIds": ["rule_death_benefit_term", "rule_level_premiums"],
+            }
+        )
+
+        # Internal premium reconciliation sample based on RunDetail's
+        # premium_comparison block.
+        prem = rd.get("premium_comparison") or {}
+        table_prem = prem.get("table_premium") or {}
+        pas = prem.get("pas_premium") or {}
+        if table_prem and pas:
+            filed = float(table_prem.get("expected_modal_premium") or 0.0)
+            model = float(pas.get("modal_premium") or 0.0)
+            diff = model - filed
+            spot = {
+                "age": int(core.get("issue_age") or 0),
+                "termYears": level_period,
+                "riskClass": str(core.get("risk_class") or ""),
+                "faceAmount": face_amount,
+                "filedPremium": filed,
+                "modelPremium": model,
+                "diff": diff,
+                "status": "ok" if abs(diff) <= max(0.01, 0.001 * filed) else "mismatch",
+            }
+            spot_checks.append(spot)
+            if spot["status"] == "mismatch":
+                exceptions.append({"kind": "premium_mismatch", "details": spot})
+
+    cells_checked = len(spot_checks)
+    cells_matched = sum(1 for s in spot_checks if s["status"] == "ok")
+
+    rates = {
+        "cellsChecked": cells_checked,
+        "cellsMatched": cells_matched,
+        "exceptions": exceptions,
+        "spotChecks": spot_checks,
+    }
+
+    return {"scenarios": scenarios, "rates": rates}
+
+
+@app.get("/api/product-model-review/p12trf")
+def api_product_model_review_p12trf() -> Dict[str, Any]:
+    """Return a Product Model Review payload for P12TRF.
+
+    This endpoint is still POC-focused but now derives key sections from
+    real P12TRF assets:
+
+    - Product Scope & Gaps from the P12TRF ProductDefinition
+    - Scenario Evidence from actual P12TRF projection runs
+    - A small internal rate reconciliation from the current premium logic
+    """
+
+    defn = _load_p12trf_definition()
+    scope = _build_p12trf_scope(defn)
+
+    # Static traceability rows remain POC text at this stage.
+    traceability = {
+        "rules": [
+            {
+                "id": "rule_death_benefit_term",
+                "name": "Death benefit during term",
+                "filingId": "P12TRF-2020-01 (POC)",
+                "page": 22,
+                "section": "Death Benefit (POC)",
+                "snippet": "If the Insured dies while this policy is in force and before the end of the level term period, we will pay the Face Amount shown on the Policy Schedule.",
+                "interpretation": "Pay face amount if death occurs during the level term; no benefit after term expiry.",
+                "confidence": "high",
+                "reviewStatus": "not_reviewed",
+            },
+            {
+                "id": "rule_level_premiums",
+                "name": "Level premiums",
+                "filingId": "P12TRF-2020-01 (POC)",
+                "page": 12,
+                "section": "Annual Premium per $1,000 – Level Term (POC)",
+                "snippet": "Annual Premium per $1,000 – 20-Year Level Term.",
+                "interpretation": "Premium is level each year; equal to rate per $1,000 times face amount divided by 1,000.",
+                "confidence": "high",
+                "reviewStatus": "not_reviewed",
+            },
+        ]
+    }
+
+    scen_and_rates = _build_p12trf_scenarios_and_rates()
+
+    # Assumptions and gaps remain mostly static POC hints for now but are
+    # clearly labeled as such.
+    assumptions = {
+        "filed": [],
+        "aiProposed": [
+            {
+                "id": "mortality",
+                "name": "Mortality basis",
+                "value": "2015 VBT, ANB (POC placeholder)",
+                "source": "ai_default",
+                "sensitivitySummary": "PV impact is small for reasonable alternatives (POC).",
+                "humanApproval": "pending",
+            },
+            {
+                "id": "lapse",
+                "name": "Lapse pattern",
+                "value": "5% annually after year 3 (POC placeholder)",
+                "source": "ai_default",
+                "sensitivitySummary": "PV impact is moderate; should be reviewed for production.",
+                "humanApproval": "pending",
+            },
+        ],
+    }
+
+    gaps = {
+        "missingFeatures": [
+            {
+                "id": "gap_riders_not_modeled",
+                "description": "Optional riders (e.g. waiver of premium, child term) from the P12TRF ProductDefinition are not yet modeled in this POC.",
+                "severity": "medium",
+            }
+        ],
+        "ambiguousLanguage": [],
+    }
+
+    product_block = {
+        "code": defn.get("product_code", "P12TRF"),
+        "name": defn.get("marketing_name", "P12TRF Term Life (POC)"),
+        "definitionId": defn.get("product_definition_id", "P12TRF-def-v1-poc"),
+    }
+
+    return {
+        "product": product_block,
+        "scope": scope,
+        "traceability": traceability,
+        "rates": scen_and_rates["rates"],
+        "scenarios": scen_and_rates["scenarios"],
+        "assumptions": assumptions,
+        "gaps": gaps,
+    }
+
+
 @app.get("/health")
 def health() -> Dict[str, str]:
     return {"status": "ok"}

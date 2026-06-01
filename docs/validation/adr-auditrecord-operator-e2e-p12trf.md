@@ -1,10 +1,15 @@
-# ADR: Operator-Driven AuditRecord E2E Validation (p12trf-e2e-operator-3)
+# ADR: Operator-Driven AuditRecord E2E Validation (P12TRF operator runs 3, 5, 6, 7)
 
 ## Context
 
 We needed to prove that the end-to-end path from an `IllustrationProject` CRD through the illustration operator, projection runner, storage, API, and UI correctly produces and surfaces an `AuditRecord` enriched with ProductDefinition and Filing metadata for the POC product **P12TRF**.
 
-This ADR documents what was validated by the **`p12trf-e2e-operator-3`** run and what remains as known gaps.
+This ADR was originally written for **`p12trf-e2e-operator-3`** and has since been extended to cover:
+- **`p12trf-e2e-operator-5`** – canonical `<RUN_ID>/projection.json` naming and CRD status alignment
+- **`p12trf-e2e-operator-6`** – engine version and runner image enrichment
+- **`p12trf-e2e-operator-7`** – first run using the **ProductDefinition registry abstraction** (no hardcoded P12TRF lookup) while confirming that `product_definition_id` and filing refs remain correctly wired.
+
+Collectively these runs define the current end-to-end standard for the P12TRF POC product, along with the remaining gaps below.
 
 ---
 
@@ -177,13 +182,37 @@ This ADR documents what was validated by the **`p12trf-e2e-operator-3`** run and
 **Registry-backed behaviour (p12trf-e2e-operator-7)**
 
 - After introducing the `ProductDefinition` registry abstraction (commit `5181224`), a fresh operator-driven run `p12trf-e2e-operator-7` was executed using the updated image:
-  - Runner image digest: `ghcr.io/billyridgway/actuarypoc@sha256:e75b5fb0deb61f893d53126df9d2a8e41c6d61d610044a98999e1d533ad241b5`.
-  - `IllustrationProject.status.lastRunId = c8e89f8f-3286-41e7-add6-1d4560bdd666`.
-- For that run:
-  - `audit/P12TRF/c8e89f8f-3286-41e7-add6-1d4560bdd666/audit_record.json` exists in MinIO.
-  - `product.product_definition_id` in the AuditRecord is still `"P12TRF-def-v1-poc"`, now resolved via the registry.
-  - `filings` contains at least one entry with `filing_id` starting with `"P12TRF-2020-01"` and `serff_tracking_id = "SERFF-PLACEHOLDER"`.
-- This confirms that moving from a hard-coded P12TRF lookup to the registry abstraction preserves the existing ProductDefinition + FilingRef wiring for P12TRF.
+  - Runner image digest (as observed from both the `projection-ui` Deployment pod and the illustration Job pod):
+
+    ```text
+    ghcr.io/billyridgway/actuarypoc@sha256:b650fd044b3eb278a2d56f5783b402e5a13807682cb2769c636797e7001da3fb
+    ```
+
+  - `IllustrationProject.status.lastRunId = 4e5fd783-dcb6-459e-a4d5-1f5ef19c0fe2`.
+- For that run, the in-cluster `AuditRecord` at
+
+  ```text
+  audit/P12TRF/4e5fd783-dcb6-459e-a4d5-1f5ef19c0fe2/audit_record.json
+  ```
+
+  contains (excerpt):
+
+  ```json
+  {
+    "product": {
+      "product_code": "P12TRF",
+      "product_definition_id": "P12TRF-def-v1-poc"
+    },
+    "filings": [
+      {
+        "filing_id": "P12TRF-2020-01 (placeholder)",
+        "serff_tracking_id": "SERFF-PLACEHOLDER"
+      }
+    ]
+  }
+  ```
+
+- This confirms that moving from a hard-coded P12TRF lookup to the ProductDefinition registry abstraction preserves the existing ProductDefinition + FilingRef wiring for P12TRF.
 
 ---
 
@@ -271,6 +300,33 @@ This ADR documents what was validated by the **`p12trf-e2e-operator-3`** run and
   }
   ```
 
+- For `p12trf-e2e-operator-7` (ProductDefinition registry milestone), using:
+
+  ```text
+  key = projections/p12trf/4e5fd783-dcb6-459e-a4d5-1f5ef19c0fe2/projection.json
+  ```
+
+  the response includes:
+
+  - `audit_sources.objects.projection_object = "projections/p12trf/4e5fd783-dcb6-459e-a4d5-1f5ef19c0fe2/projection.json"`.
+  - `audit_sources.objects.audit_object = "audit/P12TRF/4e5fd783-dcb6-459e-a4d5-1f5ef19c0fe2/audit_record.json"`.
+  - An `audit_summary` block populated from the same AuditRecord, with:
+
+    ```json
+    {
+      "run_id": "4e5fd783-dcb6-459e-a4d5-1f5ef19c0fe2",
+      "audit_record_object": "audit/P12TRF/4e5fd783-dcb6-459e-a4d5-1f5ef19c0fe2/audit_record.json",
+      "product_code": "P12TRF",
+      "assumption_set_ids": ["term-risk-class-mapping-v1"],
+      "dsl_file": "/opt/dagster/app/src/actuarypoc/dsl/examples/term_risk_class_mapping.yaml",
+      "engine_version": "0.1.0",
+      "runner_image": null,
+      "created_at": "2026-05-31T12:57:56.474200"
+    }
+    ```
+
+  This run exercises the new ProductDefinition registry-backed wiring end-to-end, while also surfacing a **regression** in `runner_image` propagation (see Known Gaps).
+
 **Projection object naming validated**
 
 - Projection objects live under a product-specific prefix:
@@ -352,6 +408,7 @@ This ADR documents what was validated by the **`p12trf-e2e-operator-3`** run and
   audit/P12TRF/61bd4ca2-5eb1-46d8-ac29-4a950c1e9422/audit_record.json   # p12trf-e2e-operator-3
   audit/P12TRF/8dd5042e-7a4d-4fa7-bb33-2457b9653620/audit_record.json   # p12trf-e2e-operator-5
   audit/P12TRF/b5bb75ee-c635-4e2d-b0cf-8fd768a94cc5/audit_record.json   # p12trf-e2e-operator-6
+  audit/P12TRF/4e5fd783-dcb6-459e-a4d5-1f5ef19c0fe2/audit_record.json   # p12trf-e2e-operator-7 (ProductDefinition registry)
   ```
 
 **Other audit-related objects**
@@ -387,7 +444,7 @@ The following were **not** solved by the original p12trf-e2e-operator-3 validati
      - The projection object resolves in MinIO and is readable via the RunDetail API and UI.
    - Remaining caveat: older projection objects that pre-date this change still use the legacy flat `projection-<timestamp>.json` naming and will not be backfilled without a migration or re-run.
 
-3. **Engine version and runner image in AuditRecord** (**resolved for new runs**)
+3. **Engine version and runner image in AuditRecord** (**partially resolved; regressed for registry-backed run 7**)
    - Prior to the `dab7f66` actuarypoc image, in-cluster `AuditRecord` and `audit_summary` showed `engine_version = null` and `runner_image = null`, even though the underlying data existed at the Kubernetes level.
    - With the refreshed `ghcr.io/billyridgway/actuarypoc:main` image (digest `sha256:c8900032d69d6230ad29223b8d3ba91936c6b614fea3e99a2fb84afb31d44661`) and the updated illustration operator wiring:
      - The illustration Job for `p12trf-e2e-operator-6` ran with that image digest, as did the `projection-ui` Deployment.
@@ -407,7 +464,12 @@ The following were **not** solved by the original p12trf-e2e-operator-3 validati
        ```
 
        includes an `audit_summary` block with non-null `engine_version` and `runner_image` that match the AuditRecord.
-   - Remaining caveat: older projections (and their AuditRecords) written before this change will continue to show `engine_version = null` and `runner_image = null` unless backfilled.
+   - For the ProductDefinition registry-backed run `p12trf-e2e-operator-7` (digest `sha256:b650fd044b3eb278a2d56f5783b402e5a13807682cb2769c636797e7001da3fb`):
+     - `audit/P12TRF/4e5fd783-dcb6-459e-a4d5-1f5ef19c0fe2/audit_record.json` has `engine.engine_version = "0.1.0"` but `engine.runner_image = null`.
+     - The corresponding `audit_summary` in `GET /api/run-detail?key=projections/p12trf/4e5fd783-dcb6-459e-a4d5-1f5ef19c0fe2/projection.json` also reports `engine_version = "0.1.0"` and `runner_image = null`.
+   - Remaining caveats:
+     - Older projections (and their AuditRecords) written before `dab7f66` continue to show `engine_version = null` and `runner_image = null` unless backfilled.
+     - The registry-backed path for run 7 currently **regresses** `runner_image` propagation; this needs a follow-up wiring fix before we can claim this gap fully closed for all new runs.
 
 4. **Single-product ProductDefinition**
    - Only P12TRF has a wired ProductDefinition JSON and filing refs.
@@ -429,3 +491,80 @@ The following were **not** solved by the original p12trf-e2e-operator-3 validati
    - In this validation, `assumptionApproved` was toggled via a direct status patch. A full operator+UI-driven approval workflow (with audit history) is not yet implemented.
 
 These gaps should inform the next set of platform milestones.
+## 2026-05-31T10:12:00-05:00 Evidence: inspect IllustrationProject p12trf-e2e-operator-7
+    apiVersion: illustrations.poc/v1alpha1
+    kind: IllustrationProject
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/last-applied-configuration: |
+          {"apiVersion":"illustrations.poc/v1alpha1","kind":"IllustrationProject","metadata":{"annotations":{},"name":"p12trf-e2e-operator-7","namespace":"illustrations-poc"},"spec":{"horizonYears":40,"mode":"adhoc","notes":"E2E operator validation run 7 for ProductDefinition registry","productId":"p12trf"}}
+      creationTimestamp: "2026-05-31T12:57:46Z"
+      generation: 1
+      name: p12trf-e2e-operator-7
+      namespace: illustrations-poc
+      resourceVersion: "1029914"
+      uid: 4e5fd783-dcb6-459e-a4d5-1f5ef19c0fe2
+    spec:
+      horizonYears: 40
+      mode: adhoc
+      notes: E2E operator validation run 7 for ProductDefinition registry
+      productId: p12trf
+    status:
+      assumptionApproved: true
+      assumptionSetId: p12trf-llm-v1
+      auditObject: audit/p12trf/4e5fd783-dcb6-459e-a4d5-1f5ef19c0fe2/audit.json
+      inputSnapshotObject: audit/p12trf/4e5fd783-dcb6-459e-a4d5-1f5ef19c0fe2/inputs.json
+      lastRunId: 4e5fd783-dcb6-459e-a4d5-1f5ef19c0fe2
+      lastRunTime: "2026-05-31T12:57:46Z"
+      phase: Succeeded
+      projectionObject: projections/p12trf/4e5fd783-dcb6-459e-a4d5-1f5ef19c0fe2/projection.json
+      resolved:
+        assumptionId: p12trf-llm-v1
+        docPrefix: docs/p12trf/
+        dslFile: p12trf_term.yaml
+        filingsPrefix: filings/p12trf/
+        pasKey: pas.json
+        productId: p12trf
+      runnerImage: ghcr.io/billyridgway/actuarypoc:main
+## 2026-05-31T10:12:10-05:00 Evidence: pod imageIDs for projection-ui and p12trf-e2e-operator-7 job
+    ghcr.io/billyridgway/actuarypoc:main
+    ghcr.io/billyridgway/actuarypoc@sha256:b650fd044b3eb278a2d56f5783b402e5a13807682cb2769c636797e7001da3fb
+
+    ghcr.io/billyridgway/actuarypoc:main
+    ghcr.io/billyridgway/actuarypoc@sha256:b650fd044b3eb278a2d56f5783b402e5a13807682cb2769c636797e7001da3fb
+## 2026-05-31T10:12:20-05:00 Evidence: AuditRecord engine block for run 4e5fd783-dcb6-459e-a4d5-1f5ef19c0fe2
+## 2026-05-31T10:12:25-05:00 Evidence: RunDetail audit_summary for run 4e5fd783-dcb6-459e-a4d5-1f5ef19c0fe2
+## 2026-05-31T10:12:35-05:00 Evidence: RunDetail audit_summary for run 4e5fd783-dcb6-459e-a4d5-1f5ef19c0fe2 (after port-forward)
+    {
+      "run_id": "4e5fd783-dcb6-459e-a4d5-1f5ef19c0fe2",
+      "audit_record_object": "audit/P12TRF/4e5fd783-dcb6-459e-a4d5-1f5ef19c0fe2/audit_record.json",
+      "product_code": "P12TRF",
+      "assumption_set_ids": [
+        "term-risk-class-mapping-v1"
+      ],
+      "dsl_file": "/opt/dagster/app/src/actuarypoc/dsl/examples/term_risk_class_mapping.yaml",
+      "engine_version": "0.1.0",
+      "runner_image": null,
+      "created_at": "2026-05-31T12:57:56.474200"
+    }
+## 2026-05-31T10:12:40-05:00 Evidence: UI HTTP check for run 4e5fd783-dcb6-459e-a4d5-1f5ef19c0fe2
+    307
+## 2026-05-31T10:12:45-05:00 Evidence: AuditRecord engine block via projection-ui for run 4e5fd783-dcb6-459e-a4d5-1f5ef19c0fe2
+    null
+## 2026-05-31T10:13:00-05:00 Evidence: Job pod env for p12trf-e2e-operator-7 (no RUNNER_IMAGE present)
+    [{"name":"PRODUCT_ID","value":"p12trf"}
+"name":"PROJECT_NAME","value":"p12trf-e2e-operator-7"}
+"name":"RUN_ID","value":"4e5fd783-dcb6-459e-a4d5-1f5ef19c0fe2"}
+"name":"FILINGS_PREFIX","value":"filings/p12trf/"}
+"name":"POLICIES_PREFIX","value":"p12trf/"}
+"name":"PROJECTIONS_PREFIX","value":"projections/p12trf/"}
+"name":"PYTHONPATH","value":"/opt/dagster/app/src"}
+"name":"PROJECTION_OBJECT_NAME","value":"projections/p12trf/4e5fd783-dcb6-459e-a4d5-1f5ef19c0fe2/projection.json"}
+"name":"AUDIT_OBJECT_NAME","value":"audit/p12trf/4e5fd783-dcb6-459e-a4d5-1f5ef19c0fe2/audit.json"}
+"name":"INPUT_SNAPSHOT_OBJECT_NAME","value":"audit/p12trf/4e5fd783-dcb6-459e-a4d5-1f5ef19c0fe2/inputs.json"}
+"name":"MINIO_ENDPOINT","value":"minio.minio-system.svc.cluster.local:9000"}
+"name":"MINIO_ACCESS_KEY","value":"admin"}
+"name":"MINIO_SECRET_KEY","value":"password"}
+"name":"MINIO_BUCKET","value":"illuminet"}
+"name":"MINIO_SECURE","value":"false"}
+"name":"POSTGRES_DSN","valueFrom":{"secretKeyRef":{"key":"POSTGRES_DSN","name":"postgres-secret"}}}]
