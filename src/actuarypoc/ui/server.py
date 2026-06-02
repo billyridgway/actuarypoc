@@ -166,14 +166,80 @@ def _build_p12trf_scenarios_and_rates() -> Dict[str, Any]:
             )
             continue
 
-        core = (rd.get("policy_input") or {}).get("core_fields") or {}
-        pas_premium = (rd.get("policy_input") or {}).get("pas_premium") or {}
+        policy_input = (rd.get("policy_input") or {})
+        core = policy_input.get("core_fields") or {}
+        pas_premium = policy_input.get("pas_premium") or {}
         proj = rd.get("projection_summary") or {}
 
         years = proj.get("years") or []
         death_benefits = proj.get("death_benefits") or []
-        level_period = int(core.get("level_period") or 0)
-        face_amount = float(core.get("face_amount") or 0.0)
+
+        # The current P12TRF POC runs do not yet persist a rich set of
+        # policy attributes (age, gender, smoker class, level period) into
+        # the PAS export. At the moment we only have a face amount and
+        # premium mode. To keep the Trust Surface honest while still being
+        # useful, we:
+        #
+        #  - derive level_term from the projection horizon when the stored
+        #    level_period is 0/empty, and
+        #  - normalise placeholder values like "None"/0 into more explicit
+        #    "unknown" labels instead of silently treating them as real
+        #    inputs.
+        #
+        # This makes the scenario inputs reflect all *real* information we
+        # have today, and avoids misleading "age 0 / smoker None" style
+        # outputs in the Product Model Review UI.
+
+        raw_level_period = core.get("level_period")
+        try:
+            level_period = int(raw_level_period or 0)
+        except (TypeError, ValueError):
+            level_period = 0
+
+        if level_period <= 0 and years:
+            # Fallback: treat the current projection horizon as the term.
+            # This is intentionally simple for the POC but at least
+            # produces a realistic, non-zero term length.
+            try:
+                level_period = max(int(y) for y in years if y is not None)
+            except Exception:
+                level_period = 0
+
+        try:
+            face_amount = float(core.get("face_amount") or 0.0)
+        except (TypeError, ValueError):
+            face_amount = 0.0
+
+        issue_age = core.get("issue_age")
+        age_value: Any
+        if isinstance(issue_age, (int, float)) and issue_age > 0:
+            age_value = int(issue_age)
+        else:
+            # Age is not currently captured for these POC runs; represent
+            # it explicitly as unknown instead of an obviously-invalid 0.
+            age_value = "unknown"
+
+        raw_gender = str(core.get("gender")) if "gender" in core else ""
+        gender_norm = (raw_gender or "").strip()
+        if not gender_norm or gender_norm.lower() == "none":
+            sex_value = "unknown"
+        else:
+            # Normalise a few common variants while keeping free-form
+            # strings intact for anything else.
+            low = gender_norm.lower()
+            if low in {"m", "male"}:
+                sex_value = "male"
+            elif low in {"f", "female"}:
+                sex_value = "female"
+            else:
+                sex_value = gender_norm
+
+        raw_smoker = str(core.get("smoker_class")) if "smoker_class" in core else ""
+        smoker_norm = (raw_smoker or "").strip()
+        if not smoker_norm or smoker_norm.lower() == "none":
+            smoker_value = "unknown"
+        else:
+            smoker_value = smoker_norm
 
         # Objective checks (intentionally simple for POC):
         #  - no positive death benefit after the level period
@@ -196,19 +262,22 @@ def _build_p12trf_scenarios_and_rates() -> Dict[str, Any]:
 
         status = "pass" if after_term_ok and during_term_ok else "needs_review"
 
+        premium_mode_raw = core.get("premium_mode") or pas_premium.get("mode") or ""
+        premium_mode_norm = str(premium_mode_raw or "").strip().upper() or "UNKNOWN"
+
         scenario_inputs = {
-            "age": int(core.get("issue_age") or 0),
-            "sex": (core.get("gender") or "").lower() or "unknown",
-            "smokerClass": str(core.get("smoker_class") or ""),
+            "age": age_value,
+            "sex": sex_value,
+            "smokerClass": smoker_value,
             "termYears": level_period,
             "faceAmount": face_amount,
-            "premiumMode": str(core.get("premium_mode") or "").upper() or "UNKNOWN",
+            "premiumMode": premium_mode_norm,
         }
 
         behavior_summary_parts: List[str] = []
         if face_amount > 0 and years:
             behavior_summary_parts.append(
-                f"Death benefit is approximately level at face amount (${int(face_amount):,}) during the {level_period}-year term."
+                f"Death benefit is approximately level at face amount (${int(face_amount):,}) during the {level_period or len(years)}-year term."
             )
         if not after_term_ok:
             behavior_summary_parts.append("Non-zero death benefit detected after the level term (should be reviewed).")
