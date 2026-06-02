@@ -116,6 +116,63 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
   const selectedScenario =
     scenarios.find((s) => s.id === selectedScenarioId) || (scenarios.length > 0 ? scenarios[0] : null);
 
+  // Simple, MVP-only Final Actuary Decision form state.
+  const [reviewer, setReviewer] = React.useState("");
+  const [decision, setDecision] = React.useState("");
+  const [exclusions, setExclusions] = React.useState("");
+  const [comments, setComments] = React.useState("");
+  const [saving, setSaving] = React.useState(false);
+  const [saveMessage, setSaveMessage] = React.useState<string | null>(null);
+  const [saveError, setSaveError] = React.useState<string | null>(null);
+
+  const onSubmitDecision = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSaveMessage(null);
+    setSaveError(null);
+
+    const trimmedDecision = decision.trim();
+    if (!trimmedDecision) {
+      setSaveError("Please select a decision.");
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const payload = {
+        reviewer: reviewer.trim() || undefined,
+        decision: trimmedDecision,
+        exclusions: exclusions.trim() || undefined,
+        comments: comments.trim() || undefined,
+      };
+
+      const res = await fetch(`/api/product-model-review/${encodeURIComponent(product.code)}/decision`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || `HTTP ${res.status}`);
+      }
+
+      const data = (await res.json()) as {
+        id?: number;
+        created_at?: string;
+      };
+
+      setSaveMessage(
+        data && data.created_at
+          ? `Decision saved at ${data.created_at}.`
+          : "Decision saved (timestamp unavailable).",
+      );
+    } catch (err: any) {
+      setSaveError(err?.message || "Failed to save decision.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <div className="run-detail-page">
       <header className="card">
@@ -455,10 +512,70 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
 
       <section className="card">
         <h2>Final Actuary Decision (POC)</h2>
-        <p>
-          This is a POC-only, read-only view. In a real workflow, this is where an actuary would record “Approve for POC / Approve
-          with exclusions / Request changes / Reject” and provide comments.
+        <p className="muted">
+          MVP-only decision capture for the P12TRF Product Model Review. This does not yet implement a full workflow or
+          permissions model.
         </p>
+
+        <form onSubmit={onSubmitDecision} className="form-grid">
+          <div className="form-row">
+            <label htmlFor="pmr-reviewer">Reviewer</label>
+            <input
+              id="pmr-reviewer"
+              type="text"
+              value={reviewer}
+              onChange={(e) => setReviewer(e.target.value)}
+              placeholder="Your name"
+            />
+          </div>
+
+          <div className="form-row">
+            <label htmlFor="pmr-decision">Decision</label>
+            <select
+              id="pmr-decision"
+              value={decision}
+              onChange={(e) => setDecision(e.target.value)}
+              required
+            >
+              <option value="">Select…</option>
+              <option value="approve_for_poc">Approve for POC</option>
+              <option value="approve_with_exclusions">Approve with exclusions</option>
+              <option value="request_changes">Request changes</option>
+              <option value="reject">Reject</option>
+            </select>
+          </div>
+
+          <div className="form-row">
+            <label htmlFor="pmr-exclusions">Exclusions (optional)</label>
+            <textarea
+              id="pmr-exclusions"
+              value={exclusions}
+              onChange={(e) => setExclusions(e.target.value)}
+              rows={2}
+              placeholder="List any exclusions or conditions for approval."
+            />
+          </div>
+
+          <div className="form-row">
+            <label htmlFor="pmr-comments">Comments (optional)</label>
+            <textarea
+              id="pmr-comments"
+              value={comments}
+              onChange={(e) => setComments(e.target.value)}
+              rows={3}
+              placeholder="Additional notes or rationale for this decision."
+            />
+          </div>
+
+          <div className="form-row">
+            <button type="submit" disabled={saving}>
+              {saving ? "Saving…" : "Save decision"}
+            </button>
+          </div>
+
+          {saveMessage && <p className="success">{saveMessage}</p>}
+          {saveError && <p className="error">{saveError}</p>}
+        </form>
       </section>
     </div>
   );
