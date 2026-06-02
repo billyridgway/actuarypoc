@@ -11,6 +11,12 @@ from actuarypoc.storage.minio_client import get_minio_client, get_bucket_name
 from actuarypoc.config.assumptions import list_assumption_sets, approve_assumption_set
 from actuarypoc.dsl.policy_dsl import load_formula
 from actuarypoc.projection.premium import PremiumLookupService, build_premium_table, select_face_band
+from actuarypoc.storage.postgres_client import record_product_model_review_decision
+
+try:  # FastAPI can be configured with either Pydantic v1 or v2
+    from pydantic import BaseModel
+except Exception:  # pragma: no cover - extremely unlikely in this env
+    BaseModel = object  # type: ignore[assignment]
 
 
 app = FastAPI(title="ActuaryPOC Projection Viewer", version="0.1.0")
@@ -37,6 +43,31 @@ if _DIST_DIR.exists():  # pragma: no cover - environment dependent
 # ---------------------------------------------------------------------------
 
 _P12TRF_DEFINITION_PATH = _PROJECT_ROOT / "examples" / "product-definitions" / "p12trf-product-definition.json"
+
+
+class ProductModelReviewDecisionRequest(BaseModel):  # type: ignore[misc]
+    reviewer: Optional[str]
+    decision: str
+    exclusions: Optional[str] = None
+    comments: Optional[str] = None
+
+
+class ProductModelReviewDecisionResponse(BaseModel):  # type: ignore[misc]
+    id: Optional[int] = None
+    product_code: str
+    reviewer: Optional[str] = None
+    decision: str
+    exclusions: Optional[str] = None
+    comments: Optional[str] = None
+    created_at: Optional[str] = None
+
+
+_ALLOWED_PMR_DECISIONS = {
+    "approve_for_poc",
+    "approve_with_exclusions",
+    "request_changes",
+    "reject",
+}
 
 
 def _load_p12trf_definition() -> Dict[str, Any]:
@@ -445,6 +476,61 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
         "assumptions": assumptions,
         "gaps": gaps,
     }
+
+
+@app.post("/api/product-model-review/{product_code}/decision", response_model=ProductModelReviewDecisionResponse)
+def api_product_model_review_decision(product_code: str, payload: ProductModelReviewDecisionRequest) -> ProductModelReviewDecisionResponse:  # type: ignore[valid-type]
+    """Persist a simple Product Model Review decision for a product.
+
+    This is intentionally MVP-only: a single reviewer records a decision
+    for a given product, along with optional exclusions and free-text
+    comments. There is no workflow engine, multi-user coordination, or
+    permissions model at this stage.
+    """
+
+    decision = (payload.decision or "").strip().lower()
+    if decision not in _ALLOWED_PMR_DECISIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported decision value '{payload.decision}'. Expected one of: {sorted(_ALLOWED_PMR_DECISIONS)}",
+        )
+
+    reviewer = (payload.reviewer or "").strip() or None
+    exclusions = (payload.exclusions or "").strip() or None
+    comments = (payload.comments or "").strip() or None
+
+    # Best-effort Postgres persistence. If Postgres is not configured or
+    # unavailable, we still return a 200-level response with the echoed
+    # payload so that the UI remains responsive, but in the Pi cluster we
+    # expect POSTGRES_DSN to be set and the insert to succeed.
+    rec = record_product_model_review_decision(
+        product_code=product_code,
+        reviewer=reviewer,
+        decision=decision,
+        exclusions=exclusions,
+        comments=comments,
+    )
+
+    if rec is None:
+        return ProductModelReviewDecisionResponse(
+            id=None,
+            product_code=product_code,
+            reviewer=reviewer,
+            decision=decision,
+            exclusions=exclusions,
+            comments=comments,
+            created_at=None,
+        )
+
+    return ProductModelReviewDecisionResponse(
+        id=rec.get("id"),
+        product_code=rec.get("product_code", product_code),
+        reviewer=rec.get("reviewer", reviewer),
+        decision=rec.get("decision", decision),
+        exclusions=rec.get("exclusions", exclusions),
+        comments=rec.get("comments", comments),
+        created_at=str(rec.get("created_at")) if rec.get("created_at") is not None else None,
+    )
 
 
 @app.get("/health")

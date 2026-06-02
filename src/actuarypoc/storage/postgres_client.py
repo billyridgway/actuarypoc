@@ -97,6 +97,19 @@ CREATE TABLE IF NOT EXISTS golden_test_results (
     details text,
     created_at timestamptz DEFAULT now()
 );
+
+CREATE TABLE IF NOT EXISTS product_model_review_decisions (
+    id bigserial PRIMARY KEY,
+    product_code text NOT NULL,
+    reviewer text,
+    decision text NOT NULL,
+    exclusions text,
+    comments text,
+    created_at timestamptz DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_pmr_decisions_product
+    ON product_model_review_decisions(product_code);
 """
 
 
@@ -263,3 +276,51 @@ def record_illustration_run(
                 )
     except Exception as exc:  # noqa: BLE001
         _note_failure(exc)
+
+
+def record_product_model_review_decision(
+    *,
+    product_code: str,
+    reviewer: str | None,
+    decision: str,
+    exclusions: str | None = None,
+    comments: str | None = None,
+) -> Optional[Dict[str, Any]]:
+    """Persist a Product Model Review decision, returning the stored row.
+
+    This is intentionally MVP-simple: a single table capturing who made a
+    decision for a given product, what they decided, and any exclusions /
+    comments. Callers are expected to enforce allowed decision values.
+    """
+
+    ensure_schema()
+    try:
+        with _conn() as conn:
+            if conn is None:
+                return None
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO product_model_review_decisions (
+                        product_code, reviewer, decision, exclusions, comments
+                    )
+                    VALUES (%s, %s, %s, %s, %s)
+                    RETURNING id, product_code, reviewer, decision, exclusions, comments, created_at
+                    """,
+                    (product_code, reviewer, decision, exclusions, comments),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                return {
+                    "id": row[0],
+                    "product_code": row[1],
+                    "reviewer": row[2],
+                    "decision": row[3],
+                    "exclusions": row[4],
+                    "comments": row[5],
+                    "created_at": row[6].isoformat() if getattr(row[6], "isoformat", None) else row[6],
+                }
+    except Exception as exc:  # noqa: BLE001
+        _note_failure(exc)
+        return None
