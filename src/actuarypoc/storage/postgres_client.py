@@ -65,9 +65,6 @@ CREATE INDEX IF NOT EXISTS idx_illustration_runs_created
 CREATE INDEX IF NOT EXISTS idx_assumption_sets_product
     ON assumption_sets(product_id);
 
-CREATE INDEX IF NOT EXISTS idx_documents_product
-    ON documents(product_id);
-
 CREATE TABLE IF NOT EXISTS documents (
     id bigserial PRIMARY KEY,
     product_id text,
@@ -79,6 +76,9 @@ CREATE TABLE IF NOT EXISTS documents (
     extraction_status text,
     created_at timestamptz DEFAULT now()
 );
+
+CREATE INDEX IF NOT EXISTS idx_documents_product
+    ON documents(product_id);
 
 CREATE TABLE IF NOT EXISTS golden_tests (
     id bigserial PRIMARY KEY,
