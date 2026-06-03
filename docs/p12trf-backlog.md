@@ -65,7 +65,34 @@ Remaining / next candidate slices:
 - Trust Surface no longer needs to infer `termYears` from projection years for P12TRF; it reads `level_period` (or equivalent) from the stored inputs when available, and only falls back to horizon-based derivation when `level_period` is truly missing.
 - Scenario inputs only show `"unknown"` when the upstream source data truly lacks that field (not because the pipeline dropped it).
 
-**Next operational step:** re-run the P12TRF projection Job (or regenerate the specific S1/S2 projection artefacts) under the new image so that their projection JSON objects gain a `policy_inputs` block populated from real policy data. Once that happens, the existing PMR wiring will surface real values for S1/S2 without further code changes.
+**Operational verification (Pi k3s cluster, 2026-06-02):**
+
+- Re-ran the illustration Jobs for `p12trf-e2e-operator-6` and `p12trf-e2e-operator-8` by:
+  - Deleting their existing Jobs:
+    - `illustration-p12trf-e2e-operator-6`
+    - `illustration-p12trf-e2e-operator-8`
+  - Patching the corresponding `IllustrationProject` specs to bump `spec.notes` and trigger a reconcile.
+  - Observed new Jobs created and completed successfully, using the runner image:
+    - `ghcr.io/billyridgway/actuarypoc:main` (imagePullPolicy `Always`, so latest digest including `policy_inputs` plumbing).
+  - Confirmed the regenerated projection objects for S1 and S2:
+    - `projections/p12trf/282101b0-3062-471c-be2f-e414c5dd06f7/projection.json` (S1)
+    - `projections/p12trf/b5bb75ee-c635-4e2d-b0cf-8fd768a94cc5/projection.json` (S2)
+    now contain an `inputs.policy_inputs` block with:
+    - `face_amount = 450000`
+    - `premium_mode = "Annual"`
+    - other fields (`issue_age`, `gender`, `smoker_class`, `risk_class`, `level_period`) present but `null`.
+- `/api/run-detail?key=...` for these projection keys now surfaces:
+  - `policy_input.core_fields.face_amount = 450000.0`
+  - `policy_input.core_fields.premium_mode = "Annual"`
+  - `issue_age = 0`, `gender = ""`, `smoker_class = ""`, `risk_class = ""`, `level_period = 0` — reflecting the fact that the upstream PAS/export data used by `project-minio` does not currently carry those richer fields.
+- `/api/product-model-review/p12trf` still reports S1/S2 `inputs` as:
+  - `age: "unknown"`, `sex: "unknown"`, `smokerClass: "unknown"`,
+  - `termYears: 20` (derived from projection horizon for now),
+  - `faceAmount: 450000.0`, `premiumMode: "ANNUAL"`.
+
+This confirms that the **Trust Surface plumbing no longer drops policy inputs** (they are preserved into `inputs.policy_inputs` and surfaced through RunDetail), and that S1/S2 now show `"unknown"` *only because the upstream PAS/export does not yet carry real age/sex/smoker/term fields for these runs*.
+
+**Next data step:** enrich the P12TRF PAS/export source (or the `p12trf/` policies slice used for P12TRF projections) so that `issue_age`, `gender`, `smoker_class`, `risk_class`, and `level_period` are populated for the runs corresponding to S1/S2. Once the upstream data is present, the existing projection + RunDetail + PMR wiring will surface real values end-to-end without further code changes.
 
 ## Create meaningful scenario catalog for P12TRF
 
