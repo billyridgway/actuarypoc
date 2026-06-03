@@ -1868,6 +1868,9 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
     product_definition_full: Optional[ProductDefinitionV1] = None
     product_definition_build: Optional[Dict[str, Any]] = None
     product_definition_validation: Optional[Dict[str, Any]] = None
+    docs: List[Dict[str, Any]] = []
+    evidence_rows: List[Dict[str, Any]] = []
+    rules: List[Dict[str, Any]] = traceability.get("rules", []) or []
     coverage_matrix: List[Dict[str, Any]] = []
     try:
         rec = get_product_review(product_block["code"])
@@ -2142,7 +2145,17 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
             review_meta["coverageGapCount"] = gaps
             review_meta["coverageNotApplicableCount"] = not_app
 
-            # Run ProductDefinition validation checks (best-effort).
+    except Exception:
+        # Best-effort only; Trust Surface must remain robust when Postgres
+        # is not configured.
+        pass
+
+    # ProductDefinition validation (best-effort, not hidden behind the
+    # broader Postgres try/except). When a ProductDefinition exists we
+    # always return a non-null validation object, even if a runtime error
+    # occurs inside the helper.
+    if product_definition_full is not None:
+        try:
             product_definition_validation = _validate_p12trf_product_definition(
                 product_definition_full,
                 scen_and_rates["scenarios"],
@@ -2151,11 +2164,39 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
                 rules,
                 coverage_matrix,
             )
+        except Exception as exc:  # pragma: no cover - defensive logging
+            # Log the exception so it is visible in pod logs while still
+            # returning a deterministic validation payload.
+            print(f"ProductDefinition validation runtime error: {exc!r}")
+            product_definition_validation = {
+                "status": "fail",
+                "checks": [
+                    {
+                        "id": "validation_runtime_error",
+                        "label": "ProductDefinition validation runtime error",
+                        "status": "fail",
+                        "message": str(exc),
+                    }
+                ],
+                "summary": {"pass": 0, "warning": 0, "fail": 1},
+            }
 
-    except Exception:
-        # Best-effort only; Trust Surface must remain robust when Postgres
-        # is not configured.
-        pass
+        if product_definition_validation is None:
+            # Defensive: ensure we never surface a null validation object
+            # when a ProductDefinition exists, even if the helper returned
+            # an unexpected null.
+            product_definition_validation = {
+                "status": "fail",
+                "checks": [
+                    {
+                        "id": "validation_runtime_error",
+                        "label": "ProductDefinition validation returned null",
+                        "status": "fail",
+                        "message": "Validation helper returned no result.",
+                    }
+                ],
+                "summary": {"pass": 0, "warning": 0, "fail": 1},
+            }
 
     # ProductDefinition build metadata (when lineage is present).
     if product_definition_full is not None and getattr(product_definition_full, "lineage", None) is not None:  # type: ignore[truthy-function]
