@@ -29,7 +29,13 @@ app = FastAPI(title="ActuaryPOC Projection Viewer", version="0.1.0")
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _DIST_DIR = _PROJECT_ROOT / "web" / "dist"
 if _DIST_DIR.exists():  # pragma: no cover - environment dependent
+    # Serve the SPA HTML under /web and static assets under /assets so
+    # that the Vite-generated <script src="/assets/..."> references
+    # resolve correctly when the app is hosted at the FastAPI root.
     app.mount("/web", StaticFiles(directory=_DIST_DIR, html=True), name="web")
+    assets_dir = _DIST_DIR / "assets"
+    if assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=assets_dir, html=False), name="web-assets")
 
 
 # ---------------------------------------------------------------------------
