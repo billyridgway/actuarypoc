@@ -263,7 +263,61 @@ What is **not** yet implemented as a coherent pipeline:
 This future SERFF pipeline is described in concept in other planning docs and
 in code comments, but should still be considered **planned**.
 
-### 3.3 End-to-End Diagram (Conceptual)
+### 3.3 Product Review Onboarding (Implemented MVP)
+
+In addition to the projection and SERFF design flows above, the platform now
+includes a lightweight, demo-focused **Product Review onboarding flow** for
+P12TRF that runs entirely inside the `projection-ui` Deployment:
+
+- **Product Setup (UI)**
+  - Route: `/web?view=create-review` (React SPA)
+  - Captures carrier name, product name, product code, and product type.
+  - Persists a minimal Product Review draft into Postgres via
+    `/api/product-review/draft`, reusing the existing `products` table
+    (`metadata` JSONB stores review state).
+
+- **Document Upload (UI + API)**
+  - Drag-and-drop upload UI accepts `PDF`, `DOCX`, `XLSX`, and `CSV`.
+  - Backend endpoint: `POST /api/product-review/{product_code}/documents`.
+  - Files are written into MinIO under `docs/{product_code}/...` using the
+    existing MinIO client; basic metadata is recorded in the `documents`
+    Postgres table (kind, description, object path, hash placeholder).
+  - The UI lists uploaded documents from `/api/product-review/{product_code}`.
+
+- **Scenario Configuration (UI + API)**
+  - UI shows an editable table of scenarios (age, sex, smoker class, risk
+    class, face amount, level period, premium mode, modal premium).
+  - Backend endpoint: `PUT /api/product-review/{product_code}/scenarios`.
+  - Scenario rows are stored as JSON inside the product `metadata.review`
+    block, mirroring the structure of `examples/p12trf_scenarios.json` so
+    they can be passed directly to the existing
+    `project-p12trf-scenarios-minio` logic.
+  - When no scenarios are stored yet, `/api/product-review/P12TRF` exposes
+    a UI-friendly view derived from the bundled `p12trf_scenarios.json`
+    fixture.
+
+- **Generate Product Review (API + Trust Surface)**
+  - Backend endpoint: `POST /api/product-review/{product_code}/generate`.
+  - MVP restriction: implemented only for `P12TRF`, where it:
+    - reads configured scenarios from Postgres (falling back to the
+      bundled fixture when needed),
+    - projects each scenario using the existing P12TRF DSL + Term23 wiring,
+    - writes projection summaries to MinIO under
+      `projections/p12trf/scenarios/SX.json` via the same helpers used by
+      the CLI,
+    - marks the Product Review status as `generated` in Postgres, and
+    - returns `redirectUrl: "/web?view=product-model"`.
+  - The React onboarding flow uses this redirect to land the user in the
+    existing Product Model Review Trust Surface (`ProductModelReviewPage`)
+    without introducing new workflow engines, authentication, or
+    multi-reviewer coordination.
+
+This MVP onboarding path is intentionally not a generic document management
+system and is scoped for demoability: it wires documents, scenarios, and
+projections together just enough to show how a customer might go from
+product artefacts to a live Trust Surface review.
+
+### 3.4 End-to-End Diagram (Conceptual)
 
 The following diagram shows the intended high-level flow from SERFF filing to
 illustration and UI.
