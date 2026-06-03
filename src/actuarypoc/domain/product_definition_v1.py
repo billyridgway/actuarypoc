@@ -81,6 +81,10 @@ class ProductDefinitionV1(BaseModel):  # type: ignore[misc]
     smoker_classes: List[str] = []
     premium_modes: List[str] = []
 
+    # Simple face amount bounds inferred from scenarios when available.
+    face_amount_min: Optional[float] = None
+    face_amount_max: Optional[float] = None
+
     # Documentary traceability.
     source_documents: List[ProductDefinitionSourceDocument] = []
     evidence_refs: List[ProductDefinitionEvidenceRef] = []
@@ -103,6 +107,10 @@ class ProductDefinitionV1(BaseModel):  # type: ignore[misc]
             "riskClasses": self.risk_classes,
             "smokerClasses": self.smoker_classes,
             "premiumModes": self.premium_modes,
+            "faceAmounts": {
+                "min": self.face_amount_min,
+                "max": self.face_amount_max,
+            },
             "sourceDocumentCount": len(self.source_documents),
             "evidenceRefCount": len(self.evidence_refs),
         }

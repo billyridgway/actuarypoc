@@ -115,6 +115,79 @@ def _load_or_seed_product_definition(product_code: str, filing_id: str) -> Optio
     issue_limits = base_def.get("issue_age_limits") or {}
     underwriting = base_def.get("underwriting_classes") or []
 
+    # Derive additional dimensionality from the bundled P12TRF scenarios
+    # fixture so that the ProductDefinition reflects the same term
+    # periods, risk/smoker classes, premium modes, and face amount ranges
+    # used by the POC Product Model Review.
+    term_periods: List[int] = []
+    risk_classes: List[str] = []
+    smoker_classes: List[str] = []
+    premium_modes: List[str] = []
+    face_amounts: List[float] = []
+
+    try:
+        import json
+
+        scenarios_path = _PROJECT_ROOT / "examples" / "p12trf_scenarios.json"
+        if scenarios_path.exists():
+            payload = json.loads(scenarios_path.read_text(encoding="utf-8"))
+            scenarios = payload.get("scenarios") or []
+            for s in scenarios:
+                policy = (s or {}).get("policy") or {}
+                lp = policy.get("level_period")
+                try:
+                    lp_int = int(lp) if lp is not None else None
+                except (TypeError, ValueError):
+                    lp_int = None
+                if lp_int and lp_int > 0:
+                    term_periods.append(lp_int)
+
+                rc = policy.get("risk_class")
+                if isinstance(rc, str) and rc.strip():
+                    risk_classes.append(rc.strip())
+
+                sc = policy.get("smoker_class")
+                if isinstance(sc, str) and sc.strip():
+                    smoker_classes.append(sc.strip())
+
+                pm = policy.get("premium_mode")
+                if isinstance(pm, str) and pm.strip():
+                    premium_modes.append(pm.strip().upper())
+
+                fa = policy.get("face_amount")
+                try:
+                    fa_val = float(fa) if fa is not None else None
+                except (TypeError, ValueError):
+                    fa_val = None
+                if fa_val is not None and fa_val > 0:
+                    face_amounts.append(fa_val)
+    except Exception:
+        # Best-effort only; if the fixture is missing or malformed we keep
+        # the minimal dimensionality.
+        pass
+
+    # Normalise sets.
+    def _sorted_unique(values: List[Any]) -> List[Any]:
+        seen = set()
+        out: List[Any] = []
+        for v in values:
+            if v in seen:
+                continue
+            seen.add(v)
+            out.append(v)
+        try:
+            return sorted(out)
+        except Exception:
+            return out
+
+    term_periods = _sorted_unique(term_periods) or [20]
+    risk_classes = _sorted_unique(risk_classes)
+    smoker_classes = _sorted_unique(smoker_classes) or ["non_smoker", "smoker"]
+    premium_modes = _sorted_unique(premium_modes) or ["ANNUAL"]
+
+    face_min = min(face_amounts) if face_amounts else None
+    face_max = max(face_amounts) if face_amounts else None
+
     pd = ProductDefinitionV1(
         product_code=product_code,
         filing_id=filing_id,
@@ -123,20 +196,62 @@ def _load_or_seed_product_definition(product_code: str, filing_id: str) -> Optio
                 "id": "base_term",
                 "name": base_def.get("marketing_name") or f"{product_code} Term (base)",
                 "kind": "base",
-                "term_periods": [20],  # POC default; refined in later slices
-                "notes": "POC base term coverage for P12TRF; term set via later ProductDefinition slice.",
+                "term_periods": term_periods,
+                "notes": "POC base term coverage for P12TRF; term periods inferred from default scenarios.",
             }
         ],
         issue_age_min=issue_limits.get("min"),
         issue_age_max=issue_limits.get("max"),
-        term_periods=[20],
+        term_periods=term_periods,
         underwriting_classes=list(underwriting),
-        risk_classes=[],
-        smoker_classes=["non_smoker", "smoker"],
-        premium_modes=["ANNUAL"],
+        risk_classes=risk_classes,
+        smoker_classes=smoker_classes,
+        premium_modes=premium_modes,
+        face_amount_min=face_min,
+        face_amount_max=face_max,
         source_documents=[],
         evidence_refs=[],
+        extra={
+            "unmodeled_coverages": base_def.get("riders") or [],
+        },
     )
+
+    # Attach document and evidence links based on the current Product
+    # Review state where possible.
+    try:
+        # Documents for this product/filing become source_documents.
+        docs = list_product_documents(product_code, filing_id=filing_id)
+        pd.source_documents = [
+            {
+                "document_path": str(d.get("object_path")),
+                "description": d.get("description"),
+                "filing_id": d.get("serff_id") or filing_id,
+            }
+            for d in docs
+            if d.get("object_path")
+        ]
+
+        # filing_rule_evidence entries become evidence_refs keyed off
+        # simple feature IDs so the Trust Surface can group them.
+        ev_rows = list_filing_rule_evidence(product_code, filing_id=filing_id)
+        refs: List[Dict[str, Any]] = []
+        for ev in ev_rows:
+            rule_id = ev.get("rule_id")
+            if rule_id not in {"rule_death_benefit_term", "rule_level_premiums"}:
+                continue
+            feature_id = "base_term_coverage" if rule_id == "rule_death_benefit_term" else "level_premiums"
+            refs.append(
+                {
+                    "feature_id": feature_id,
+                    "rule_id": rule_id,
+                    "document_path": ev.get("document_path"),
+                    "page_reference": ev.get("page_reference"),
+                }
+            )
+        pd.evidence_refs = refs
+    except Exception:
+        # Best-effort only; absence of Postgres should not break POC flows.
+        pass
 
     try:
         import json

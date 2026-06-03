@@ -131,6 +131,7 @@ export interface ProductModelReview {
     riskClasses?: string[];
     smokerClasses?: string[];
     premiumModes?: string[];
+    faceAmounts?: { min?: number | null; max?: number | null };
     sourceDocumentCount?: number;
     evidenceRefCount?: number;
   } | null;
@@ -454,11 +455,26 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                   </td>
                 </tr>
                 <tr>
+                  <th>Face amounts</th>
+                  <td>
+                    {productDefinition.faceAmounts
+                    && (productDefinition.faceAmounts.min != null || productDefinition.faceAmounts.max != null)
+                      ? `${productDefinition.faceAmounts.min ?? "?"}–${productDefinition.faceAmounts.max ?? "?"}`
+                      : "(not inferred yet)"}
+                  </td>
+                </tr>
+                <tr>
                   <th>Coverages</th>
                   <td>
                     {productDefinition.coverages && productDefinition.coverages.length > 0
                       ? productDefinition.coverages.map((c) => `${c.name} (${c.kind})`).join(", ")
                       : "(none recorded)"}
+                  </td>
+                </tr>
+                <tr>
+                  <th>Supporting artefacts</th>
+                  <td>
+                    {(productDefinition.sourceDocumentCount ?? 0)} document(s), {productDefinition.evidenceRefCount ?? 0} evidence link(s)
                   </td>
                 </tr>
               </tbody>
