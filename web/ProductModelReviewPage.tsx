@@ -158,6 +158,16 @@ export interface ProductModelReview {
     warningCount?: number;
     warnings?: string[];
   } | null;
+  productDefinitionValidation?: {
+    status: "pass" | "warning" | "fail" | string;
+    checks: {
+      id: string;
+      label: string;
+      status: "pass" | "warning" | "fail" | string;
+      message: string;
+    }[];
+    summary: { pass: number; warning: number; fail: number };
+  } | null;
 }
 
 interface ProductModelReviewPageProps {
@@ -193,7 +203,7 @@ interface ProductModelReviewPageProps {
 }
 
 export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ review }) => {
-  const { product, scope, traceability, rates, scenarios, assumptions, gaps, reviewMeta, documents, lastDecision, reviewProgress, productDefinition, coverageMatrix, productDefinitionBuild } = review;
+  const { product, scope, traceability, rates, scenarios, assumptions, gaps, reviewMeta, documents, lastDecision, reviewProgress, productDefinition, coverageMatrix, productDefinitionBuild, productDefinitionValidation } = review;
 
   const totalScenarios = scenarios.length;
   const scenarioPassCount = scenarios.filter((s) => s.status.toLowerCase() === "pass").length;
@@ -578,6 +588,51 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                   <li key={idx}>{w}</li>
                 ))}
               </ul>
+            )}
+          </>
+        )}
+        {productDefinitionValidation && (
+          <>
+            <h3>ProductDefinition Validation (v1)</h3>
+            <p className="muted">
+              Deterministic checks comparing ProductDefinition, scenarios, coverage matrix, and evidence. This is
+              MVP-only and does not infer missing information.
+            </p>
+            <table className="kv-table">
+              <tbody>
+                <tr>
+                  <th>Overall status</th>
+                  <td>{productDefinitionValidation.status}</td>
+                </tr>
+                <tr>
+                  <th>Checks</th>
+                  <td>
+                    {productDefinitionValidation.summary.pass} pass, {productDefinitionValidation.summary.warning} warning,
+                    {" "}
+                    {productDefinitionValidation.summary.fail} fail
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            {productDefinitionValidation.checks && productDefinitionValidation.checks.length > 0 && (
+              <table className="kv-table">
+                <thead>
+                  <tr>
+                    <th>Check</th>
+                    <th>Status</th>
+                    <th>Message</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {productDefinitionValidation.checks.map((c) => (
+                    <tr key={c.id}>
+                      <td>{c.label}</td>
+                      <td>{c.status}</td>
+                      <td className="muted">{c.message}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             )}
           </>
         )}

@@ -1054,6 +1054,407 @@ def _build_p12trf_scenarios_and_rates() -> Dict[str, Any]:
     return {"scenarios": scenarios, "rates": rates}
 
 
+def _validate_p12trf_product_definition(
+    pd: Optional[ProductDefinitionV1],
+    scenarios: List[Dict[str, Any]],
+    docs: List[Dict[str, Any]],
+    evidence_rows: List[Dict[str, Any]],
+    traceability_rules: List[Dict[str, Any]],
+    coverage_matrix: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Run deterministic validation checks for the P12TRF ProductDefinition.
+
+    This is intentionally conservative and P12TRF-specific. It does not
+    attempt to infer missing information; instead it reports explicit
+    pass/warning/fail statuses for a small set of sanity checks.
+    """
+
+    if pd is None:
+        return None
+
+    checks: List[Dict[str, Any]] = []
+
+    def add_check(cid: str, label: str, status: str, message: str) -> None:
+        checks.append({"id": cid, "label": label, "status": status, "message": message})
+
+    # Scenario vs ProductDefinition dimensionality.
+    issue_min = pd.issue_age_min
+    issue_max = pd.issue_age_max
+    ages: List[int] = []
+    terms: List[int] = []
+    smokers: List[str] = []
+    risks: List[str] = []
+    modes: List[str] = []
+    faces: List[float] = []
+
+    for s in scenarios:
+        inp = s.get("inputs") or {}
+        age = inp.get("age")
+        try:
+            if isinstance(age, (int, float)):
+                ages.append(int(age))
+        except Exception:
+            pass
+        term = inp.get("termYears")
+        try:
+            if isinstance(term, (int, float)):
+                terms.append(int(term))
+        except Exception:
+            pass
+        sc = inp.get("smokerClass")
+        if isinstance(sc, str) and sc.strip():
+            smokers.append(sc.strip())
+        rc = inp.get("riskClass")
+        if isinstance(rc, str) and rc.strip():
+            risks.append(rc.strip())
+        pm = inp.get("premiumMode")
+        if isinstance(pm, str) and pm.strip():
+            modes.append(pm.strip().upper())
+        fa = inp.get("faceAmount")
+        try:
+            if isinstance(fa, (int, float)):
+                faces.append(float(fa))
+        except Exception:
+            pass
+
+    # Age bounds.
+    if not ages or issue_min is None or issue_max is None:
+        add_check(
+            "scenario_age_bounds",
+            "Scenario ages within ProductDefinition issue age bounds",
+            "warning",
+            "Issue age bounds or scenario ages are missing; check skipped.",
+        )
+    else:
+        min_age = min(ages)
+        max_age = max(ages)
+        if min_age < issue_min or max_age > issue_max:
+            add_check(
+                "scenario_age_bounds",
+                "Scenario ages within ProductDefinition issue age bounds",
+                "fail",
+                f"Scenario ages {min_age}–{max_age} fall outside {issue_min}–{issue_max}.",
+            )
+        else:
+            add_check(
+                "scenario_age_bounds",
+                "Scenario ages within ProductDefinition issue age bounds",
+                "pass",
+                f"All scenario ages are within {issue_min}–{issue_max}.",
+            )
+
+    # Term periods.
+    pd_terms = set(pd.term_periods or [])
+    scen_terms = set(terms)
+    if not pd_terms or not scen_terms:
+        add_check(
+            "scenario_term_periods",
+            "Scenario term periods within ProductDefinition term periods",
+            "warning",
+            "Term periods missing from ProductDefinition or scenarios; check skipped.",
+        )
+    else:
+        extra_terms = sorted(t for t in scen_terms if t not in pd_terms)
+        if extra_terms:
+            add_check(
+                "scenario_term_periods",
+                "Scenario term periods within ProductDefinition term periods",
+                "fail",
+                f"Scenario term periods {extra_terms} are not listed in ProductDefinition term periods {sorted(pd_terms)}.",
+            )
+        else:
+            add_check(
+                "scenario_term_periods",
+                "Scenario term periods within ProductDefinition term periods",
+                "pass",
+                f"All scenario term periods are within ProductDefinition term periods {sorted(pd_terms)}.",
+            )
+
+    # Smoker classes.
+    pd_smokers = set(pd.smoker_classes or [])
+    scen_smokers = set(smokers)
+    if not pd_smokers or not scen_smokers:
+        add_check(
+            "scenario_smoker_classes",
+            "Scenario smoker classes within ProductDefinition smoker classes",
+            "warning",
+            "Smoker classes missing from ProductDefinition or scenarios; check skipped.",
+        )
+    else:
+        extra_sc = sorted(s for s in scen_smokers if s not in pd_smokers)
+        if extra_sc:
+            add_check(
+                "scenario_smoker_classes",
+                "Scenario smoker classes within ProductDefinition smoker classes",
+                "fail",
+                f"Scenario smoker classes {extra_sc} are not listed in ProductDefinition smoker classes {sorted(pd_smokers)}.",
+            )
+        else:
+            add_check(
+                "scenario_smoker_classes",
+                "Scenario smoker classes within ProductDefinition smoker classes",
+                "pass",
+                f"All scenario smoker classes are within ProductDefinition smoker classes {sorted(pd_smokers)}.",
+            )
+
+    # Risk classes.
+    pd_risks = set(pd.risk_classes or [])
+    scen_risks = set(risks)
+    if not pd_risks or not scen_risks:
+        add_check(
+            "scenario_risk_classes",
+            "Scenario risk classes within ProductDefinition risk classes",
+            "warning",
+            "Risk classes missing from ProductDefinition or scenarios; check skipped.",
+        )
+    else:
+        extra_rc = sorted(r for r in scen_risks if r not in pd_risks)
+        if extra_rc:
+            add_check(
+                "scenario_risk_classes",
+                "Scenario risk classes within ProductDefinition risk classes",
+                "fail",
+                f"Scenario risk classes {extra_rc} are not listed in ProductDefinition risk classes {sorted(pd_risks)}.",
+            )
+        else:
+            add_check(
+                "scenario_risk_classes",
+                "Scenario risk classes within ProductDefinition risk classes",
+                "pass",
+                f"All scenario risk classes are within ProductDefinition risk classes {sorted(pd_risks)}.",
+            )
+
+    # Premium modes.
+    pd_modes = set(m.upper() for m in (pd.premium_modes or []))
+    scen_modes = set(modes)
+    if not pd_modes or not scen_modes:
+        add_check(
+            "scenario_premium_modes",
+            "Scenario premium modes within ProductDefinition premium modes",
+            "warning",
+            "Premium modes missing from ProductDefinition or scenarios; check skipped.",
+        )
+    else:
+        extra_modes = sorted(m for m in scen_modes if m not in pd_modes)
+        if extra_modes:
+            add_check(
+                "scenario_premium_modes",
+                "Scenario premium modes within ProductDefinition premium modes",
+                "fail",
+                f"Scenario premium modes {extra_modes} are not listed in ProductDefinition premium modes {sorted(pd_modes)}.",
+            )
+        else:
+            add_check(
+                "scenario_premium_modes",
+                "Scenario premium modes within ProductDefinition premium modes",
+                "pass",
+                f"All scenario premium modes are within ProductDefinition premium modes {sorted(pd_modes)}.",
+            )
+
+    # Face amount bounds.
+    fa_min = pd.face_amount_min
+    fa_max = pd.face_amount_max
+    if not faces or fa_min is None or fa_max is None:
+        add_check(
+            "scenario_face_amount_bounds",
+            "Scenario face amounts within ProductDefinition face amount range",
+            "warning",
+            "Face amounts or ProductDefinition face amount range missing; check skipped.",
+        )
+    else:
+        min_f = min(faces)
+        max_f = max(faces)
+        if min_f < fa_min or max_f > fa_max:
+            add_check(
+                "scenario_face_amount_bounds",
+                "Scenario face amounts within ProductDefinition face amount range",
+                "fail",
+                f"Scenario face amounts {min_f}–{max_f} fall outside {fa_min}–{fa_max}.",
+            )
+        else:
+            add_check(
+                "scenario_face_amount_bounds",
+                "Scenario face amounts within ProductDefinition face amount range",
+                "pass",
+                f"All scenario face amounts are within {fa_min}–{fa_max}.",
+            )
+
+    # Evidence references.
+    doc_paths_pd = {d.get("document_path") for d in (pd.source_documents or []) if d.get("document_path")}
+    doc_paths_docs = {d.get("object_path") for d in docs if d.get("object_path")}
+    doc_paths_all = {p for p in (doc_paths_pd | doc_paths_docs) if p}
+
+    missing_doc_path = 0
+    missing_doc_object = 0
+    missing_rule = 0
+    missing_page_ref = 0
+
+    rule_ids = {r.get("id") for r in traceability_rules if r.get("id")}
+
+    for ev in pd.evidence_refs or []:
+        dp = ev.document_path
+        if not dp:
+            missing_doc_path += 1
+        elif dp not in doc_paths_all:
+            missing_doc_object += 1
+        if ev.rule_id not in rule_ids:
+            missing_rule += 1
+        if not ev.page_reference:
+            missing_page_ref += 1
+
+    # Evidence: document_path presence.
+    if missing_doc_path == 0:
+        add_check(
+            "evidence_document_paths",
+            "Evidence refs have document_path",
+            "pass",
+            "All evidence refs include a document_path.",
+        )
+    else:
+        add_check(
+            "evidence_document_paths",
+            "Evidence refs have document_path",
+            "fail",
+            f"{missing_doc_path} evidence ref(s) are missing document_path.",
+        )
+
+    # Evidence: document_path resolves.
+    if missing_doc_object == 0:
+        add_check(
+            "evidence_document_resolves",
+            "Evidence document paths resolve to uploaded/source documents",
+            "pass",
+            "All evidence document paths resolve to known source or uploaded documents.",
+        )
+    else:
+        add_check(
+            "evidence_document_resolves",
+            "Evidence document paths resolve to uploaded/source documents",
+            "fail",
+            f"{missing_doc_object} evidence ref(s) reference unknown document_path values.",
+        )
+
+    # Evidence: rule IDs.
+    if missing_rule == 0:
+        add_check(
+            "evidence_rule_ids",
+            "Evidence refs point at known traceability rule IDs",
+            "pass",
+            "All evidence refs reference known traceability rules.",
+        )
+    else:
+        add_check(
+            "evidence_rule_ids",
+            "Evidence refs point at known traceability rule IDs",
+            "fail",
+            f"{missing_rule} evidence ref(s) reference unknown rule IDs.",
+        )
+
+    # Evidence: page_reference.
+    if missing_page_ref == 0:
+        add_check(
+            "evidence_page_reference",
+            "Evidence refs include page_reference when available",
+            "pass",
+            "All evidence refs include a page_reference.",
+        )
+    else:
+        add_check(
+            "evidence_page_reference",
+            "Evidence refs include page_reference when available",
+            "warning",
+            f"{missing_page_ref} evidence ref(s) are missing page_reference.",
+        )
+
+    # Coverage matrix consistency.
+    covered_ok = True
+    gap_ok = True
+    partial_ok = True
+
+    for row in coverage_matrix or []:
+        status = (row.get("status") or "").lower()
+        ev = (row.get("evidence") or "").strip()
+        model_support = (row.get("modelSupport") or "").strip()
+
+        if status == "covered" and not ev:
+            covered_ok = False
+        if status == "gap" and model_support and "not currently modeled" not in model_support.lower():
+            gap_ok = False
+        if status == "partial" and not (ev or model_support):
+            partial_ok = False
+
+    add_check(
+        "coverage_covered_has_evidence",
+        "Covered coverageMatrix rows have evidence",
+        "pass" if covered_ok else "fail",
+        "All covered coverageMatrix rows include evidence." if covered_ok else "At least one covered row is missing evidence.",
+    )
+    add_check(
+        "coverage_gap_not_fully_modeled",
+        "Gap coverageMatrix rows are not described as fully modeled",
+        "pass" if gap_ok else "fail",
+        "All gap rows are described as not currently modeled." if gap_ok else "At least one gap row is described as fully modeled.",
+    )
+    add_check(
+        "coverage_partial_has_reason",
+        "Partial coverageMatrix rows include an explicit reason",
+        "pass" if partial_ok else "warning",
+        "All partial rows include model support or evidence text." if partial_ok else "Some partial rows lack an explicit reason.",
+    )
+
+    # Lineage presence.
+    ln = getattr(pd, "lineage", None)
+    if ln is None:
+        add_check(
+            "lineage_present",
+            "ProductDefinition lineage (build metadata) present",
+            "warning",
+            "No lineage present; ProductDefinition builder may not have been run.",
+        )
+    else:
+        missing_bits: List[str] = []
+        if not ln.generatedAt:
+            missing_bits.append("generatedAt")
+        if not ln.generatorVersion:
+            missing_bits.append("generatorVersion")
+        src = ln.sources or {}
+        for key in ("documents", "evidence", "scenarios"):
+            if key not in src:
+                missing_bits.append(f"sources.{key}")
+        if missing_bits:
+            add_check(
+                "lineage_present",
+                "ProductDefinition lineage (build metadata) present",
+                "warning",
+                "Missing lineage fields: " + ", ".join(sorted(missing_bits)),
+            )
+        else:
+            add_check(
+                "lineage_present",
+                "ProductDefinition lineage (build metadata) present",
+                "pass",
+                "Lineage metadata present for ProductDefinition build.",
+            )
+
+    # Overall status.
+    status_counts = {"pass": 0, "warning": 0, "fail": 0}
+    for c in checks:
+        st = (c.get("status") or "").lower()
+        if st in status_counts:
+            status_counts[st] += 1
+
+    overall_status = "pass"
+    if status_counts["fail"] > 0:
+        overall_status = "fail"
+    elif status_counts["warning"] > 0:
+        overall_status = "warning"
+
+    return {
+        "status": overall_status,
+        "checks": checks,
+        "summary": status_counts,
+    }
+
 
 @app.get("/api/product-definition/{product_code}")
 def api_get_product_definition(product_code: str, filing_id: str = Query(...)) -> Dict[str, Any]:
@@ -1466,6 +1867,7 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
     product_definition_summary: Optional[Dict[str, Any]] = None
     product_definition_full: Optional[ProductDefinitionV1] = None
     product_definition_build: Optional[Dict[str, Any]] = None
+    product_definition_validation: Optional[Dict[str, Any]] = None
     coverage_matrix: List[Dict[str, Any]] = []
     try:
         rec = get_product_review(product_block["code"])
@@ -1740,6 +2142,16 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
             review_meta["coverageGapCount"] = gaps
             review_meta["coverageNotApplicableCount"] = not_app
 
+            # Run ProductDefinition validation checks (best-effort).
+            product_definition_validation = _validate_p12trf_product_definition(
+                product_definition_full,
+                scen_and_rates["scenarios"],
+                docs,
+                evidence_rows,
+                rules,
+                coverage_matrix,
+            )
+
     except Exception:
         # Best-effort only; Trust Surface must remain robust when Postgres
         # is not configured.
@@ -1806,6 +2218,7 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
         "reviewProgress": review_progress,
         "productDefinition": product_definition_summary,
         "productDefinitionBuild": product_definition_build,
+        "productDefinitionValidation": product_definition_validation,
         "coverageMatrix": coverage_matrix,
     }
 
