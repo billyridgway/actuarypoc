@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import os
 import time
+import json
 from contextlib import contextmanager
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import psycopg
 
@@ -276,6 +277,182 @@ def record_illustration_run(
                 )
     except Exception as exc:  # noqa: BLE001
         _note_failure(exc)
+
+
+def upsert_product_review_draft(
+    *,
+    product_id: str,
+    carrier: str,
+    product_name: str,
+    product_type: str,
+    review_metadata: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Create or update a lightweight Product Review draft.
+
+    This reuses the existing ``products`` table and stores review-specific
+    fields inside the ``metadata`` JSONB column. It is intentionally MVP-only
+    and does not attempt to model full product lifecycle or versions.
+    """
+
+    ensure_schema()
+    meta: Dict[str, Any] = {
+        "name": product_name,
+        "type": product_type,
+    }
+    if review_metadata:
+        meta["review"] = review_metadata
+
+    try:
+        with _conn() as conn:
+            if conn is None:
+                return None
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO products (product_id, carrier, version, metadata)
+                    VALUES (%s, %s, 1, %s::jsonb)
+                    ON CONFLICT (product_id) DO UPDATE
+                      SET carrier = EXCLUDED.carrier,
+                          metadata = EXCLUDED.metadata,
+                          version = COALESCE(products.version, 0) + 1
+                    RETURNING product_id, carrier, version, metadata, created_at
+                    """,
+                    (product_id, carrier, json.dumps(meta)),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                return {
+                    "product_id": row[0],
+                    "carrier": row[1],
+                    "version": row[2],
+                    "metadata": row[3],
+                    "created_at": row[4],
+                }
+    except Exception as exc:  # noqa: BLE001
+        _note_failure(exc)
+        return None
+
+
+def get_product_review(product_id: str) -> Optional[Dict[str, Any]]:
+    """Fetch a stored Product Review draft from the products table.
+
+    Returns ``None`` when Postgres is unavailable or no such product exists.
+    """
+
+    ensure_schema()
+    try:
+        with _conn() as conn:
+            if conn is None:
+                return None
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT product_id, carrier, version, metadata, created_at
+                      FROM products
+                     WHERE product_id = %s
+                    """,
+                    (product_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                return {
+                    "product_id": row[0],
+                    "carrier": row[1],
+                    "version": row[2],
+                    "metadata": row[3],
+                    "created_at": row[4],
+                }
+    except Exception as exc:  # noqa: BLE001
+        _note_failure(exc)
+        return None
+
+
+def record_document_upload(
+    *,
+    product_id: str,
+    kind: str,
+    description: str,
+    object_path: str,
+    object_hash: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Record a single uploaded document for a product.
+
+    This wires into the existing ``documents`` table and keeps the schema
+    intentionally loose: callers are responsible for choosing a sensible
+    ``kind`` and ``description`` label.
+    """
+
+    ensure_schema()
+    try:
+        with _conn() as conn:
+            if conn is None:
+                return None
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO documents (product_id, kind, description, object_path, object_hash)
+                    VALUES (%s, %s, %s, %s, %s)
+                    RETURNING id, product_id, kind, description, object_path, object_hash, created_at
+                    """,
+                    (product_id, kind, description, object_path, object_hash),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                return {
+                    "id": row[0],
+                    "product_id": row[1],
+                    "kind": row[2],
+                    "description": row[3],
+                    "object_path": row[4],
+                    "object_hash": row[5],
+                    "created_at": row[6],
+                }
+    except Exception as exc:  # noqa: BLE001
+        _note_failure(exc)
+        return None
+
+
+def list_product_documents(product_id: str) -> List[Dict[str, Any]]:
+    """Return all documents recorded for a product, newest first.
+
+    When Postgres is unavailable, this returns an empty list instead of
+    failing the caller.
+    """
+
+    ensure_schema()
+    try:
+        with _conn() as conn:
+            if conn is None:
+                return []
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, product_id, kind, description, object_path, object_hash, created_at
+                      FROM documents
+                     WHERE product_id = %s
+                     ORDER BY created_at DESC, id DESC
+                    """,
+                    (product_id,),
+                )
+                rows = cur.fetchall() or []
+                return [
+                    {
+                        "id": r[0],
+                        "product_id": r[1],
+                        "kind": r[2],
+                        "description": r[3],
+                        "object_path": r[4],
+                        "object_hash": r[5],
+                        "created_at": r[6],
+                    }
+                    for r in rows
+                ]
+    except Exception as exc:  # noqa: BLE001
+        _note_failure(exc)
+        return []
 
 
 def record_product_model_review_decision(

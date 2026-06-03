@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { RunDetailPage } from "./RunDetailPage";
 import type { RunDetail } from "./run-detail.types";
 import { ProductModelReviewPage, type ProductModelReview } from "./ProductModelReviewPage";
+import { CreateProductReviewPage } from "./CreateProductReviewPage";
 
 export const App: React.FC = () => {
   const [runDetail, setRunDetail] = useState<RunDetail | null>(null);
@@ -19,6 +20,16 @@ export const App: React.FC = () => {
 
   useEffect(() => {
     const fetchData = async () => {
+      // The onboarding flow has its own data fetching; keep the shared
+      // bootstrap simple and skip backend calls for that view.
+      if (view === "create-review") {
+        setRunDetail(null);
+        setProductReview(null);
+        setError(null);
+        setLoading(false);
+        return;
+      }
+
       setLoading(true);
       try {
         setError(null);
@@ -49,15 +60,19 @@ export const App: React.FC = () => {
       }
     };
 
-    fetchData();
+    void fetchData();
   }, [objectKey, view]);
 
-  if (loading && !runDetail && !productReview) {
+  if (loading && !runDetail && !productReview && view !== "create-review") {
     return <div className="loading">Loading…</div>;
   }
 
   if (error) {
     return <div className="error">Error loading data: {error}</div>;
+  }
+
+  if (view === "create-review") {
+    return <CreateProductReviewPage />;
   }
 
   if (view === "product-model") {

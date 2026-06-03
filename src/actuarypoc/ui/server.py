@@ -1,17 +1,29 @@
 from __future__ import annotations
 
+from dataclasses import asdict
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, UploadFile, File, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pathlib import Path
 
-from actuarypoc.storage.minio_client import get_minio_client, get_bucket_name
+from actuarypoc.connectors.base import CSVConnector
+from actuarypoc.storage.minio_client import ensure_bucket, get_minio_client, get_bucket_name
 from actuarypoc.config.assumptions import list_assumption_sets, approve_assumption_set
 from actuarypoc.dsl.policy_dsl import load_formula
-from actuarypoc.projection.premium import PremiumLookupService, build_premium_table, select_face_band
-from actuarypoc.storage.postgres_client import record_product_model_review_decision
+from actuarypoc.projection.engine import ProjectionEngine
+from actuarypoc.projection.mortality import build_term23_surface
+from actuarypoc.projection.premium import PremiumLookupService, build_premium_table, load_premium_table_from_csv, select_face_band
+from actuarypoc.projection.service import store_projection
+from actuarypoc.storage.postgres_client import (
+    get_product_review,
+    list_product_documents,
+    record_document_upload,
+    record_product_model_review_decision,
+    upsert_product_review_draft,
+)
 
 try:  # FastAPI can be configured with either Pydantic v1 or v2
     from pydantic import BaseModel
@@ -66,6 +78,30 @@ class ProductModelReviewDecisionResponse(BaseModel):  # type: ignore[misc]
     exclusions: Optional[str] = None
     comments: Optional[str] = None
     created_at: Optional[str] = None
+
+
+class ProductReviewDraftRequest(BaseModel):  # type: ignore[misc]
+    carrier_name: str
+    product_name: str
+    product_code: str
+    product_type: str
+
+
+class ScenarioConfig(BaseModel):  # type: ignore[misc]
+    id: Optional[str] = None
+    name: Optional[str] = None
+    age: Optional[int] = None
+    sex: Optional[str] = None
+    smokerClass: Optional[str] = None
+    riskClass: Optional[str] = None
+    faceAmount: Optional[float] = None
+    levelPeriod: Optional[int] = None
+    premiumMode: Optional[str] = None
+    modalPremium: Optional[float] = None
+
+
+class ScenarioConfigPayload(BaseModel):  # type: ignore[misc]
+    scenarios: List[ScenarioConfig]
 
 
 _ALLOWED_PMR_DECISIONS = {
@@ -159,6 +195,221 @@ _P12TRF_SCENARIO_CONFIG: List[Dict[str, Any]] = [
         "projection_key": "projections/p12trf/scenarios/S3.json",
     },
 ]
+
+
+def _default_p12trf_scenarios_for_ui() -> List[Dict[str, Any]]:
+    """Return default P12TRF scenarios in UI-friendly shape.
+
+    This reads the bundled ``examples/p12trf_scenarios.json`` fixture and
+    exposes only the fields needed for the onboarding Scenario Configuration
+    table. When the fixture is missing or invalid, a small empty list is
+    returned instead of failing the UI.
+    """
+
+    try:
+        scenarios_path = _PROJECT_ROOT / "examples" / "p12trf_scenarios.json"
+        if not scenarios_path.exists():
+            return []
+        import json
+
+        payload = json.loads(scenarios_path.read_text(encoding="utf-8"))
+        scenarios = payload.get("scenarios") or []
+    except Exception:
+        return []
+
+    ui_rows: List[Dict[str, Any]] = []
+    for idx, s in enumerate(scenarios):
+        sid = str(s.get("id") or f"S{idx + 1}")
+        name = str(s.get("name") or f"Scenario {sid}")
+        policy = s.get("policy") or {}
+        ui_rows.append(
+            {
+                "id": sid,
+                "name": name,
+                "age": policy.get("issue_age"),
+                "sex": policy.get("gender"),
+                "smokerClass": policy.get("smoker_class"),
+                "riskClass": policy.get("risk_class"),
+                "faceAmount": policy.get("face_amount"),
+                "levelPeriod": policy.get("level_period"),
+                "premiumMode": policy.get("premium_mode"),
+                "modalPremium": policy.get("modal_premium"),
+            }
+        )
+    return ui_rows
+
+
+def _ui_scenarios_to_internal(product_code: str, scenarios: List[ScenarioConfig]) -> List[Dict[str, Any]]:
+    """Convert UI ScenarioConfig models into internal policy dicts.
+
+    The internal representation mirrors ``examples/p12trf_scenarios.json`` so
+    we can reuse the same scenario projection wiring.
+    """
+
+    internal: List[Dict[str, Any]] = []
+    base_policy_type = "p12trf_term" if product_code.upper() == "P12TRF" else product_code.lower()
+    for idx, s in enumerate(scenarios):
+        sid_raw = (s.id or f"S{idx + 1}").strip()
+        sid = sid_raw or f"S{idx + 1}"
+        name = (s.name or f"Scenario {sid}").strip() or f"Scenario {sid}"
+        policy_number = f"{product_code}-{sid}"
+        policy: Dict[str, Any] = {
+            "policy_number": policy_number,
+            "product_type": base_policy_type,
+            "issue_age": s.age,
+            "gender": s.sex,
+            "smoker_class": s.smokerClass,
+            "risk_class": s.riskClass,
+            "level_period": s.levelPeriod,
+            "face_amount": s.faceAmount,
+            "modal_premium": s.modalPremium,
+            "premium_mode": s.premiumMode,
+        }
+        internal.append({"id": sid, "name": name, "policy": policy})
+    return internal
+
+
+def _generate_p12trf_scenarios_from_config(scenarios: List[Dict[str, Any]], years: int = 40) -> List[str]:
+    """Project configured P12TRF scenarios and persist them to MinIO.
+
+    This is a thin, API-friendly wrapper around the CLI helper
+    ``project-p12trf-scenarios-minio``. It expects ``scenarios`` to be a
+    list of objects with ``id``, optional ``name``, and a ``policy`` block
+    mirroring ``examples/p12trf_scenarios.json``.
+
+    It returns the list of object keys written under the
+    ``projections/p12trf/scenarios/`` prefix. Errors propagate as normal
+    Python exceptions so FastAPI can surface them as HTTP 5xx when needed.
+    """
+
+    if not scenarios:
+        return []
+
+    base = Path(__file__).resolve().parents[1]
+
+    dsl_path = base / "dsl" / "examples" / "p12trf_term.yaml"
+    formula = load_formula(str(dsl_path))
+
+    term23_path = base / "sample_data" / "actuarial_tables_term23.csv"
+    term23_records = list(CSVConnector(str(term23_path)).fetch()) if term23_path.exists() else []
+    mortality_surface = build_term23_surface(term23_records) if term23_records else None
+
+    premium_table = None
+    premium_sample_rel = (formula.meta or {}).get("premium_table_sample_csv") if getattr(formula, "meta", None) else None
+    if premium_sample_rel:
+        premium_csv = base / premium_sample_rel
+        if premium_csv.exists():
+            premium_table = load_premium_table_from_csv(str(premium_csv))
+
+    premium_service = PremiumLookupService(premium_table) if premium_table is not None else None
+
+    engine = ProjectionEngine(formula, mortality_surface=mortality_surface)
+
+    object_keys: List[str] = []
+    env_label = None
+
+    for scenario in scenarios:
+        sid = str(scenario.get("id") or "").strip()
+        label = str(scenario.get("name") or sid or "Scenario").strip() or "Scenario"
+        policy = dict(scenario.get("policy") or {})
+
+        if not sid or not policy:
+            continue
+
+        policy_inputs = {
+            "issue_age": policy.get("issue_age"),
+            "gender": policy.get("gender"),
+            "smoker_class": policy.get("smoker_class"),
+            "risk_class": policy.get("risk_class"),
+            "level_period": policy.get("level_period"),
+            "face_amount": policy.get("face_amount"),
+            "premium_mode": policy.get("premium_mode"),
+        }
+
+        warnings: List[str] = []
+        if premium_service is not None:
+            try:
+                face_amount = float(policy.get("face_amount", 0) or 0.0)
+            except (TypeError, ValueError):
+                face_amount = 0.0
+
+            face_band = select_face_band(getattr(formula, "meta", {}) or {}, face_amount)
+
+            if face_band is not None and face_amount > 0:
+                try:
+                    issue_age = int(policy.get("issue_age", 0) or 0)
+                except (TypeError, ValueError):
+                    issue_age = 0
+                gender = str(policy.get("gender", ""))
+                risk_class = str(policy.get("risk_class", ""))
+                try:
+                    level_period = int(policy.get("level_period", 0) or 0)
+                except (TypeError, ValueError):
+                    level_period = 0
+
+                table_p_per_1000 = premium_service.premium_per_1000(
+                    issue_age=issue_age,
+                    gender=gender,
+                    risk_class=risk_class,
+                    face_band=face_band,
+                    level_period=level_period,
+                )
+
+                if table_p_per_1000 is not None:
+                    annual_table_premium = float(table_p_per_1000) * (face_amount / 1000.0)
+                    mode = str(policy.get("premium_mode", "")).upper()
+                    if mode == "MONTHLY":
+                        expected_modal = annual_table_premium / 12.0
+                    else:
+                        expected_modal = annual_table_premium
+
+                    try:
+                        pas_modal = float(policy.get("modal_premium", 0.0) or 0.0)
+                    except (TypeError, ValueError):
+                        pas_modal = 0.0
+
+                    diff = abs(expected_modal - pas_modal)
+                    material_threshold = max(0.01, 0.001 * expected_modal)
+                    if diff > material_threshold:
+                        warnings.append(
+                            "premium_mismatch: table-derived expected_modal={} vs configured modal_premium={}".format(
+                                round(expected_modal, 6), round(pas_modal, 6)
+                            )
+                        )
+
+        result = engine.project(policy, horizon=years)
+
+        summary = {
+            "generated_at": datetime.utcnow().isoformat(),
+            "inputs": {
+                "pas_object": None,
+                "actuarial_object": None,
+                "rate_object": None,
+                "crm_object": None,
+                "term23_actuarial_object": None,
+                "premium_table_object": None,
+                "policy_id": policy.get("policy_number") or sid,
+                "product_id": "P12TRF",
+                "product_code": "P12TRF",
+                "formula_path": str(dsl_path),
+                "assumption_set_id": None,
+                "run_id": f"p12trf-scenario-{sid}",
+                "scenario_id": sid,
+                "scenario_label": label,
+                "policy_inputs": policy_inputs,
+            },
+            "metadata": {
+                "environment": env_label,
+            },
+            "warnings": warnings,
+            "projection": asdict(result),
+        }
+
+        object_name = f"projections/p12trf/scenarios/{sid}.json"
+        key = store_projection(summary, object_name=object_name)
+        object_keys.append(key)
+
+    return object_keys
 
 
 def _build_p12trf_scenarios_and_rates() -> Dict[str, Any]:
@@ -590,6 +841,308 @@ def api_product_model_review_decision(product_code: str, payload: ProductModelRe
         comments=rec.get("comments", comments),
         created_at=str(rec.get("created_at")) if rec.get("created_at") is not None else None,
     )
+
+
+# ---------------------------------------------------------------------------
+# Product Review onboarding (MVP)
+#
+# These endpoints provide a lightweight, demo-focused flow that lets a user:
+# - capture basic product metadata,
+# - upload source documents into MinIO,
+# - configure P12TRF PMR scenarios via a form instead of raw JSON, and
+# - trigger scenario projections before landing in the existing Trust Surface.
+#
+# This deliberately avoids building a generic document management system,
+# authentication, permissions, or multi-reviewer workflow.
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/product-review/draft")
+def api_product_review_draft(payload: ProductReviewDraftRequest) -> Dict[str, Any]:
+    product_code = (payload.product_code or "").strip().upper()
+    if not product_code:
+        raise HTTPException(status_code=400, detail="product_code is required")
+
+    review_meta: Dict[str, Any] = {"status": "draft"}
+
+    rec = upsert_product_review_draft(
+        product_id=product_code,
+        carrier=payload.carrier_name,
+        product_name=payload.product_name,
+        product_type=payload.product_type,
+        review_metadata=review_meta,
+    )
+    if rec is None:
+        # When Postgres is not configured we treat this as unavailable for
+        # the MVP onboarding flow rather than trying to fake persistence.
+        raise HTTPException(status_code=500, detail="Postgres not configured for Product Review drafts")
+
+    meta = rec.get("metadata") or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    review_state = meta.get("review") or {}
+    if not isinstance(review_state, dict):
+        review_state = {"status": "draft"}
+
+    return {
+        "product": {
+            "code": rec.get("product_id", product_code),
+            "name": meta.get("name") or payload.product_name,
+            "type": meta.get("type") or payload.product_type,
+            "carrier": rec.get("carrier") or payload.carrier_name,
+        },
+        "review": {
+            "status": review_state.get("status", "draft"),
+            "version": rec.get("version"),
+        },
+    }
+
+
+def _build_product_review_payload(product_code: str) -> Dict[str, Any]:
+    code = product_code.strip().upper()
+
+    rec = get_product_review(code)
+    meta = (rec or {}).get("metadata") or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    review_state = meta.get("review") or {}
+    if not isinstance(review_state, dict):
+        review_state = {}
+
+    docs = list_product_documents(code)
+
+    # Map stored internal scenarios (when present) back into the
+    # UI-friendly ScenarioConfig shape. When none are present we fall
+    # back to the bundled default P12TRF scenarios.
+    scenarios_ui: List[Dict[str, Any]] = []
+    internal_scenarios = review_state.get("scenarios") if isinstance(review_state, dict) else None
+    if isinstance(internal_scenarios, list) and internal_scenarios:
+        for s in internal_scenarios:
+            try:
+                sid = str(s.get("id")) if isinstance(s, dict) else ""
+            except Exception:  # pragma: no cover - extremely defensive
+                sid = ""
+            if not sid:
+                continue
+            name = s.get("name") if isinstance(s, dict) else None
+            policy = s.get("policy") if isinstance(s, dict) else None
+            if not isinstance(policy, dict):
+                policy = {}
+            scenarios_ui.append(
+                {
+                    "id": sid,
+                    "name": name or f"Scenario {sid}",
+                    "age": policy.get("issue_age"),
+                    "sex": policy.get("gender"),
+                    "smokerClass": policy.get("smoker_class"),
+                    "riskClass": policy.get("risk_class"),
+                    "faceAmount": policy.get("face_amount"),
+                    "levelPeriod": policy.get("level_period"),
+                    "premiumMode": policy.get("premium_mode"),
+                    "modalPremium": policy.get("modal_premium"),
+                }
+            )
+
+    if not scenarios_ui and code == "P12TRF":
+        scenarios_ui = _default_p12trf_scenarios_for_ui()
+
+    return {
+        "product": {
+            "code": code,
+            "name": meta.get("name") or code,
+            "type": meta.get("type") or "",
+            "carrier": (rec or {}).get("carrier") or "",
+        },
+        "review": {
+            "status": review_state.get("status", "draft"),
+        },
+        "documents": [
+            {
+                "id": d.get("id"),
+                "kind": d.get("kind"),
+                "description": d.get("description"),
+                "objectPath": d.get("object_path"),
+                "createdAt": d.get("created_at"),
+            }
+            for d in docs
+        ],
+        "scenarios": scenarios_ui,
+    }
+
+
+@app.get("/api/product-review/{product_code}")
+def api_get_product_review(product_code: str) -> Dict[str, Any]:
+    code = (product_code or "").strip().upper()
+    if not code:
+        raise HTTPException(status_code=400, detail="product_code is required")
+    return _build_product_review_payload(code)
+
+
+@app.post("/api/product-review/{product_code}/documents")
+async def api_upload_product_review_document(
+    product_code: str,
+    file: UploadFile = File(...),
+    kind: str = Form("filing"),
+    description: str = Form(""),
+) -> Dict[str, Any]:
+    code = (product_code or "").strip().upper()
+    if not code:
+        raise HTTPException(status_code=400, detail="product_code is required")
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Filename is required")
+
+    suffix = (Path(file.filename).suffix or "").lower()
+    allowed_suffixes = {".pdf", ".docx", ".xlsx", ".csv"}
+    if suffix not in allowed_suffixes:
+        raise HTTPException(status_code=400, detail="Unsupported file type; expected PDF, DOCX, XLSX, or CSV")
+
+    client = get_minio_client()
+    ensure_bucket(client)
+    bucket = get_bucket_name()
+
+    safe_name = Path(file.filename).name
+    timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+    object_name = f"docs/{code}/{timestamp}-{safe_name}"
+
+    content = await file.read()
+    size = len(content)
+    if size == 0:
+        raise HTTPException(status_code=400, detail="Empty file upload is not allowed")
+
+    import io as _io
+
+    client.put_object(
+        bucket,
+        object_name,
+        _io.BytesIO(content),
+        length=size,
+        content_type=file.content_type or "application/octet-stream",
+    )
+
+    meta_description = description or safe_name
+    doc_rec = record_document_upload(
+        product_id=code,
+        kind=kind or "filing",
+        description=meta_description,
+        object_path=object_name,
+        object_hash=None,
+    )
+
+    # Return the updated view for convenience.
+    payload = _build_product_review_payload(code)
+    if doc_rec is not None:
+        payload["lastUploaded"] = {
+            "id": doc_rec.get("id"),
+            "kind": doc_rec.get("kind"),
+            "description": doc_rec.get("description"),
+            "objectPath": doc_rec.get("object_path"),
+            "createdAt": doc_rec.get("created_at"),
+        }
+    return payload
+
+
+@app.put("/api/product-review/{product_code}/scenarios")
+def api_save_product_review_scenarios(product_code: str, payload: ScenarioConfigPayload) -> Dict[str, Any]:
+    code = (product_code or "").strip().upper()
+    if not code:
+        raise HTTPException(status_code=400, detail="product_code is required")
+
+    existing = get_product_review(code) or {}
+    meta = existing.get("metadata") or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    review_state = meta.get("review") or {}
+    if not isinstance(review_state, dict):
+        review_state = {}
+
+    internal_scenarios = _ui_scenarios_to_internal(code, payload.scenarios or [])
+    review_state = dict(review_state)
+    review_state["scenarios"] = internal_scenarios
+    review_state.setdefault("status", "draft")
+
+    # Preserve basic product strings when available.
+    product_name = meta.get("name") or code
+    product_type = meta.get("type") or ""
+    carrier = existing.get("carrier") or ""
+
+    rec = upsert_product_review_draft(
+        product_id=code,
+        carrier=carrier,
+        product_name=product_name,
+        product_type=product_type,
+        review_metadata=review_state,
+    )
+    if rec is None:
+        raise HTTPException(status_code=500, detail="Failed to persist scenario configuration")
+
+    return _build_product_review_payload(code)
+
+
+@app.post("/api/product-review/{product_code}/generate")
+def api_generate_product_review(product_code: str) -> Dict[str, Any]:
+    code = (product_code or "").strip().upper()
+    if not code:
+        raise HTTPException(status_code=400, detail="product_code is required")
+
+    # MVP restriction: we only support P12TRF for now, reusing the existing
+    # scenario projection wiring and Product Model Review Trust Surface.
+    if code != "P12TRF":
+        raise HTTPException(status_code=400, detail="Generate Product Review is only implemented for P12TRF in this MVP")
+
+    rec = get_product_review(code)
+    meta = (rec or {}).get("metadata") or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    review_state = meta.get("review") or {}
+    if not isinstance(review_state, dict):
+        review_state = {}
+
+    internal_scenarios = review_state.get("scenarios") if isinstance(review_state, dict) else None
+    if not isinstance(internal_scenarios, list) or not internal_scenarios:
+        # Fallback to bundled defaults when UI-configured scenarios are
+        # missing. This keeps the demo usable even if the onboarding flow
+        # was partially completed.
+        from pathlib import Path as _Path
+        import json as _json
+
+        scenarios_path = _PROJECT_ROOT / "examples" / "p12trf_scenarios.json"
+        if not scenarios_path.exists():
+            raise HTTPException(status_code=400, detail="No scenarios configured for P12TRF and default fixture is missing")
+        try:
+            payload = _json.loads(scenarios_path.read_text(encoding="utf-8"))
+            internal_scenarios = payload.get("scenarios") or []
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"Failed to load default scenarios: {exc}") from exc
+
+    if not internal_scenarios:
+        raise HTTPException(status_code=400, detail="No scenarios available for Product Review generation")
+
+    written_keys = _generate_p12trf_scenarios_from_config(internal_scenarios, years=40)
+
+    # Best-effort: mark the review as generated so future GETs can reflect
+    # that state. We deliberately do not fail the call if this update fails.
+    try:
+        review_state = dict(review_state)
+        review_state["status"] = "generated"
+        product_name = meta.get("name") or code
+        product_type = meta.get("type") or ""
+        carrier = (rec or {}).get("carrier") or ""
+        upsert_product_review_draft(
+            product_id=code,
+            carrier=carrier,
+            product_name=product_name,
+            product_type=product_type,
+            review_metadata=review_state,
+        )
+    except Exception:
+        # Log via the shared failure counter but otherwise ignore.
+        pass
+
+    return {
+        "ok": True,
+        "written": written_keys,
+        "redirectUrl": "/web?view=product-model",
+    }
 
 
 @app.get("/health")
