@@ -1202,6 +1202,8 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
     }
     documents_payload: List[Dict[str, Any]] = []
     product_definition_summary: Optional[Dict[str, Any]] = None
+    product_definition_full: Optional[ProductDefinitionV1] = None
+    coverage_matrix: List[Dict[str, Any]] = []
     try:
         rec = get_product_review(product_block["code"])
         meta = (rec or {}).get("metadata") or {}
@@ -1256,6 +1258,7 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
             except Exception:
                 pd = None
             if pd is not None:
+                product_definition_full = pd
                 product_definition_summary = pd.summary()
 
         docs = list_product_documents(product_block["code"], filing_id=filing_id)
@@ -1302,6 +1305,177 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
             rule["evidence"] = ev_list
         review_meta["traceableRuleCount"] = traceable
         review_meta["unattributedRuleCount"] = max(0, len(rules) - traceable)
+
+        # Build a simple coverage matrix from the ProductDefinition, model
+        # behaviour, and available document-linked evidence. This is
+        # intentionally P12TRF-specific and conservative: dimensions
+        # without direct filing evidence are marked "partial", not
+        # silently treated as fully covered.
+        if product_definition_full is not None:
+            pd = product_definition_full
+
+            def _row(feature: str, pd_value: str, model: str, evidence_text: str, status: str) -> Dict[str, Any]:
+                return {
+                    "feature": feature,
+                    "productDefinitionValue": pd_value,
+                    "modelSupport": model,
+                    "evidence": evidence_text,
+                    "status": status,
+                }
+
+            # Map evidence rows by rule_id for quick lookup.
+            ev_by_rule: Dict[str, List[Dict[str, Any]]] = {}
+            for ev in evidence_rows:
+                rid2 = ev.get("rule_id")
+                if not isinstance(rid2, str) or not rid2:
+                    continue
+                ev_by_rule.setdefault(rid2, []).append(ev)
+
+            def _evidence_for(rule_id: str) -> str:
+                items = ev_by_rule.get(rule_id) or []
+                parts: List[str] = []
+                for ev in items:
+                    doc_path = ev.get("document_path") or ""
+                    page = ev.get("page_reference") or ""
+                    frag = ev.get("source_snippet") or ""
+                    bits = [f"rule={rule_id}"]
+                    if page:
+                        bits.append(f"page={page}")
+                    if doc_path:
+                        bits.append(f"doc={doc_path}")
+                    if frag:
+                        bits.append("snippet=…")
+                    parts.append("; ".join(bits))
+                return " | ".join(parts) if parts else "(no direct filing evidence)"
+
+            # Base term coverage.
+            base_cov_names = [c.name for c in (pd.coverages or [])]
+            base_desc = ", ".join(base_cov_names) if base_cov_names else "(none)"
+            cov_ev = _evidence_for("rule_death_benefit_term")
+            coverage_matrix.append(
+                _row(
+                    "Base term coverage",
+                    base_desc,
+                    "Modeled via P12TRF term DSL and scenario projections.",
+                    cov_ev,
+                    "covered" if ev_by_rule.get("rule_death_benefit_term") else "partial",
+                )
+            )
+
+            # Level premiums.
+            lvl_ev = _evidence_for("rule_level_premiums")
+            coverage_matrix.append(
+                _row(
+                    "Level premiums",
+                    "Premiums defined as level-term table rates (POC).",
+                    "Modeled via premium lookup table and scenario projections.",
+                    lvl_ev,
+                    "covered" if ev_by_rule.get("rule_level_premiums") else "partial",
+                )
+            )
+
+            # Term periods.
+            term_vals = ", ".join(str(t) for t in (pd.term_periods or [])) or "(none)"
+            scen_terms = sorted({s.get("inputs", {}).get("termYears") for s in scen_and_rates["scenarios"]})
+            scen_terms_str = ", ".join(str(t) for t in scen_terms if t) or "(none)"
+            coverage_matrix.append(
+                _row(
+                    "Term periods",
+                    f"Allowed: {term_vals}",
+                    f"Scenario terms: {scen_terms_str}",
+                    "(no direct filing evidence; inferred from scenarios)",
+                    "partial",
+                )
+            )
+
+            # Issue ages.
+            age_min = pd.issue_age_min
+            age_max = pd.issue_age_max
+            scen_ages = sorted({s.get("inputs", {}).get("age") for s in scen_and_rates["scenarios"]})
+            scen_age_str = ", ".join(str(a) for a in scen_ages if a) or "(none)"
+            coverage_matrix.append(
+                _row(
+                    "Issue ages",
+                    f"Allowed: {age_min}–{age_max}",
+                    f"Scenario ages: {scen_age_str}",
+                    "(no direct filing evidence; inferred from scenarios)",
+                    "partial",
+                )
+            )
+
+            # Underwriting / risk classes.
+            uw = ", ".join(pd.underwriting_classes or []) or "(none)"
+            rc = ", ".join(pd.risk_classes or []) or "(none)"
+            coverage_matrix.append(
+                _row(
+                    "Underwriting / risk classes",
+                    f"Underwriting: {uw}; Risk: {rc}",
+                    "Scenario set exercises a subset of risk classes.",
+                    "(no direct filing evidence; inferred from scenarios)",
+                    "partial",
+                )
+            )
+
+            # Smoker classes.
+            sm = ", ".join(pd.smoker_classes or []) or "(none)"
+            coverage_matrix.append(
+                _row(
+                    "Smoker classes",
+                    f"ProductDefinition: {sm}",
+                    "Scenarios include both non-smoker and smoker cases.",
+                    "(no direct filing evidence; inferred from scenarios)",
+                    "partial",
+                )
+            )
+
+            # Premium modes.
+            modes = ", ".join(pd.premium_modes or []) or "(none)"
+            coverage_matrix.append(
+                _row(
+                    "Premium modes",
+                    f"ProductDefinition: {modes}",
+                    "Current scenarios exercise the primary premium mode only.",
+                    "(no direct filing evidence; inferred from scenarios)",
+                    "partial",
+                )
+            )
+
+            # Face amount range.
+            coverage_matrix.append(
+                _row(
+                    "Face amount range",
+                    f"Allowed: {pd.face_amount_min}–{pd.face_amount_max}",
+                    "Scenario set spans low/mid/high face amounts.",
+                    "(no direct filing evidence; inferred from scenarios)",
+                    "partial",
+                )
+            )
+
+            # Riders / unmodeled coverages.
+            unmodeled = []
+            extra = getattr(pd, "extra", {}) or {}
+            if isinstance(extra, dict):
+                unmodeled = list(extra.get("unmodeled_coverages") or [])
+            unmodeled_str = ", ".join(unmodeled) if unmodeled else "(none recorded)"
+            coverage_matrix.append(
+                _row(
+                    "Riders / unmodeled coverages",
+                    unmodeled_str,
+                    "Not currently modeled in the P12TRF POC.",
+                    "(no filing rule evidence wired yet)",
+                    "gap",
+                )
+            )
+
+            # Derive simple coverage status counts for the Review Summary.
+            covered = sum(1 for r in coverage_matrix if r.get("status") == "covered")
+            partial = sum(1 for r in coverage_matrix if r.get("status") == "partial")
+            gaps = sum(1 for r in coverage_matrix if r.get("status") == "gap")
+            not_app = sum(1 for r in coverage_matrix if r.get("status") == "not_applicable")
+            review_meta["coverageCoveredCount"] = covered
+            review_meta["coveragePartialCount"] = partial
+            review_meta["coverageGapCount"] = gaps
+            review_meta["coverageNotApplicableCount"] = not_app
 
     except Exception:
         # Best-effort only; Trust Surface must remain robust when Postgres
@@ -1353,6 +1527,7 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
         "lastDecision": last_decision,
         "reviewProgress": review_progress,
         "productDefinition": product_definition_summary,
+        "coverageMatrix": coverage_matrix,
     }
 
 

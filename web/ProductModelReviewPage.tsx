@@ -117,6 +117,10 @@ export interface ProductModelReview {
     scenarioCount?: number;
     traceableRuleCount?: number;
     unattributedRuleCount?: number;
+    coverageCoveredCount?: number;
+    coveragePartialCount?: number;
+    coverageGapCount?: number;
+    coverageNotApplicableCount?: number;
   };
   productDefinition?: {
     productCode?: string;
@@ -138,6 +142,13 @@ export interface ProductModelReview {
     sourceDocumentCount?: number;
     evidenceRefCount?: number;
   } | null;
+  coverageMatrix?: {
+    feature: string;
+    productDefinitionValue?: string;
+    modelSupport?: string;
+    evidence?: string;
+    status: "covered" | "partial" | "gap" | "not_applicable" | string;
+  }[];
 }
 
 interface ProductModelReviewPageProps {
@@ -173,7 +184,7 @@ interface ProductModelReviewPageProps {
 }
 
 export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ review }) => {
-  const { product, scope, traceability, rates, scenarios, assumptions, gaps, reviewMeta, documents, lastDecision, reviewProgress, productDefinition } = review;
+  const { product, scope, traceability, rates, scenarios, assumptions, gaps, reviewMeta, documents, lastDecision, reviewProgress, productDefinition, coverageMatrix } = review;
 
   const totalScenarios = scenarios.length;
   const scenarioPassCount = scenarios.filter((s) => s.status.toLowerCase() === "pass").length;
@@ -377,6 +388,12 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
               </td>
             </tr>
             <tr>
+              <th>Coverage matrix status</th>
+              <td>
+                {(reviewMeta?.coverageCoveredCount ?? 0)} covered, {(reviewMeta?.coveragePartialCount ?? 0)} partial, {(reviewMeta?.coverageGapCount ?? 0)} gap
+              </td>
+            </tr>
+            <tr>
               <th>Decision status</th>
               <td>
                 {lastDecision && lastDecision.decision
@@ -480,6 +497,37 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                     {(productDefinition.sourceDocumentCount ?? 0)} document(s), {productDefinition.evidenceRefCount ?? 0} evidence link(s)
                   </td>
                 </tr>
+              </tbody>
+            </table>
+          </>
+        )}
+        {coverageMatrix && coverageMatrix.length > 0 && (
+          <>
+            <h3>ProductDefinition Coverage Matrix (v1)</h3>
+            <p className="muted">
+              Shows how key ProductDefinition dimensions are represented in the P12TRF model and where documentary
+              evidence is wired. Dimensions without direct filing evidence are marked as partial.
+            </p>
+            <table className="kv-table">
+              <thead>
+                <tr>
+                  <th>Feature</th>
+                  <th>Product definition</th>
+                  <th>Model support</th>
+                  <th>Evidence</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {coverageMatrix.map((row, idx) => (
+                  <tr key={idx}>
+                    <td>{row.feature}</td>
+                    <td>{row.productDefinitionValue || "(none)"}</td>
+                    <td className="muted">{row.modelSupport || "(not recorded)"}</td>
+                    <td className="muted">{row.evidence || "(none)"}</td>
+                    <td>{row.status}</td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </>
