@@ -318,6 +318,24 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                     Age {selectedInputs.age}, {selectedInputs.sex}, {selectedInputs.smokerClass}, term {selectedInputs.termYears} years, face {selectedFaceDisplay} ({selectedInputs.premiumMode} premium)
                   </td>
                 </tr>
+                {(() => {
+                  const scenario = selectedScenario as any;
+                  const policyInputs = (scenario && (scenario as any).policyInputs) || null;
+                  const modalPremium = policyInputs?.modal_premium;
+                  const mode = policyInputs?.premium_mode || selectedInputs.premiumMode;
+                  if (modalPremium === undefined || modalPremium === null) return null;
+                  return (
+                    <tr>
+                      <th>Configured modal premium</th>
+                      <td>
+                        {typeof modalPremium === "number"
+                          ? modalPremium.toLocaleString(undefined, { maximumFractionDigits: 2 })
+                          : String(modalPremium)}
+                        {mode ? ` (${mode} mode)` : ""}
+                      </td>
+                    </tr>
+                  );
+                })()}
                 <tr>
                   <th>Rule IDs</th>
                   <td>{selectedScenario.ruleIds.join(", ")}</td>
