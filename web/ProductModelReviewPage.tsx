@@ -49,7 +49,7 @@ export interface ProductModelReview {
     id: string;
     name: string;
     inputs: {
-      age: number;
+      age: number | string;
       sex: string;
       smokerClass: string;
       termYears: number;
@@ -115,6 +115,31 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
   );
   const selectedScenario =
     scenarios.find((s) => s.id === selectedScenarioId) || (scenarios.length > 0 ? scenarios[0] : null);
+
+  const normaliseInputs = (inputs: any) => {
+    const age = inputs && inputs.age !== undefined ? inputs.age : "unknown";
+    const sex = inputs && typeof inputs.sex === "string" && inputs.sex ? inputs.sex : "unknown";
+    const smokerClass =
+      inputs && typeof inputs.smokerClass === "string" && inputs.smokerClass ? inputs.smokerClass : "unknown";
+    const termYears =
+      inputs && typeof inputs.termYears === "number" && !Number.isNaN(inputs.termYears) ? inputs.termYears : 0;
+    const faceAmount =
+      inputs && typeof inputs.faceAmount === "number" && !Number.isNaN(inputs.faceAmount) ? inputs.faceAmount : 0;
+    const premiumMode =
+      inputs && typeof inputs.premiumMode === "string" && inputs.premiumMode
+        ? inputs.premiumMode.toUpperCase()
+        : "UNKNOWN";
+
+    return { age, sex, smokerClass, termYears, faceAmount, premiumMode };
+  };
+
+  const selectedInputs = selectedScenario ? normaliseInputs(selectedScenario.inputs || {}) : null;
+  const selectedFaceDisplay =
+    selectedInputs && typeof selectedInputs.faceAmount === "number"
+      ? selectedInputs.faceAmount.toLocaleString()
+      : selectedInputs
+        ? String(selectedInputs.faceAmount)
+        : null;
 
   // Simple, MVP-only Final Actuary Decision form state.
   const [reviewer, setReviewer] = React.useState("");
@@ -254,7 +279,7 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
             </ul>
           </div>
         </div>
-        {selectedScenario && (
+        {selectedScenario && selectedInputs && (
           <div className="scenario-detail">
             <h3>Scenario Detail – {selectedScenario.id}</h3>
             <table className="kv-table">
@@ -282,7 +307,7 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                 <tr>
                   <th>Policy inputs</th>
                   <td>
-                    Age {selectedScenario.inputs.age}, {selectedScenario.inputs.sex}, {selectedScenario.inputs.smokerClass}, term {selectedScenario.inputs.termYears} years, face {selectedScenario.inputs.faceAmount.toLocaleString()} ({selectedScenario.inputs.premiumMode} premium)
+                    Age {selectedInputs.age}, {selectedInputs.sex}, {selectedInputs.smokerClass}, term {selectedInputs.termYears} years, face {selectedFaceDisplay} ({selectedInputs.premiumMode} premium)
                   </td>
                 </tr>
                 <tr>
@@ -326,7 +351,7 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                       if (years.length > 0) {
                         // first year
                         rows.push({ year: years[0], db: db[0] });
-                        const termYear = selectedScenario.inputs.termYears;
+                        const termYear = selectedInputs.termYears;
                         // find index for term boundary and first after term
                         const termIdx = years.findIndex((y) => Number(y) === termYear);
                         if (termIdx > 0) {
@@ -352,7 +377,7 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
               </>
             )}
           </div>
-        )}
+        )()}
       </section>
 
       <section className="card">
@@ -424,37 +449,42 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
       <section className="card">
         <h2>Scenario Evidence (POC)</h2>
         <div className="scenario-grid">
-          {scenarios.map((s) => (
-            <div
-              key={s.id}
-              className={
-                "scenario-card" + (selectedScenario && selectedScenario.id === s.id ? " scenario-card--selected" : "")
-              }
-              onClick={() => setSelectedScenarioId(s.id)}
-            >
-              <h3>
-                {s.id} – {s.name}
-              </h3>
-              <p>
-                <strong>Inputs:</strong> Age {s.inputs.age}, {s.inputs.sex}, {s.inputs.smokerClass}, term {s.inputs.termYears} years,
-                face {s.inputs.faceAmount.toLocaleString()} ({s.inputs.premiumMode} premium)
-              </p>
-              <p>
-                <strong>Expected behavior:</strong>
-              </p>
-              <ul>
-                {s.expectedBehavior.map((b, idx) => (
-                  <li key={idx}>{b}</li>
-                ))}
-              </ul>
-              <p>
-                <strong>Model behavior (summary):</strong> {s.modelBehaviorSummary}
-              </p>
-              <p>
-                <strong>Result:</strong> {s.status.toUpperCase()}
-              </p>
-            </div>
-          ))}
+          {scenarios.map((s) => {
+            const inp = normaliseInputs(s.inputs || {});
+            const faceDisplay =
+              typeof inp.faceAmount === "number" ? inp.faceAmount.toLocaleString() : String(inp.faceAmount);
+
+            return (
+              <div
+                key={s.id}
+                className={
+                  "scenario-card" + (selectedScenario && selectedScenario.id === s.id ? " scenario-card--selected" : "")
+                }
+                onClick={() => setSelectedScenarioId(s.id)}
+              >
+                <h3>
+                  {s.id} – {s.name}
+                </h3>
+                <p>
+                  <strong>Inputs:</strong> Age {inp.age}, {inp.sex}, {inp.smokerClass}, term {inp.termYears} years, face {faceDisplay} ({inp.premiumMode} premium)
+                </p>
+                <p>
+                  <strong>Expected behavior:</strong>
+                </p>
+                <ul>
+                  {s.expectedBehavior.map((b, idx) => (
+                    <li key={idx}>{b}</li>
+                  ))}
+                </ul>
+                <p>
+                  <strong>Model behavior (summary):</strong> {s.modelBehaviorSummary}
+                </p>
+                <p>
+                  <strong>Result:</strong> {s.status.toUpperCase()}
+                </p>
+              </div>
+            );
+          })}
         </div>
       </section>
 
