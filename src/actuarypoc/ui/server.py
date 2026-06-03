@@ -323,6 +323,58 @@ def _build_p12trf_scenarios_and_rates() -> Dict[str, Any]:
         if not behavior_summary_parts:
             behavior_summary_parts.append("Model behavior appears consistent with a level term pattern for this scenario (POC).")
 
+        # Build a compact projection table for drill-down using the full
+        # projection artefact when available. We avoid fabricating fields:
+        # when a value is not present in the artefact or derivable from
+        # stored inputs, we leave it null so the UI can render "not
+        # available" or omit the column.
+        full_proj = data.get("projection") or {}
+        proj_years = full_proj.get("years") or years or []
+        proj_db = full_proj.get("death_benefits") or death_benefits or []
+        proj_cash = full_proj.get("cash_values") or []
+        proj_prem = full_proj.get("expected_premiums") or full_proj.get("premiums") or []
+
+        projection_table: List[Dict[str, Any]] = []
+        for idx, y in enumerate(proj_years):
+            if y is None:
+                continue
+            try:
+                year_int = int(y)
+            except (TypeError, ValueError):
+                year_int = y  # keep as-is if it cannot be coerced
+
+            # Attained age is only derivable when we have a numeric
+            # issue_age; otherwise we leave it null.
+            attained_age: Optional[int] = None
+            if isinstance(issue_age, (int, float)) and issue_age > 0 and isinstance(year_int, int):
+                attained_age = int(issue_age) + max(0, year_int - 1)
+
+            premium = proj_prem[idx] if idx < len(proj_prem) else None
+            dbv = proj_db[idx] if idx < len(proj_db) else None
+
+            # Term / in-force status: only label when level_period is a
+            # positive integer; otherwise leave status null.
+            status_label: Optional[str] = None
+            if isinstance(level_period, int) and level_period > 0 and isinstance(year_int, int):
+                if year_int <= level_period:
+                    status_label = "in_force_term"
+                else:
+                    status_label = "post_term"
+
+            row: Dict[str, Any] = {
+                "year": year_int,
+                "attainedAge": attained_age,
+                "premium": premium,
+                "deathBenefit": dbv,
+                "status": status_label,
+            }
+
+            # Include cash value when present in the artefact.
+            if idx < len(proj_cash):
+                row["cashValue"] = proj_cash[idx]
+
+            projection_table.append(row)
+
         scenarios.append(
             {
                 "id": cfg["id"],
@@ -347,6 +399,7 @@ def _build_p12trf_scenarios_and_rates() -> Dict[str, Any]:
                     "years": years,
                     "deathBenefits": death_benefits,
                 },
+                "projectionTable": projection_table,
                 "ruleIds": ["rule_death_benefit_term", "rule_level_premiums"],
             }
         )

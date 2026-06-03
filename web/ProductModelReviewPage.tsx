@@ -70,6 +70,14 @@ export interface ProductModelReview {
       years?: (number | string)[];
       deathBenefits?: (number | string)[];
     };
+    projectionTable?: {
+      year: number | string;
+      attainedAge?: number | string | null;
+      premium?: number | string | null;
+      deathBenefit?: number | string | null;
+      cashValue?: number | string | null;
+      status?: string | null;
+    }[];
   }[];
   assumptions: {
     filed: any[];
@@ -333,49 +341,60 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                 </tr>
               </tbody>
             </table>
-            {selectedScenario.projection &&
-              selectedScenario.projection.years &&
-              selectedScenario.projection.deathBenefits && (
+            {Array.isArray(selectedScenario.projectionTable) && selectedScenario.projectionTable.length > 0 && (
               <>
-                <h4>Projection evidence (death benefit excerpts)</h4>
-                <table className="kv-table">
-                  <thead>
-                    <tr>
-                      <th>Year</th>
-                      <th>Death benefit</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {(() => {
-                      const years = selectedScenario.projection?.years || [];
-                      const db = selectedScenario.projection?.deathBenefits || [];
-                      const rows: { year: number | string; db: number | string }[] = [];
-                      if (years.length > 0) {
-                        // first year
-                        rows.push({ year: years[0], db: db[0] });
-                        const termYear = selectedInputs.termYears;
-                        // find index for term boundary and first after term
-                        const termIdx = years.findIndex((y) => Number(y) === termYear);
-                        if (termIdx > 0) {
-                          rows.push({ year: years[termIdx], db: db[termIdx] });
-                          if (termIdx + 1 < years.length) {
-                            rows.push({ year: years[termIdx + 1], db: db[termIdx + 1] });
-                          }
-                        }
-                        // final year
-                        if (years.length > 1) {
-                          rows.push({ year: years[years.length - 1], db: db[db.length - 1] });
-                        }
-                      }
-                      return rows.map((r, idx) => (
-                        <tr key={idx}>
-                          <td>{r.year}</td>
-                          <td>{typeof r.db === "number" ? r.db.toLocaleString() : r.db}</td>
+                <h4>Projection evidence (policy-year table)</h4>
+                {(() => {
+                  const rows = selectedScenario.projectionTable || [];
+                  const limited = rows.slice(0, 20); // keep the table compact for MVP
+                  const hasAttainedAge = limited.some((r) => r.attainedAge !== undefined && r.attainedAge !== null && r.attainedAge !== "");
+                  const hasPremium = limited.some((r) => r.premium !== undefined && r.premium !== null && r.premium !== "");
+                  const hasStatus = limited.some((r) => r.status && r.status !== "");
+                  const hasCash = limited.some((r) => r.cashValue !== undefined && r.cashValue !== null && r.cashValue !== "");
+
+                  return (
+                    <table className="kv-table">
+                      <thead>
+                        <tr>
+                          <th>Policy year</th>
+                          {hasAttainedAge && <th>Attained age</th>}
+                          {hasPremium && <th>Premium</th>}
+                          <th>Death benefit</th>
+                          {hasCash && <th>Cash value</th>}
+                          {hasStatus && <th>Status</th>}
                         </tr>
-                      ));
-                    })()}
-                  </tbody>
-                </table>
+                      </thead>
+                      <tbody>
+                        {limited.map((r, idx) => (
+                          <tr key={idx}>
+                            <td>{r.year}</td>
+                            {hasAttainedAge && <td>{r.attainedAge ?? ""}</td>}
+                            {hasPremium && (
+                              <td>
+                                {typeof r.premium === "number"
+                                  ? r.premium.toLocaleString(undefined, { maximumFractionDigits: 2 })
+                                  : r.premium ?? ""}
+                              </td>
+                            )}
+                            <td>
+                              {typeof r.deathBenefit === "number"
+                                ? r.deathBenefit.toLocaleString()
+                                : r.deathBenefit ?? ""}
+                            </td>
+                            {hasCash && (
+                              <td>
+                                {typeof r.cashValue === "number"
+                                  ? r.cashValue.toLocaleString(undefined, { maximumFractionDigits: 2 })
+                                  : r.cashValue ?? ""}
+                              </td>
+                            )}
+                            {hasStatus && <td>{r.status ?? ""}</td>}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  );
+                })()}
               </>
             )}
           </div>
