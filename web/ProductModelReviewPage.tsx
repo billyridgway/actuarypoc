@@ -98,6 +98,12 @@ export interface ProductModelReview {
     }[];
     ambiguousLanguage: any[];
   };
+  reviewMeta?: {
+    currentGeneration?: string | null;
+    generatedAt?: string | null;
+    documentCount?: number;
+    scenarioCount?: number;
+  };
 }
 
 interface ProductModelReviewPageProps {
@@ -105,7 +111,7 @@ interface ProductModelReviewPageProps {
 }
 
 export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ review }) => {
-  const { product, scope, traceability, rates, scenarios, assumptions, gaps } = review;
+  const { product, scope, traceability, rates, scenarios, assumptions, gaps, reviewMeta } = review;
 
   const totalScenarios = scenarios.length;
   const scenarioPassCount = scenarios.filter((s) => s.status.toLowerCase() === "pass").length;
@@ -262,6 +268,21 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
             <tr>
               <th>Known gaps</th>
               <td>{knownGaps} missing / unmodeled feature(s) recorded</td>
+            </tr>
+            <tr>
+              <th>Product Review generation</th>
+              <td>
+                {reviewMeta?.currentGeneration || "(not generated via onboarding yet)"}
+                {reviewMeta?.generatedAt && (
+                  <span className="muted">{` (generated at ${reviewMeta.generatedAt})`}</span>
+                )}
+              </td>
+            </tr>
+            <tr>
+              <th>Onboarding artefacts</th>
+              <td>
+                {reviewMeta?.documentCount ?? 0} document(s), {reviewMeta?.scenarioCount ?? scenarios.length} scenario(s)
+              </td>
             </tr>
           </tbody>
         </table>

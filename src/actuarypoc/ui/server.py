@@ -269,7 +269,14 @@ def _ui_scenarios_to_internal(product_code: str, scenarios: List[ScenarioConfig]
     return internal
 
 
-def _generate_p12trf_scenarios_from_config(scenarios: List[Dict[str, Any]], years: int = 40) -> List[str]:
+def _generate_p12trf_scenarios_from_config(
+    scenarios: List[Dict[str, Any]],
+    years: int = 40,
+    *,
+    generation_id: Optional[str] = None,
+    product_code: str = "P12TRF",
+    generated_at: Optional[str] = None,
+) -> List[str]:
     """Project configured P12TRF scenarios and persist them to MinIO.
 
     This is a thin, API-friendly wrapper around the CLI helper
@@ -277,9 +284,12 @@ def _generate_p12trf_scenarios_from_config(scenarios: List[Dict[str, Any]], year
     list of objects with ``id``, optional ``name``, and a ``policy`` block
     mirroring ``examples/p12trf_scenarios.json``.
 
-    It returns the list of object keys written under the
-    ``projections/p12trf/scenarios/`` prefix. Errors propagate as normal
-    Python exceptions so FastAPI can surface them as HTTP 5xx when needed.
+    It returns the list of *generation-scoped* object keys written under the
+    ``projections/{product_code_lower}/reviews/{generation_id}/scenarios/``
+    prefix. For backward compatibility with the existing Product Model
+    Review Trust Surface, it also writes "latest" alias objects under the
+    legacy ``projections/p12trf/scenarios/{scenario_id}.json`` paths when
+    product_code == "P12TRF".
     """
 
     if not scenarios:
@@ -307,6 +317,12 @@ def _generate_p12trf_scenarios_from_config(scenarios: List[Dict[str, Any]], year
 
     object_keys: List[str] = []
     env_label = None
+
+    product_code_norm = (product_code or "P12TRF").upper()
+    product_code_lower = product_code_norm.lower()
+
+    gen_id = generation_id or datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    gen_ts = generated_at or datetime.utcnow().isoformat() + "Z"
 
     for scenario in scenarios:
         sid = str(scenario.get("id") or "").strip()
@@ -380,7 +396,14 @@ def _generate_p12trf_scenarios_from_config(scenarios: List[Dict[str, Any]], year
         result = engine.project(policy, horizon=years)
 
         summary = {
-            "generated_at": datetime.utcnow().isoformat(),
+            # Top-level generation metadata so downstream tooling (including
+            # generic projection viewers) can recover which UI generation
+            # produced this artefact.
+            "product_code": product_code_norm,
+            "generation_id": gen_id,
+            "scenario_id": sid,
+            "scenario_label": label,
+            "generated_at": gen_ts,
             "inputs": {
                 "pas_object": None,
                 "actuarial_object": None,
@@ -400,14 +423,26 @@ def _generate_p12trf_scenarios_from_config(scenarios: List[Dict[str, Any]], year
             },
             "metadata": {
                 "environment": env_label,
+                "product_code": product_code_norm,
+                "generation_id": gen_id,
+                "scenario_id": sid,
+                "scenario_label": label,
             },
             "warnings": warnings,
             "projection": asdict(result),
         }
 
-        object_name = f"projections/p12trf/scenarios/{sid}.json"
+        # Generation-scoped key for this scenario.
+        object_name = f"projections/{product_code_lower}/reviews/{gen_id}/scenarios/{sid}.json"
         key = store_projection(summary, object_name=object_name)
         object_keys.append(key)
+
+        # Backward-compatible alias for the existing P12TRF PMR wiring so the
+        # Trust Surface can continue to read from the static scenario paths
+        # while history is preserved under the generation-scoped prefix.
+        if product_code_norm == "P12TRF":
+            alias_name = f"projections/p12trf/scenarios/{sid}.json"
+            store_projection(summary, object_name=alias_name)
 
     return object_keys
 
@@ -777,6 +812,29 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
         "definitionId": defn.get("product_definition_id", "P12TRF-def-v1-poc"),
     }
 
+    # Optional review metadata: tie the Trust Surface back to the latest
+    # Product Review generation when Postgres is configured.
+    review_meta: Dict[str, Any] = {
+        "currentGeneration": None,
+        "generatedAt": None,
+        "documentCount": 0,
+        "scenarioCount": len(scen_and_rates["scenarios"]),
+    }
+    try:
+        rec = get_product_review(product_block["code"])
+        meta = (rec or {}).get("metadata") or {}
+        if isinstance(meta, dict):
+            rs = meta.get("review") or {}
+            if isinstance(rs, dict):
+                review_meta["currentGeneration"] = rs.get("current_generation")
+                review_meta["generatedAt"] = rs.get("generated_at")
+        docs = list_product_documents(product_block["code"])
+        review_meta["documentCount"] = len(docs)
+    except Exception:
+        # Best-effort only; Trust Surface must remain robust when Postgres
+        # is not configured.
+        pass
+
     return {
         "product": product_block,
         "scope": scope,
@@ -785,6 +843,7 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
         "scenarios": scen_and_rates["scenarios"],
         "assumptions": assumptions,
         "gaps": gaps,
+        "reviewMeta": review_meta,
     }
 
 
@@ -955,6 +1014,9 @@ def _build_product_review_payload(product_code: str) -> Dict[str, Any]:
         },
         "review": {
             "status": review_state.get("status", "draft"),
+            "currentGeneration": review_state.get("current_generation"),
+            "generatedAt": review_state.get("generated_at"),
+            "writtenKeys": review_state.get("written_keys") or [],
         },
         "documents": [
             {
@@ -1089,6 +1151,12 @@ def api_generate_product_review(product_code: str) -> Dict[str, Any]:
     if code != "P12TRF":
         raise HTTPException(status_code=400, detail="Generate Product Review is only implemented for P12TRF in this MVP")
 
+    # Generation identifier for this Product Review run. We use an
+    # ISO-like UTC timestamp that is easy to read and sort.
+    now = datetime.utcnow()
+    generation_id = now.strftime("%Y%m%dT%H%M%SZ")
+    generated_at = now.isoformat() + "Z"
+
     rec = get_product_review(code)
     meta = (rec or {}).get("metadata") or {}
     if not isinstance(meta, dict):
@@ -1117,13 +1185,22 @@ def api_generate_product_review(product_code: str) -> Dict[str, Any]:
     if not internal_scenarios:
         raise HTTPException(status_code=400, detail="No scenarios available for Product Review generation")
 
-    written_keys = _generate_p12trf_scenarios_from_config(internal_scenarios, years=40)
+    written_keys = _generate_p12trf_scenarios_from_config(
+        internal_scenarios,
+        years=40,
+        generation_id=generation_id,
+        product_code=code,
+        generated_at=generated_at,
+    )
 
     # Best-effort: mark the review as generated so future GETs can reflect
     # that state. We deliberately do not fail the call if this update fails.
     try:
         review_state = dict(review_state)
         review_state["status"] = "generated"
+        review_state["current_generation"] = generation_id
+        review_state["generated_at"] = generated_at
+        review_state["written_keys"] = written_keys
         product_name = meta.get("name") or code
         product_type = meta.get("type") or ""
         carrier = (rec or {}).get("carrier") or ""
@@ -1140,6 +1217,8 @@ def api_generate_product_review(product_code: str) -> Dict[str, Any]:
 
     return {
         "ok": True,
+        "generation_id": generation_id,
+        "generated_at": generated_at,
         "written": written_keys,
         "redirectUrl": "/web?view=product-model",
     }

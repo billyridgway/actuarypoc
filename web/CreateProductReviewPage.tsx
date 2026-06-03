@@ -10,6 +10,9 @@ interface ProductSummary {
 interface ReviewStateSummary {
   status: string;
   version?: number;
+  currentGeneration?: string | null;
+  generatedAt?: string | null;
+  writtenKeys?: string[];
 }
 
 interface DocumentSummary {
@@ -57,6 +60,8 @@ export const CreateProductReviewPage: React.FC = () => {
   const [productType, setProductType] = useState<string>("Term Life");
 
   const [reviewStatus, setReviewStatus] = useState<string>("draft");
+  const [currentGeneration, setCurrentGeneration] = useState<string | undefined>(undefined);
+  const [generatedAt, setGeneratedAt] = useState<string | undefined>(undefined);
   const [documents, setDocuments] = useState<DocumentSummary[]>([]);
   const [scenarios, setScenarios] = useState<ScenarioRow[]>([]);
 
@@ -86,6 +91,8 @@ export const CreateProductReviewPage: React.FC = () => {
       setProductName(payload.product.name || "");
       setProductType(payload.product.type || "Term Life");
       setReviewStatus(payload.review?.status || "draft");
+      setCurrentGeneration(payload.review?.currentGeneration || undefined);
+      setGeneratedAt(payload.review?.generatedAt || undefined);
       setDocuments(payload.documents || []);
       setScenarios((payload.scenarios || []).length > 0 ? payload.scenarios : []);
     } catch (e: any) {
@@ -135,6 +142,8 @@ export const CreateProductReviewPage: React.FC = () => {
       setProductName(data.product.name || productName);
       setProductType(data.product.type || productType);
       setReviewStatus(data.review?.status || "draft");
+      setCurrentGeneration(data.review?.currentGeneration || undefined);
+      setGeneratedAt(data.review?.generatedAt || undefined);
       setStep(2);
     } catch (e: any) {
       setError(e?.message || "Failed to save Product Review draft.");
@@ -173,6 +182,8 @@ export const CreateProductReviewPage: React.FC = () => {
         const payload = (await res.json()) as ProductReviewPayload;
         setDocuments(payload.documents || []);
         setReviewStatus(payload.review?.status || reviewStatus);
+        setCurrentGeneration(payload.review?.currentGeneration || currentGeneration);
+        setGeneratedAt(payload.review?.generatedAt || generatedAt);
       }
     } catch (e: any) {
       setError(e?.message || "Failed to upload document(s).");
@@ -235,6 +246,8 @@ export const CreateProductReviewPage: React.FC = () => {
       setScenarios(data.scenarios || []);
       setDocuments(data.documents || documents);
       setReviewStatus(data.review?.status || reviewStatus);
+      setCurrentGeneration(data.review?.currentGeneration || currentGeneration);
+      setGeneratedAt(data.review?.generatedAt || generatedAt);
       setStep(4);
     } catch (e: any) {
       setError(e?.message || "Failed to save scenarios.");
@@ -280,6 +293,12 @@ export const CreateProductReviewPage: React.FC = () => {
         </p>
         <p>
           <strong>Current step:</strong> {step} / 4 &nbsp;·&nbsp; <strong>Review status:</strong> {reviewStatus}
+          {currentGeneration && (
+            <>
+              {" "}
+              &nbsp;·&nbsp; <strong>Generation:</strong> {currentGeneration}
+            </>
+          )}
         </p>
       </header>
 
@@ -552,6 +571,14 @@ export const CreateProductReviewPage: React.FC = () => {
             <tr>
               <th>Scenarios</th>
               <td>{scenarios.length}</td>
+            </tr>
+            <tr>
+              <th>Current generation</th>
+              <td>{currentGeneration || "(not generated yet)"}</td>
+            </tr>
+            <tr>
+              <th>Generated at</th>
+              <td>{generatedAt || "(n/a)"}</td>
             </tr>
           </tbody>
         </table>
