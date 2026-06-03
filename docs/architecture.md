@@ -301,12 +301,27 @@ P12TRF that runs entirely inside the `projection-ui` Deployment:
   - MVP restriction: implemented only for `P12TRF`, where it:
     - reads configured scenarios from Postgres (falling back to the
       bundled fixture when needed),
+    - computes a `generation_id` (e.g. `20260603T120000Z`) for this
+      Product Review run,
     - projects each scenario using the existing P12TRF DSL + Term23 wiring,
-    - writes projection summaries to MinIO under
-      `projections/p12trf/scenarios/SX.json` via the same helpers used by
-      the CLI,
-    - marks the Product Review status as `generated` in Postgres, and
-    - returns `redirectUrl: "/web?view=product-model"`.
+    - writes generation-scoped projection summaries to MinIO under
+
+      ```text
+      projections/{product_code_lower}/reviews/{generation_id}/scenarios/{scenario_id}.json
+      ```
+
+      and, for backward compatibility with the existing Trust Surface,
+      also writes alias objects under:
+
+      ```text
+      projections/p12trf/scenarios/{scenario_id}.json
+      ```
+
+    - marks the Product Review status as `generated` in Postgres and
+      persists `current_generation`, `generated_at`, and the list of
+      written projection keys under `products.metadata.review`, and
+    - returns a small JSON payload including `generation_id`, the
+      `written` keys, and `redirectUrl: "/web?view=product-model"`.
   - The React onboarding flow uses this redirect to land the user in the
     existing Product Model Review Trust Surface (`ProductModelReviewPage`)
     without introducing new workflow engines, authentication, or

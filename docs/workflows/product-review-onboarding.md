@@ -209,7 +209,110 @@ What happens:
 
 This lands the user in the existing **Product Model Review Trust Surface**,
 which now reads scenario evidence from the freshly generated
-`projections/p12trf/scenarios/*.json` artefacts.
+scenario artefacts.
+
+### 5.1 Generation-Scoped Layout
+
+To avoid silently overwriting scenario projections, each Generate action now
+creates a **generation_id** and writes artefacts under a generation-scoped
+prefix while still maintaining compatibility with the original PMR layout.
+
+- **Generation identifier**
+  - Created in `POST /api/product-review/{product_code}/generate`.
+  - Format: UTC timestamp like `20260603T120000Z`.
+  - Stored in Postgres under `products.metadata.review.current_generation`.
+
+- **Generation-scoped scenario projections (MinIO)**
+
+  ```text
+  projections/{product_code_lower}/reviews/{generation_id}/scenarios/{scenario_id}.json
+  ```
+
+  Example for P12TRF:
+
+  ```text
+  projections/p12trf/reviews/20260603T120000Z/scenarios/S1.json
+  ```
+
+- **Backwards-compatible PMR aliases (MinIO)**
+
+  For the existing Product Model Review wiring, the UI server also writes
+  alias objects for each scenario under:
+
+  ```text
+  projections/p12trf/scenarios/{scenario_id}.json
+  ```
+
+  This keeps `/api/product-model-review/p12trf` and the current Trust Surface
+  working without change, while preserving per-generation history under the
+  `reviews/{generation_id}` prefix.
+
+- **Projection metadata**
+  - Each generation-scoped scenario projection JSON includes:
+
+    ```jsonc
+    {
+      "product_code": "P12TRF",
+      "generation_id": "20260603T120000Z",
+      "scenario_id": "S1",
+      "scenario_label": "Typical mid-age non-smoker",
+      "generated_at": "2026-06-03T12:00:00Z",
+      "inputs": { ... },
+      "metadata": {
+        "environment": "...", // when available
+        "product_code": "P12TRF",
+        "generation_id": "20260603T120000Z",
+        "scenario_id": "S1",
+        "scenario_label": "Typical mid-age non-smoker"
+      },
+      "projection": { ... }
+    }
+    ```
+
+- **Product Review state (Postgres)**
+  - `products.metadata.review` now additionally carries:
+
+    ```jsonc
+    {
+      "status": "generated",
+      "current_generation": "20260603T120000Z",
+      "generated_at": "2026-06-03T12:00:00Z",
+      "written_keys": [
+        "projections/p12trf/reviews/20260603T120000Z/scenarios/S1.json",
+        "projections/p12trf/reviews/20260603T120000Z/scenarios/S2.json",
+        "projections/p12trf/reviews/20260603T120000Z/scenarios/S3.json"
+      ],
+      "scenarios": [ ... ]
+    }
+    ```
+
+- **Product Review API payload**
+  - `GET /api/product-review/P12TRF` exposes these as:
+
+    ```jsonc
+    "review": {
+      "status": "generated",
+      "currentGeneration": "20260603T120000Z",
+      "generatedAt": "2026-06-03T12:00:00Z",
+      "writtenKeys": [ ... ]
+    }
+    ```
+
+- **Trust Surface review summary**
+  - `/api/product-model-review/p12trf` now returns a `reviewMeta` block:
+
+    ```jsonc
+    "reviewMeta": {
+      "currentGeneration": "20260603T120000Z",
+      "generatedAt": "2026-06-03T12:00:00Z",
+      "documentCount": 3,
+      "scenarioCount": 3
+    }
+    ```
+
+  - The React PMR page surfaces this in the **Review Summary (POC)** card so
+    actuaries can see which generation and document set the current Trust
+    Surface is based on.
 
 ---
 
@@ -226,12 +329,15 @@ This MVP flow is considered complete when:
 - [x] Scenarios can be configured via forms instead of JSON and saved as
       review configuration.
 - [x] Clicking **Generate Product Review** projects the configured scenarios
-      for P12TRF and updates the `projections/p12trf/scenarios/*.json`
-      artefacts.
+      for P12TRF and writes generation-scoped artefacts under
+      `projections/{product_code_lower}/reviews/{generation_id}/scenarios/*.json`,
+      while also maintaining alias objects at `projections/p12trf/scenarios/*.json`.
 - [x] The flow redirects into the existing Trust Surface
       (`/web?view=product-model`).
 - [x] Runtime is verified in the Pi k3s cluster (Deployment rolled out,
-      `/health` OK, onboarding and PMR flows accessible via port-forward).
+      `/health` OK, onboarding and PMR flows accessible via port-forward) and
+      generation-scoped artefacts are visible in the Product Review API and
+      Trust Surface review summary.
 
 This document should be kept in sync with future iterations of the onboarding
 flow (additional products, richer metadata, or more advanced workflow), but
