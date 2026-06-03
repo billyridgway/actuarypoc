@@ -62,6 +62,9 @@ under conventional prefixes:
 - `p12trf/` – P12TRF term policy data.
 - `projections/` – projection summaries written by `project-minio`.
 - `docs/...` – **(planned)** SERFF / filing documents and extracted text.
+- `product-definitions/{product_code}/{filing_id}/product-definition.json` –
+  ProductDefinition v1 artefacts for a specific product + filing context
+  (used by the P12TRF Product Model Review Trust Surface).
 
 These prefixes are typically populated by:
 
