@@ -436,7 +436,11 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                 <td>{s.age}</td>
                 <td>{s.termYears}</td>
                 <td>{s.riskClass}</td>
-                <td>{s.faceAmount.toLocaleString()}</td>
+                <td>
+                  {typeof s.faceAmount === "number"
+                    ? s.faceAmount.toLocaleString()
+                    : String(s.faceAmount ?? "")}
+                </td>
                 <td>{s.filedPremium.toFixed(2)}</td>
                 <td>{s.modelPremium.toFixed(2)}</td>
                 <td>{s.status}</td>
