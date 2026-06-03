@@ -366,51 +366,61 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                   const rows = selectedScenario.projectionTable || [];
                   const limited = rows.slice(0, 20); // keep the table compact for MVP
                   const hasAttainedAge = limited.some((r) => r.attainedAge !== undefined && r.attainedAge !== null && r.attainedAge !== "");
-                  const hasPremium = limited.some((r) => r.premium !== undefined && r.premium !== null && r.premium !== "");
+                  const hasPremium = limited.some((r) => {
+                    const p = r.premium;
+                    if (p === undefined || p === null || p === "") return false;
+                    if (typeof p === "number") return Math.abs(p) > 1e-9; // hide column when all premiums are 0.0
+                    return true;
+                  });
                   const hasStatus = limited.some((r) => r.status && r.status !== "");
                   const hasCash = limited.some((r) => r.cashValue !== undefined && r.cashValue !== null && r.cashValue !== "");
 
                   return (
-                    <table className="kv-table">
-                      <thead>
-                        <tr>
-                          <th>Policy year</th>
-                          {hasAttainedAge && <th>Attained age</th>}
-                          {hasPremium && <th>Premium</th>}
-                          <th>Death benefit</th>
-                          {hasCash && <th>Cash value</th>}
-                          {hasStatus && <th>Status</th>}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {limited.map((r, idx) => (
-                          <tr key={idx}>
-                            <td>{r.year}</td>
-                            {hasAttainedAge && <td>{r.attainedAge ?? ""}</td>}
-                            {hasPremium && (
-                              <td>
-                                {typeof r.premium === "number"
-                                  ? r.premium.toLocaleString(undefined, { maximumFractionDigits: 2 })
-                                  : r.premium ?? ""}
-                              </td>
-                            )}
-                            <td>
-                              {typeof r.deathBenefit === "number"
-                                ? r.deathBenefit.toLocaleString()
-                                : r.deathBenefit ?? ""}
-                            </td>
-                            {hasCash && (
-                              <td>
-                                {typeof r.cashValue === "number"
-                                  ? r.cashValue.toLocaleString(undefined, { maximumFractionDigits: 2 })
-                                  : r.cashValue ?? ""}
-                              </td>
-                            )}
-                            {hasStatus && <td>{r.status ?? ""}</td>}
+                    <>
+                      <p className="muted">
+                        Configured modal premium is shown above. Projection table values are engine-produced projection outputs.
+                      </p>
+                      <table className="kv-table">
+                        <thead>
+                          <tr>
+                            <th>Policy year</th>
+                            {hasAttainedAge && <th>Attained age</th>}
+                            {hasPremium && <th>Expected premium (engine)</th>}
+                            <th>Death benefit</th>
+                            {hasCash && <th>Cash value</th>}
+                            {hasStatus && <th>Status</th>}
                           </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                        </thead>
+                        <tbody>
+                          {limited.map((r, idx) => (
+                            <tr key={idx}>
+                              <td>{r.year}</td>
+                              {hasAttainedAge && <td>{r.attainedAge ?? ""}</td>}
+                              {hasPremium && (
+                                <td>
+                                  {typeof r.premium === "number"
+                                    ? r.premium.toLocaleString(undefined, { maximumFractionDigits: 2 })
+                                    : r.premium ?? ""}
+                                </td>
+                              )}
+                              <td>
+                                {typeof r.deathBenefit === "number"
+                                  ? r.deathBenefit.toLocaleString()
+                                  : r.deathBenefit ?? ""}
+                              </td>
+                              {hasCash && (
+                                <td>
+                                  {typeof r.cashValue === "number"
+                                    ? r.cashValue.toLocaleString(undefined, { maximumFractionDigits: 2 })
+                                    : r.cashValue ?? ""}
+                                </td>
+                              )}
+                              {hasStatus && <td>{r.status ?? ""}</td>}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </>
                   );
                 })()}
               </>
