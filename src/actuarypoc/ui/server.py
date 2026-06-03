@@ -1298,6 +1298,7 @@ def api_build_product_definition(product_code: str) -> Dict[str, Any]:
     pd_key = _product_definition_object_key(code, filing_id)
     report_key = _product_definition_build_report_key(code, filing_id)
 
+    import io
     import json
 
     pd_body = json.dumps(pd.dict()).encode("utf-8")  # type: ignore[call-arg]
@@ -1316,8 +1317,8 @@ def api_build_product_definition(product_code: str) -> Dict[str, Any]:
     }
     report_body = json.dumps(report).encode("utf-8")
 
-    minio_client.put_object(bucket, pd_key, data=pd_body, length=len(pd_body), content_type="application/json")
-    minio_client.put_object(bucket, report_key, data=report_body, length=len(report_body), content_type="application/json")
+    minio_client.put_object(bucket, pd_key, data=io.BytesIO(pd_body), length=len(pd_body), content_type="application/json")
+    minio_client.put_object(bucket, report_key, data=io.BytesIO(report_body), length=len(report_body), content_type="application/json")
 
     return {
         "productCode": code,
