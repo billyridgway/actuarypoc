@@ -1,0 +1,53 @@
+{
+  "product_code": "P12TRF",
+  "scenarios": [
+    {
+      "id": "S1",
+      "name": "Typical mid-age non-smoker",
+      "policy": {
+        "policy_number": "P12TRF-S1",
+        "product_type": "p12trf_term",
+        "issue_age": 35,
+        "gender": "M",
+        "smoker_class": "NS",
+        "risk_class": "SUPER_PREFERRED_NON_TOBACCO",
+        "level_period": 20,
+        "face_amount": 450000,
+        "modal_premium": 450.0,
+        "premium_mode": "ANNUAL"
+      }
+    },
+    {
+      "id": "S2",
+      "name": "Young short-term coverage",
+      "policy": {
+        "policy_number": "P12TRF-S2",
+        "product_type": "p12trf_term",
+        "issue_age": 30,
+        "gender": "F",
+        "smoker_class": "NS",
+        "risk_class": "STANDARD_NON_TOBACCO",
+        "level_period": 10,
+        "face_amount": 250000,
+        "modal_premium": 220.0,
+        "premium_mode": "ANNUAL"
+      }
+    },
+    {
+      "id": "S3",
+      "name": "Edge older age smoker",
+      "policy": {
+        "policy_number": "P12TRF-S3",
+        "product_type": "p12trf_term",
+        "issue_age": 60,
+        "gender": "M",
+        "smoker_class": "S",
+        "risk_class": "STANDARD_TOBACCO",
+        "level_period": 10,
+        "face_amount": 100000,
+        "modal_premium": 600.0,
+        "premium_mode": "ANNUAL"
+      }
+    }
+  ]
+}

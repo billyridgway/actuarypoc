@@ -142,21 +142,21 @@ def _build_p12trf_scope(defn: Dict[str, Any]) -> Dict[str, Any]:
 _P12TRF_SCENARIO_CONFIG: List[Dict[str, Any]] = [
     {
         "id": "S1",
-        "name": "Typical case",
-        # P12TRF operator run 8 (20-year term) – projection object key
-        "projection_key": "projections/p12trf/282101b0-3062-471c-be2f-e414c5dd06f7/projection.json",
+        "name": "Typical mid-age non-smoker",
+        # Scenario projection built from configurable fixture inputs
+        "projection_key": "projections/p12trf/scenarios/S1.json",
     },
     {
         "id": "S2",
-        "name": "Short term, young age",
-        # Earlier P12TRF operator run with 10-year term (placeholder key)
-        "projection_key": "projections/p12trf/b5bb75ee-c635-4e2d-b0cf-8fd768a94cc5/projection.json",
+        "name": "Young short-term coverage",
+        # Scenario projection built from configurable fixture inputs
+        "projection_key": "projections/p12trf/scenarios/S2.json",
     },
     {
         "id": "S3",
-        "name": "Edge age",
-        # Another 10-year term run at higher issue age (placeholder key)
-        "projection_key": "projections/p12trf/61bd4ca2-5eb1-46d8-ac29-4a950c1e9422/projection.json",
+        "name": "Edge older age smoker",
+        # Scenario projection built from configurable fixture inputs
+        "projection_key": "projections/p12trf/scenarios/S3.json",
     },
 ]
 

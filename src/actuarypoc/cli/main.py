@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime
+from dataclasses import asdict
 from pathlib import Path
 
 import typer
@@ -199,6 +200,186 @@ def project_p12trf_sample(years: int = 40):
         typer.echo(f"WARNING: {msg}")
 
     typer.echo(result)
+
+
+@app.command("project-p12trf-scenarios-minio")
+def project_p12trf_scenarios_minio(
+    scenarios_path: str = typer.Option(
+        "",
+        "--scenarios-path",
+        help="Path to P12TRF scenarios JSON; defaults to bundled examples/p12trf_scenarios.json",
+    ),
+    projections_prefix: str = typer.Option(
+        "projections/p12trf/scenarios/",
+        "--projections-prefix",
+        envvar="P12TRF_SCENARIOS_PREFIX",
+        help="MinIO prefix under which to write P12TRF scenario projections",
+    ),
+    years: int = typer.Option(40, "--horizon-years", help="Projection horizon in years"),
+):
+    """Project configured P12TRF PMR scenarios and persist them to MinIO.
+
+    This command treats scenario inputs as explicit, configurable policy
+    test-cases for P12TRF rather than deriving them from PAS or SERFF.
+
+    For each scenario in the fixture, we:
+    - Load the P12TRF DSL and Term23 mortality slice (when available)
+    - Project the scenario policy record for the requested horizon
+    - Write a projection summary JSON under the given prefix, including a
+      `policy_inputs` block that mirrors the configured inputs.
+
+    The resulting projection objects are suitable for consumption by the
+    RunDetail API and the Product Model Review Trust Surface.
+    """
+
+    base = Path(__file__).resolve().parents[1]
+    # Default bundled fixture under examples/ when no explicit path is given.
+    if scenarios_path:
+        scenarios_file = Path(scenarios_path)
+    else:
+        scenarios_file = base / "examples" / "p12trf_scenarios.json"
+
+    if not scenarios_file.exists():
+        raise typer.Exit(f"Scenario fixture not found: {scenarios_file}")
+
+    data = json.loads(scenarios_file.read_text(encoding="utf-8"))
+    scenarios = data.get("scenarios") or []
+
+    if not scenarios:
+        raise typer.Exit(f"No scenarios defined in {scenarios_file}")
+
+    # DSL + mortality surface wiring mirrors project_p12trf_sample so that
+    # scenario behaviour stays aligned with the P12TRF product configuration.
+    dsl_path = base / "dsl" / "examples" / "p12trf_term.yaml"
+    formula = load_formula(str(dsl_path))
+
+    term23_path = base / "sample_data" / "actuarial_tables_term23.csv"
+    term23_records = list(CSVConnector(str(term23_path)).fetch()) if term23_path.exists() else []
+    mortality_surface = build_term23_surface(term23_records) if term23_records else None
+
+    # Optional premium grid wiring, as in project_p12trf_sample; this keeps
+    # warnings/net-level-premium behaviour consistent where used.
+    premium_table = None
+    premium_sample_rel = (formula.meta or {}).get("premium_table_sample_csv") if getattr(formula, "meta", None) else None
+    if premium_sample_rel:
+        premium_csv = base / premium_sample_rel
+        if premium_csv.exists():
+            premium_table = load_premium_table_from_csv(str(premium_csv))
+
+    premium_service = PremiumLookupService(premium_table) if premium_table is not None else None
+
+    engine = ProjectionEngine(formula, mortality_surface=mortality_surface)
+
+    env_label = os.getenv("ILLUSTRATION_ENVIRONMENT") or os.getenv("ENVIRONMENT") or None
+
+    if not projections_prefix.endswith("/"):
+        projections_prefix = projections_prefix + "/"
+
+    for scenario in scenarios:
+        sid = str(scenario.get("id") or "").strip()
+        label = str(scenario.get("name") or sid)
+        policy = dict(scenario.get("policy") or {})
+
+        if not sid or not policy:
+            continue
+
+        # Build policy_inputs directly from the configured scenario policy.
+        policy_inputs = {
+            "issue_age": policy.get("issue_age"),
+            "gender": policy.get("gender"),
+            "smoker_class": policy.get("smoker_class"),
+            "risk_class": policy.get("risk_class"),
+            "level_period": policy.get("level_period"),
+            "face_amount": policy.get("face_amount"),
+            "premium_mode": policy.get("premium_mode"),
+        }
+
+        # Optionally compute table-derived premium warnings similar to
+        # project_p12trf_sample. For the scenario Trust Surface, this is
+        # mainly useful for keeping behaviour consistent; we do not mutate
+        # the configured modal_premium.
+        warnings: list[str] = []
+        if premium_service is not None:
+            try:
+                face_amount = float(policy.get("face_amount", 0) or 0.0)
+            except (TypeError, ValueError):
+                face_amount = 0.0
+
+            face_band = select_face_band(getattr(formula, "meta", {}) or {}, face_amount)
+
+            if face_band is not None and face_amount > 0:
+                try:
+                    issue_age = int(policy.get("issue_age", 0) or 0)
+                except (TypeError, ValueError):
+                    issue_age = 0
+                gender = str(policy.get("gender", ""))
+                risk_class = str(policy.get("risk_class", ""))
+                try:
+                    level_period = int(policy.get("level_period", 0) or 0)
+                except (TypeError, ValueError):
+                    level_period = 0
+
+                table_p_per_1000 = premium_service.premium_per_1000(
+                    issue_age=issue_age,
+                    gender=gender,
+                    risk_class=risk_class,
+                    face_band=face_band,
+                    level_period=level_period,
+                )
+
+                if table_p_per_1000 is not None:
+                    annual_table_premium = float(table_p_per_1000) * (face_amount / 1000.0)
+                    mode = str(policy.get("premium_mode", "")).upper()
+                    if mode == "MONTHLY":
+                        expected_modal = annual_table_premium / 12.0
+                    else:
+                        expected_modal = annual_table_premium
+
+                    try:
+                        pas_modal = float(policy.get("modal_premium", 0.0) or 0.0)
+                    except (TypeError, ValueError):
+                        pas_modal = 0.0
+
+                    diff = abs(expected_modal - pas_modal)
+                    material_threshold = max(0.01, 0.001 * expected_modal)
+                    if diff > material_threshold:
+                        warnings.append(
+                            "premium_mismatch: table-derived expected_modal={} vs configured modal_premium={}".format(
+                                round(expected_modal, 6), round(pas_modal, 6)
+                            )
+                        )
+
+        result = engine.project(policy, horizon=years)
+
+        summary = {
+            "generated_at": datetime.utcnow().isoformat(),
+            "inputs": {
+                "pas_object": None,
+                "actuarial_object": None,
+                "rate_object": None,
+                "crm_object": None,
+                "term23_actuarial_object": None,
+                "premium_table_object": None,
+                "policy_id": policy.get("policy_number") or sid,
+                "product_id": "P12TRF",
+                "product_code": "P12TRF",
+                "formula_path": str(dsl_path),
+                "assumption_set_id": None,
+                "run_id": f"p12trf-scenario-{sid}",
+                "scenario_id": sid,
+                "scenario_label": label,
+                "policy_inputs": policy_inputs,
+            },
+            "metadata": {
+                "environment": env_label,
+            },
+            "warnings": warnings,
+            "projection": asdict(result),
+        }
+
+        object_name = f"{projections_prefix}{sid}.json"
+        key = store_projection(summary, object_name=object_name)
+        typer.echo(f"{sid}: {key}")
 
 
 @app.command("project-minio")
