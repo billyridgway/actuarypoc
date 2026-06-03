@@ -10,6 +10,8 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from actuarypoc.connectors.base import CSVConnector
+from actuarypoc.domain.product_definition_v1 import ProductDefinitionV1
+from actuarypoc.product_registry import get_product_definition
 from actuarypoc.storage.minio_client import ensure_bucket, get_minio_client, get_bucket_name
 from actuarypoc.config.assumptions import list_assumption_sets, approve_assumption_set
 from actuarypoc.dsl.policy_dsl import load_formula
@@ -18,6 +20,7 @@ from actuarypoc.projection.mortality import build_term23_surface
 from actuarypoc.projection.premium import PremiumLookupService, build_premium_table, load_premium_table_from_csv, select_face_band
 from actuarypoc.projection.service import store_projection
 from actuarypoc.storage.postgres_client import (
+    get_last_product_model_review_decision,
     get_product_review,
     list_filing_rule_evidence,
     list_product_documents,
@@ -63,6 +66,89 @@ if _DIST_DIR.exists():  # pragma: no cover - environment dependent
 # ---------------------------------------------------------------------------
 
 _P12TRF_DEFINITION_PATH = _PROJECT_ROOT / "examples" / "product-definitions" / "p12trf-product-definition.json"
+
+
+def _product_definition_object_key(product_code: str, filing_id: str) -> str:
+    return f"product-definitions/{product_code.upper()}/{filing_id}/product-definition.json"
+
+
+def _load_or_seed_product_definition(product_code: str, filing_id: str) -> Optional[ProductDefinitionV1]:
+    """Best-effort load of a ProductDefinition artefact for (product, filing).
+
+    For v1 this prefers the MinIO-backed artefact. When none exists and the
+    product is P12TRF, a minimal ProductDefinitionV1 is synthesised from the
+    bundled P12TRF ProductDefinition JSON and written to MinIO.
+    """
+
+    product_code = (product_code or "").upper()
+    filing_id = (filing_id or "").strip()
+    if not product_code or not filing_id:
+        return None
+
+    minio_client = get_minio_client()
+    ensure_bucket(minio_client)
+    bucket = get_bucket_name()
+    obj_key = _product_definition_object_key(product_code, filing_id)
+
+    # First try to read any existing artefact.
+    try:
+        if minio_client.stat_object(bucket, obj_key):  # type: ignore[truthy-function]
+            response = minio_client.get_object(bucket, obj_key)
+            try:
+                import json
+
+                payload = json.loads(response.read())
+            finally:
+                response.close()
+                response.release_conn()
+            return ProductDefinitionV1(**payload)
+    except Exception:
+        # Missing object or MinIO not configured; fall through to seed logic
+        # where possible.
+        pass
+
+    # Seed a minimal artefact for P12TRF only in this v1 slice.
+    if product_code != "P12TRF":
+        return None
+
+    base_def = get_product_definition(product_code) or _load_p12trf_definition()
+    issue_limits = base_def.get("issue_age_limits") or {}
+    underwriting = base_def.get("underwriting_classes") or []
+
+    pd = ProductDefinitionV1(
+        product_code=product_code,
+        filing_id=filing_id,
+        coverages=[
+            {
+                "id": "base_term",
+                "name": base_def.get("marketing_name") or f"{product_code} Term (base)",
+                "kind": "base",
+                "term_periods": [20],  # POC default; refined in later slices
+                "notes": "POC base term coverage for P12TRF; term set via later ProductDefinition slice.",
+            }
+        ],
+        issue_age_min=issue_limits.get("min"),
+        issue_age_max=issue_limits.get("max"),
+        term_periods=[20],
+        underwriting_classes=list(underwriting),
+        risk_classes=[],
+        smoker_classes=["non_smoker", "smoker"],
+        premium_modes=["ANNUAL"],
+        source_documents=[],
+        evidence_refs=[],
+    )
+
+    try:
+        import json
+
+        body = json.dumps(pd.dict()).encode("utf-8")  # type: ignore[call-arg]
+        minio_client.put_object(bucket, obj_key, data=body, length=len(body), content_type="application/json")
+    except Exception:
+        # If MinIO is unavailable we still want the Trust Surface to render
+        # using the in-memory ProductDefinition.
+        pass
+
+    return pd
 
 
 class ProductModelReviewDecisionRequest(BaseModel):  # type: ignore[misc]
@@ -729,6 +815,22 @@ def _build_p12trf_scenarios_and_rates() -> Dict[str, Any]:
     return {"scenarios": scenarios, "rates": rates}
 
 
+
+@app.get("/api/product-definition/{product_code}")
+def api_get_product_definition(product_code: str, filing_id: str = Query(...)) -> Dict[str, Any]:
+    """Return the v1 ProductDefinition artefact for a product+filing, if any.
+
+    For P12TRF, this will seed a minimal artefact into MinIO when one does
+    not yet exist, so that the Trust Surface and future tools have a stable
+    object to reference.
+    """
+
+    pd = _load_or_seed_product_definition(product_code, filing_id)
+    if pd is None:
+        raise HTTPException(status_code=404, detail="No ProductDefinition available for this product/filing")
+    return {"productDefinition": pd.dict()}  # type: ignore[call-arg]
+
+
 @app.get("/api/product-model-review/p12trf")
 def api_product_model_review_p12trf() -> Dict[str, Any]:
     """Return a Product Model Review payload for P12TRF.
@@ -827,6 +929,7 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
         "unattributedRuleCount": len(traceability["rules"]),
     }
     documents_payload: List[Dict[str, Any]] = []
+    product_definition_summary: Optional[Dict[str, Any]] = None
     try:
         rec = get_product_review(product_block["code"])
         meta = (rec or {}).get("metadata") or {}
@@ -838,6 +941,18 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
                 review_meta["currentGeneration"] = rs.get("current_generation")
                 review_meta["generatedAt"] = rs.get("generated_at")
         review_meta["filingId"] = filing_id
+
+        # Load or seed a ProductDefinition artefact for this (product, filing)
+        # pair so that the Trust Surface can show a concise product
+        # dimensionality summary.
+        if filing_id:
+            try:
+                pd = _load_or_seed_product_definition(product_block["code"], filing_id)
+            except Exception:
+                pd = None
+            if pd is not None:
+                product_definition_summary = pd.summary()
+
         docs = list_product_documents(product_block["code"], filing_id=filing_id)
         review_meta["documentCount"] = len(docs)
         for d in docs:
@@ -888,6 +1003,38 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
         # is not configured.
         pass
 
+    # Derive a lightweight progress checklist so the UI can show how
+    # complete this review feels from a workflow perspective.
+    try:
+        last_decision = get_last_product_model_review_decision(product_block["code"])
+    except Exception:
+        last_decision = None
+
+    completed_steps = 0
+    total_steps = 6
+
+    filing_ok = bool(review_meta.get("filingId"))
+    docs_ok = (review_meta.get("documentCount") or 0) > 0
+    scenarios_ok = (review_meta.get("scenarioCount") or 0) > 0
+    generation_ok = bool(review_meta.get("currentGeneration"))
+    evidence_ok = (review_meta.get("traceableRuleCount") or 0) > 0
+    decision_ok = last_decision is not None
+
+    for flag in (filing_ok, docs_ok, scenarios_ok, generation_ok, evidence_ok, decision_ok):
+        if flag:
+            completed_steps += 1
+
+    review_progress = {
+        "filingContextEstablished": filing_ok,
+        "documentsUploaded": docs_ok,
+        "scenariosConfigured": scenarios_ok,
+        "reviewGenerated": generation_ok,
+        "ruleEvidencePresent": evidence_ok,
+        "finalDecisionRecorded": decision_ok,
+        "completedSteps": completed_steps,
+        "totalSteps": total_steps,
+    }
+
     return {
         "product": product_block,
         "scope": scope,
@@ -898,6 +1045,9 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
         "gaps": gaps,
         "reviewMeta": review_meta,
         "documents": documents_payload,
+        "lastDecision": last_decision,
+        "reviewProgress": review_progress,
+        "productDefinition": product_definition_summary,
     }
 
 

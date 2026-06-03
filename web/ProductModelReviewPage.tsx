@@ -115,6 +115,25 @@ export interface ProductModelReview {
     traceableRuleCount?: number;
     unattributedRuleCount?: number;
   };
+  productDefinition?: {
+    productCode?: string;
+    filingId?: string;
+    coverages?: {
+      id: string;
+      name: string;
+      kind: string;
+      term_periods?: number[];
+      notes?: string | null;
+    }[];
+    issueAges?: { min?: number | null; max?: number | null };
+    termPeriods?: number[];
+    underwritingClasses?: string[];
+    riskClasses?: string[];
+    smokerClasses?: string[];
+    premiumModes?: string[];
+    sourceDocumentCount?: number;
+    evidenceRefCount?: number;
+  } | null;
 }
 
 interface ProductModelReviewPageProps {
@@ -127,11 +146,30 @@ interface ProductModelReviewPageProps {
       createdAt?: string | null;
       filingId?: string | null;
     }[];
+    lastDecision?: {
+      id?: number | string;
+      product_code?: string;
+      reviewer?: string | null;
+      decision?: string | null;
+      exclusions?: string | null;
+      comments?: string | null;
+      created_at?: string | null;
+    } | null;
+    reviewProgress?: {
+      filingContextEstablished?: boolean;
+      documentsUploaded?: boolean;
+      scenariosConfigured?: boolean;
+      reviewGenerated?: boolean;
+      ruleEvidencePresent?: boolean;
+      finalDecisionRecorded?: boolean;
+      completedSteps?: number;
+      totalSteps?: number;
+    };
   };
 }
 
 export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ review }) => {
-  const { product, scope, traceability, rates, scenarios, assumptions, gaps, reviewMeta, documents } = review;
+  const { product, scope, traceability, rates, scenarios, assumptions, gaps, reviewMeta, documents, lastDecision, reviewProgress, productDefinition } = review;
 
   const totalScenarios = scenarios.length;
   const scenarioPassCount = scenarios.filter((s) => s.status.toLowerCase() === "pass").length;
@@ -253,15 +291,35 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
           <strong>Model confidence (POC):</strong> {scope.confidence}
         </p>
         {scope.pocLabel && <p className="muted">{scope.pocLabel}</p>}
+        <p className="muted">
+          Need to adjust metadata, documents, or scenarios?{" "}
+          <a href="/web?view=create-review">Edit Product Review inputs</a> (this will let you regenerate the review).
+        </p>
       </header>
 
       <section className="card">
         <h2>Review Summary (POC)</h2>
         <p className="muted">
           This summary is derived from the current Product Model Review data for P12TRF.
+          Use it as your navigation: confirm scope, scenarios, and evidence below, then capture your decision.
         </p>
         <table className="kv-table">
           <tbody>
+            <tr>
+              <th>Review completion</th>
+              <td>
+                {(() => {
+                  const done = reviewProgress?.completedSteps ?? 0;
+                  const total = reviewProgress?.totalSteps ?? 6;
+                  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+                  return (
+                    <>
+                      {done}/{total} steps ({pct}%)
+                    </>
+                  );
+                })()}
+              </td>
+            </tr>
             <tr>
               <th>Product</th>
               <td>
@@ -314,12 +372,22 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                 {(reviewMeta?.traceableRuleCount ?? 0)} traceable, {(reviewMeta?.unattributedRuleCount ?? 0)} without document attribution
               </td>
             </tr>
+            <tr>
+              <th>Decision status</th>
+              <td>
+                {lastDecision && lastDecision.decision
+                  ? `${lastDecision.decision} by ${lastDecision.reviewer || "(unknown)"} at ${lastDecision.created_at || "(time unknown)"}`
+                  : "No decision recorded yet"}
+              </td>
+            </tr>
           </tbody>
         </table>
       </section>
 
       <section className="card">
-        <h2>Product Scope Summary</h2>
+        <h2>Step 1 – Confirm Product Scope</h2>
+        <p className="muted">Check that the product scope and gaps match your understanding of the filed product.</p>
+        <h3>Product Scope Summary</h3>
         <div className="two-column">
           <div>
             <h3>Features modeled</h3>
@@ -338,6 +406,65 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
             </ul>
           </div>
         </div>
+        {productDefinition && (
+          <>
+            <h3>Product Definition (v1 snapshot)</h3>
+            <p className="muted">
+              Derived from the ProductDefinition artefact for this product and filing. Later slices will enrich this
+              with more detailed coverage and evidence.
+            </p>
+            <table className="kv-table">
+              <tbody>
+                <tr>
+                  <th>Issue ages</th>
+                  <td>
+                    {productDefinition.issueAges?.min ?? "?"}–{productDefinition.issueAges?.max ?? "?"}
+                  </td>
+                </tr>
+                <tr>
+                  <th>Term periods</th>
+                  <td>
+                    {productDefinition.termPeriods && productDefinition.termPeriods.length > 0
+                      ? productDefinition.termPeriods.join(", ")
+                      : "(not specified yet)"}
+                  </td>
+                </tr>
+                <tr>
+                  <th>Underwriting classes</th>
+                  <td>
+                    {productDefinition.underwritingClasses && productDefinition.underwritingClasses.length > 0
+                      ? productDefinition.underwritingClasses.join(", ")
+                      : "(none recorded)"}
+                  </td>
+                </tr>
+                <tr>
+                  <th>Smoker classes</th>
+                  <td>
+                    {productDefinition.smokerClasses && productDefinition.smokerClasses.length > 0
+                      ? productDefinition.smokerClasses.join(", ")
+                      : "(none recorded)"}
+                  </td>
+                </tr>
+                <tr>
+                  <th>Premium modes</th>
+                  <td>
+                    {productDefinition.premiumModes && productDefinition.premiumModes.length > 0
+                      ? productDefinition.premiumModes.join(", ")
+                      : "(none recorded)"}
+                  </td>
+                </tr>
+                <tr>
+                  <th>Coverages</th>
+                  <td>
+                    {productDefinition.coverages && productDefinition.coverages.length > 0
+                      ? productDefinition.coverages.map((c) => `${c.name} (${c.kind})`).join(", ")
+                      : "(none recorded)"}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </>
+        )}
         {selectedScenario && selectedInputs && (
           <div className="scenario-detail">
             <h3>Scenario Detail – {selectedScenario.id}</h3>
@@ -481,7 +608,11 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
       </section>
 
       <section className="card">
-        <h2>Filing Traceability – Key Rules (POC)</h2>
+        <h2>Step 3 – Check Filing Rule Evidence</h2>
+        <p className="muted">
+          Review key filing rules and confirm that each rule is backed by an appropriate source document and snippet.
+        </p>
+        <h3>Filing Traceability – Key Rules (POC)</h3>
         <table className="kv-table">
           <thead>
             <tr>
@@ -593,7 +724,11 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
       </section>
 
       <section className="card">
-        <h2>Scenario Evidence (POC)</h2>
+        <h2>Step 2 – Review Scenario Evidence (POC)</h2>
+        <p className="muted">
+          Review how the model behaves under a small set of test scenarios. Confirm that the inputs and projected
+          behavior match your expectations for this filing.
+        </p>
         <div className="scenario-grid">
           {scenarios.map((s) => {
             const inp = normaliseInputs(s.inputs || {});
@@ -721,7 +856,7 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
       </section>
 
       <section className="card">
-        <h2>Final Actuary Decision (POC)</h2>
+        <h2>Step 4 – Record Final Actuary Decision (POC)</h2>
         <p className="muted">
           MVP-only decision capture for the P12TRF Product Model Review. This does not yet implement a full workflow or
           permissions model.

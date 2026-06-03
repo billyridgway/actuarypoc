@@ -614,6 +614,45 @@ def list_filing_rule_evidence(product_code: str, filing_id: Optional[str]) -> Li
         return []
 
 
+def get_last_product_model_review_decision(product_code: str) -> Optional[Dict[str, Any]]:
+    """Return the most recent Product Model Review decision for a product.
+
+    When Postgres is unavailable or no decisions exist, returns None.
+    """
+
+    ensure_schema()
+    try:
+        with _conn() as conn:
+            if conn is None:
+                return None
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, product_code, reviewer, decision, exclusions, comments, created_at
+                      FROM product_model_review_decisions
+                     WHERE product_code = %s
+                     ORDER BY created_at DESC, id DESC
+                     LIMIT 1
+                    """,
+                    (product_code,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                return {
+                    "id": row[0],
+                    "product_code": row[1],
+                    "reviewer": row[2],
+                    "decision": row[3],
+                    "exclusions": row[4],
+                    "comments": row[5],
+                    "created_at": row[6].isoformat() if getattr(row[6], "isoformat", None) else row[6],
+                }
+    except Exception as exc:  # noqa: BLE001
+        _note_failure(exc)
+        return None
+
+
 def record_product_model_review_decision(
     *,
     product_code: str,

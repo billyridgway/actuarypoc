@@ -571,7 +571,7 @@ export const CreateProductReviewPage: React.FC = () => {
         <p className="muted">
           When you click <strong>Generate Product Review</strong>, the system will project the configured P12TRF
           scenarios, refresh the scenario artefacts in MinIO, and redirect you into the existing Product Model Review
-          Trust Surface.
+          Trust Surface. You can revisit this page at any time to adjust inputs and regenerate.
         </p>
         <table className="kv-table">
           <tbody>
@@ -610,6 +610,16 @@ export const CreateProductReviewPage: React.FC = () => {
         <div className="form-row">
           <button type="button" onClick={handleGenerate} disabled={generateBusy}>
             {generateBusy ? "Generating…" : "Generate Product Review & open Trust Surface"}
+          </button>
+        </div>
+        <div className="form-row">
+          <button
+            type="button"
+            onClick={() => {
+              window.location.href = "/web?view=product-model";
+            }}
+          >
+            Open Product Model Review now
           </button>
         </div>
       </section>
