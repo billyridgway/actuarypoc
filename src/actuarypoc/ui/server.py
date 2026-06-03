@@ -799,33 +799,75 @@ def _build_run_detail(object_name: str, data: Dict[str, Any]) -> Dict[str, Any]:
     policy_id = inputs.get("policy_id")
     pas_rec = _load_pas_record(pas_ref, policy_id)
 
+    policy_inputs = inputs.get("policy_inputs") if isinstance(inputs, dict) else None
+    if not isinstance(policy_inputs, dict):
+        policy_inputs = {}
+
     policy_number = str(pas_rec.get("policy_number") if pas_rec else policy_id or "")
     product_code = str(inputs.get("product_code") or pas_rec.get("product_code") if pas_rec else "")
     product_type = str(pas_rec.get("product_type") if pas_rec else "")
 
-    def _num(rec: Optional[Dict[str, Any]], key: str, default: float = 0.0) -> float:
-        if not rec:
+    def _num(rec: Optional[Dict[str, Any]], key: str, default: float = 0.0, fallback: Optional[Any] = None) -> float:
+        """Numeric helper with optional fallback from policy_inputs.
+
+        Prefer PAS values when present; when PAS is thin (e.g. POC exports
+        that only carry a subset of fields), fall back to any value surfaced
+        in the projection summary's policy_inputs block. We deliberately do
+        not fabricate values: when neither source has a usable number, we
+        return the provided default.
+        """
+
+        raw = None
+        if rec:
+            raw = rec.get(key, None)
+        if (raw is None or raw == "" or raw == 0) and fallback is not None:
+            raw = fallback
+        if raw is None or raw == "" or raw == 0:
             return default
         try:
-            return float(rec.get(key, default) or default)
+            return float(raw)
         except (TypeError, ValueError):
             return default
 
-    def _int(rec: Optional[Dict[str, Any]], key: str, default: int = 0) -> int:
-        if not rec:
+    def _int(rec: Optional[Dict[str, Any]], key: str, default: int = 0, fallback: Optional[Any] = None) -> int:
+        raw = None
+        if rec:
+            raw = rec.get(key, None)
+        if (raw is None or raw == "" or raw == 0) and fallback is not None:
+            raw = fallback
+        if raw is None or raw == "" or raw == 0:
             return default
         try:
-            return int(rec.get(key, default) or default)
+            return int(raw)
         except (TypeError, ValueError):
             return default
 
-    issue_age = _int(pas_rec, "issue_age", 0)
-    gender = str(pas_rec.get("gender") if pas_rec else "")
-    smoker_class = str(pas_rec.get("smoker_class") if pas_rec else "")
-    risk_class = str(pas_rec.get("risk_class") if pas_rec else "")
-    face_amount = _num(pas_rec, "face_amount", 0.0)
-    level_period = _int(pas_rec, "level_period", 0)
-    premium_mode = str(pas_rec.get("premium_mode") if pas_rec else "")
+    issue_age = _int(pas_rec, "issue_age", 0, fallback=policy_inputs.get("issue_age"))
+
+    def _str_field(primary_rec: Optional[Dict[str, Any]], key: str, fallback_key: str) -> str:
+        if primary_rec is not None:
+            val = primary_rec.get(key)
+            if isinstance(val, str) and val.strip():
+                return val
+        val = policy_inputs.get(fallback_key)
+        if isinstance(val, str) and val.strip():
+            return val
+        return ""
+
+    gender = _str_field(pas_rec, "gender", "gender")
+    smoker_class = _str_field(pas_rec, "smoker_class", "smoker_class")
+    risk_class = _str_field(pas_rec, "risk_class", "risk_class")
+
+    face_amount = _num(pas_rec, "face_amount", 0.0, fallback=policy_inputs.get("face_amount"))
+    level_period = _int(pas_rec, "level_period", 0, fallback=policy_inputs.get("level_period"))
+
+    premium_mode_raw = None
+    if pas_rec is not None:
+        premium_mode_raw = pas_rec.get("premium_mode")
+    if not premium_mode_raw:
+        premium_mode_raw = policy_inputs.get("premium_mode")
+    premium_mode = str(premium_mode_raw or "")
+
     pas_modal_premium = _num(pas_rec, "modal_premium", 0.0)
 
     # 2) Formula + meta for premium table + docs

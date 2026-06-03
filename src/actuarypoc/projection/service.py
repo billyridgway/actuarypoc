@@ -122,6 +122,10 @@ def build_projection_summary(pas_prefix: str = "pas_export/",
     if not pas_records:
         raise RuntimeError("PAS records empty; cannot run projection")
 
+    # For now we project a single policy record per summary. This record
+    # also serves as the canonical source of policy inputs for downstream
+    # artefacts (projection summary, input snapshot, RunDetail, and the
+    # Product Model Review scenarios).
     policy_record = pas_records[0]
 
     # Determine the product identity primarily from the orchestrator (e.g. CR / operator),
@@ -270,6 +274,20 @@ def build_projection_summary(pas_prefix: str = "pas_export/",
     run_id = os.getenv("RUN_ID") or None
     env = os.getenv("ILLUSTRATION_ENVIRONMENT") or os.getenv("ENVIRONMENT") or None
 
+    # Canonical policy input snapshot for downstream consumers. This is kept
+    # narrow and product-agnostic: it mirrors the core policy fields that are
+    # needed for RunDetail and Product Model Review, without embedding the
+    # full PAS record.
+    policy_inputs = {
+        "issue_age": policy_record.get("issue_age"),
+        "gender": policy_record.get("gender"),
+        "smoker_class": policy_record.get("smoker_class"),
+        "risk_class": policy_record.get("risk_class"),
+        "level_period": policy_record.get("level_period"),
+        "face_amount": policy_record.get("face_amount"),
+        "premium_mode": policy_record.get("premium_mode"),
+    }
+
     summary = {
         "generated_at": datetime.utcnow().isoformat(),
         "inputs": {
@@ -285,6 +303,11 @@ def build_projection_summary(pas_prefix: str = "pas_export/",
             "formula_path": str(formula_path),
             "assumption_set_id": getattr(assumption_set, "id", None),
             "run_id": run_id,
+            # Minimal, provenance-preserving snapshot of the policy inputs
+            # used for this projection. This allows RunDetail and Product
+            # Model Review to surface real inputs even when the PAS export
+            # schema is thin, without fabricating values.
+            "policy_inputs": policy_inputs,
         },
         "metadata": {
             "actuarial_records_count": len(actuarial_records),
@@ -337,6 +360,19 @@ def build_p12trf_projection_summary(policies_prefix: str = "p12trf/") -> Dict[st
     engine = ProjectionEngine(formula, mortality_surface=mortality_surface)
     projection = engine.project(policy_record)
 
+    # Canonical policy inputs for the P12TRF sample path. These mirror the
+    # generic policy_inputs block used in build_projection_summary so that
+    # RunDetail and Product Model Review can treat both paths uniformly.
+    policy_inputs = {
+        "issue_age": policy_record.get("issue_age"),
+        "gender": policy_record.get("gender"),
+        "smoker_class": policy_record.get("smoker_class"),
+        "risk_class": policy_record.get("risk_class"),
+        "level_period": policy_record.get("level_period"),
+        "face_amount": policy_record.get("face_amount"),
+        "premium_mode": policy_record.get("premium_mode"),
+    }
+
     summary = {
         "generated_at": datetime.utcnow().isoformat(),
         "inputs": {
@@ -345,6 +381,7 @@ def build_p12trf_projection_summary(policies_prefix: str = "p12trf/") -> Dict[st
             "policy_number": policy_record.get("policy_number"),
             "product_type": policy_record.get("product_type"),
             "formula_path": str(formula_path),
+            "policy_inputs": policy_inputs,
         },
         "metadata": {
             "p12trf_records_count": len(policies_records),
