@@ -113,12 +113,19 @@ document management system.
 ## 4. Step 3 – Scenario Configuration
 
 1. Scroll to **Scenario Configuration**.
-2. The table is pre-populated from the bundled
-   `examples/p12trf_scenarios.json` fixture if no scenarios have been saved
-   yet.
-   - S1 – Typical mid-age non-smoker.
-   - S2 – Young short-term coverage.
-   - S3 – Edge older age smoker.
+2. The table is pre-populated when no scenarios have been saved yet:
+   - **First**, the backend tries to generate default scenarios from the
+     P12TRF ProductDefinition (issue ages, term periods, smoker/risk
+     classes, premium modes, face amount range). These scenarios are
+     tagged with `source = "product_definition"` and include a short
+     `purpose` and list of `dimensionsExercised`.
+   - **If** a ProductDefinition is unavailable, it falls back to the
+     bundled `examples/p12trf_scenarios.json` fixture:
+     - S1 – Typical mid-age non-smoker.
+     - S2 – Young short-term coverage.
+     - S3 – Edge older age smoker.
+   - Once scenarios have been saved, the **persisted configuration
+     always takes precedence** over regenerated defaults.
 3. Edit fields as needed:
    - Age
    - Sex
@@ -142,7 +149,9 @@ What happens:
 
 - The FastAPI handler:
   - Converts UI rows into the internal structure used by
-    `examples/p12trf_scenarios.json`:
+    `examples/p12trf_scenarios.json`, preserving optional
+    `purpose`, `dimensions_exercised`, and `source` fields when
+    present:
 
     ```jsonc
     {
@@ -226,6 +235,26 @@ What happens:
 This lands the user in the existing **Product Model Review Trust Surface**,
 which now reads scenario evidence from the freshly generated
 scenario artefacts.
+
+When scenarios were generated from the ProductDefinition and then
+saved, the Trust Surface will display, for each scenario:
+
+- **Purpose** – short rationale for the test case.
+- **Dimensions exercised** – which ProductDefinition dimensions this
+  scenario is probing (age, term, smoker/risk class, face amount,
+  premium mode).
+- **Source** – typically `product_definition` for PD-derived scenarios.
+
+For runtime validation of ProductDefinition-driven suggestions without
+mutating the demo state, the backend exposes a debug-only, read-only
+endpoint:
+
+```http
+GET /api/debug/p12trf/scenario-suggestions
+```
+
+This shows both the PD-derived S1/S2/S3 suggestions and the
+fixture-based S1/S2/S3, but does **not** modify Postgres or MinIO.
 
 ### 5.1 Generation-Scoped Layout
 
