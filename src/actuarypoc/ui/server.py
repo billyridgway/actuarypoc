@@ -19,8 +19,10 @@ from actuarypoc.projection.premium import PremiumLookupService, build_premium_ta
 from actuarypoc.projection.service import store_projection
 from actuarypoc.storage.postgres_client import (
     get_product_review,
+    list_filing_rule_evidence,
     list_product_documents,
     record_document_upload,
+    record_filing_rule_evidence,
     record_product_model_review_decision,
     upsert_product_review_draft,
 )
@@ -821,6 +823,8 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
         "generatedAt": None,
         "documentCount": 0,
         "scenarioCount": len(scen_and_rates["scenarios"]),
+        "traceableRuleCount": 0,
+        "unattributedRuleCount": len(traceability["rules"]),
     }
     documents_payload: List[Dict[str, Any]] = []
     try:
@@ -847,6 +851,38 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
                     "filingId": d.get("serff_id") or filing_id,
                 }
             )
+
+        # Load any filing rule evidence for this product/filing and attach
+        # it to the static traceability rules so the UI can render
+        # document-linked evidence without changing rule IDs.
+        evidence_rows = list_filing_rule_evidence(product_block["code"], filing_id=filing_id)
+        by_rule: Dict[str, List[Dict[str, Any]]] = {}
+        for ev in evidence_rows:
+            rid = ev.get("rule_id")
+            if not isinstance(rid, str) or not rid:
+                continue
+            by_rule.setdefault(rid, []).append(
+                {
+                    "id": ev.get("id"),
+                    "documentPath": ev.get("document_path"),
+                    "pageReference": ev.get("page_reference"),
+                    "sourceSnippet": ev.get("source_snippet"),
+                    "aiInterpretation": ev.get("ai_interpretation"),
+                    "confidence": ev.get("confidence"),
+                }
+            )
+
+        rules = traceability.get("rules", []) or []
+        traceable = 0
+        for rule in rules:
+            rid = rule.get("id")
+            ev_list = by_rule.get(rid, [])
+            if ev_list:
+                traceable += 1
+            rule["evidence"] = ev_list
+        review_meta["traceableRuleCount"] = traceable
+        review_meta["unattributedRuleCount"] = max(0, len(rules) - traceable)
+
     except Exception:
         # Best-effort only; Trust Surface must remain robust when Postgres
         # is not configured.
@@ -862,6 +898,107 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
         "gaps": gaps,
         "reviewMeta": review_meta,
         "documents": documents_payload,
+    }
+
+
+@app.post("/api/product-model-review/p12trf/evidence/seed")
+def api_product_model_review_p12trf_seed_evidence() -> Dict[str, Any]:
+    """Seed a small set of filing rule evidence rows for P12TRF.
+
+    This is MVP-only and exists to prove the evidence model. It:
+    - looks up the current Product Review for P12TRF,
+    - uses the active filing_id and first document (when present), and
+    - writes a couple of evidence rows linking that document to the
+      traceability rules used in the Trust Surface.
+    """
+
+    product_code = "P12TRF"
+    rec = get_product_review(product_code)
+    if rec is None:
+        raise HTTPException(status_code=400, detail="No Product Review draft found for P12TRF")
+
+    meta = rec.get("metadata") or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    review_state = meta.get("review") or {}
+    if not isinstance(review_state, dict):
+        review_state = {}
+
+    filing_id = review_state.get("filing_id") if isinstance(review_state, dict) else None
+    if isinstance(filing_id, str):
+        filing_id = filing_id.strip() or None
+
+    # Pick a representative document for this filing context.
+    docs = list_product_documents(product_code, filing_id=filing_id)
+    if not docs:
+        raise HTTPException(status_code=400, detail="No documents available for current filing context")
+
+    doc = docs[0]
+    doc_path = str(doc.get("object_path") or "")
+    if not doc_path:
+        raise HTTPException(status_code=400, detail="Selected document has no object_path")
+
+    # Best-effort clean slate: avoid duplicate seed rows for the same
+    # product + filing in this MVP.
+    try:
+        from actuarypoc.storage.postgres_client import _conn  # type: ignore
+
+        with _conn() as conn:  # type: ignore[call-arg]
+            if conn is not None:
+                with conn.cursor() as cur:  # type: ignore[assignment]
+                    cur.execute(
+                        "DELETE FROM filing_rule_evidence WHERE product_code = %s AND (filing_id = %s OR (%s IS NULL AND filing_id IS NULL))",
+                        (product_code, filing_id, filing_id),
+                    )
+    except Exception:
+        # If cleanup fails we still proceed with inserts; duplicates are
+        # acceptable in this POC.
+        pass
+
+    seeded: List[Dict[str, Any]] = []
+
+    # Seed two example evidence links to the existing POC traceability
+    # rules so the UI can show document-tied rule evidence.
+    seeded.append(
+        record_filing_rule_evidence(
+            product_code=product_code,
+            filing_id=filing_id,
+            document_path=doc_path,
+            rule_id="rule_death_benefit_term",
+            page_reference="p.22 (demo)",
+            source_snippet=(
+                "If the Insured dies while this policy is in force and before the end of the level term period, "
+                "we will pay the Face Amount shown on the Policy Schedule."
+            ),
+            ai_interpretation="Confirms that death benefit equals the filed face amount during the level term only.",
+            confidence="high",
+        )
+        or {}
+    )
+
+    seeded.append(
+        record_filing_rule_evidence(
+            product_code=product_code,
+            filing_id=filing_id,
+            document_path=doc_path,
+            rule_id="rule_level_premiums",
+            page_reference="p.12 (demo)",
+            source_snippet="Annual Premium per $1,000 – 20-Year Level Term.",
+            ai_interpretation="Confirms that premiums are level and driven by a rate per $1,000 of face.",
+            confidence="high",
+        )
+        or {}
+    )
+
+    # Lightweight response summarising what was created.
+    created = [s for s in seeded if s]
+    return {
+        "ok": True,
+        "product_code": product_code,
+        "filing_id": filing_id,
+        "document_path": doc_path,
+        "evidenceCount": len(created),
+        "evidence": created,
     }
 
 

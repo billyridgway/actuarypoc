@@ -28,6 +28,14 @@ export interface ProductModelReview {
       interpretation: string;
       confidence: "low" | "medium" | "high";
       reviewStatus: "not_reviewed" | "approved" | "needs_change";
+      evidence?: {
+        id?: number | string;
+        documentPath?: string | null;
+        pageReference?: string | null;
+        sourceSnippet?: string | null;
+        aiInterpretation?: string | null;
+        confidence?: string | null;
+      }[];
     }[];
   };
   rates: {
@@ -104,6 +112,8 @@ export interface ProductModelReview {
     generatedAt?: string | null;
     documentCount?: number;
     scenarioCount?: number;
+    traceableRuleCount?: number;
+    unattributedRuleCount?: number;
   };
 }
 
@@ -298,6 +308,12 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                 {reviewMeta?.documentCount ?? 0} document(s), {reviewMeta?.scenarioCount ?? scenarios.length} scenario(s)
               </td>
             </tr>
+            <tr>
+              <th>Rule traceability</th>
+              <td>
+                {(reviewMeta?.traceableRuleCount ?? 0)} traceable, {(reviewMeta?.unattributedRuleCount ?? 0)} without document attribution
+              </td>
+            </tr>
           </tbody>
         </table>
       </section>
@@ -484,7 +500,49 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                   {r.filingId}
                   {r.page && <span className="muted"> (p.{r.page})</span>}
                 </td>
-                <td className="muted">{r.snippet}</td>
+                <td className="muted">
+                  {r.snippet}
+                  {Array.isArray(r.evidence) && r.evidence.length > 0 && (
+                    <div className="muted" style={{ marginTop: "0.5rem" }}>
+                      <strong>Evidence:</strong>
+                      <ul>
+                        {r.evidence.map((e, idx) => (
+                          <li key={e.id ?? idx}>
+                            <div>
+                              <span>
+                                Doc: {(() => {
+                                  const match = documents?.find((d) => d.objectPath === e.documentPath);
+                                  if (match?.description) return match.description;
+                                  if (e.documentPath) {
+                                    const parts = e.documentPath.split("/");
+                                    return parts[parts.length - 1] || e.documentPath;
+                                  }
+                                  return "(unknown document)";
+                                })()}
+                              </span>
+                              {" "}
+                              {e.documentPath && (
+                                <span className="muted">({e.documentPath})</span>
+                              )}
+                            </div>
+                            <div>
+                              Page: {e.pageReference || "page unknown"}
+                            </div>
+                            <div>
+                              Snippet: {e.sourceSnippet || "(no snippet recorded)"}
+                            </div>
+                            <div>
+                              Interpretation: {e.aiInterpretation || "(no interpretation recorded)"}
+                            </div>
+                            <div>
+                              Confidence: {e.confidence || r.confidence}
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </td>
                 <td>{r.interpretation}</td>
                 <td>{r.confidence}</td>
               </tr>

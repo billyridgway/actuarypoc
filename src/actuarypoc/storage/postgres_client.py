@@ -111,6 +111,22 @@ CREATE TABLE IF NOT EXISTS product_model_review_decisions (
 
 CREATE INDEX IF NOT EXISTS idx_pmr_decisions_product
     ON product_model_review_decisions(product_code);
+
+CREATE TABLE IF NOT EXISTS filing_rule_evidence (
+    id bigserial PRIMARY KEY,
+    product_code text NOT NULL,
+    filing_id text,
+    document_path text,
+    rule_id text NOT NULL,
+    page_reference text,
+    source_snippet text,
+    ai_interpretation text,
+    confidence text,
+    created_at timestamptz DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_filing_rule_evidence_product_filing
+    ON filing_rule_evidence(product_code, filing_id);
 """
 
 
@@ -468,6 +484,128 @@ def list_product_documents(product_id: str, filing_id: Optional[str] = None) -> 
                         "object_path": r[5],
                         "object_hash": r[6],
                         "created_at": r[7],
+                    }
+                    for r in rows
+                ]
+    except Exception as exc:  # noqa: BLE001
+        _note_failure(exc)
+        return []
+
+
+def record_filing_rule_evidence(
+    *,
+    product_code: str,
+    filing_id: Optional[str],
+    document_path: str,
+    rule_id: str,
+    page_reference: Optional[str],
+    source_snippet: str,
+    ai_interpretation: str,
+    confidence: str,
+) -> Optional[Dict[str, Any]]:
+    """Insert one filing rule evidence row for a product/filing/rule.
+
+    This is intentionally MVP-simple: the caller provides all fields, and we
+    return the stored row so the UI/API can confirm what was written.
+    """
+
+    ensure_schema()
+    try:
+        with _conn() as conn:
+            if conn is None:
+                return None
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO filing_rule_evidence (
+                        product_code, filing_id, document_path, rule_id,
+                        page_reference, source_snippet, ai_interpretation, confidence
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id, product_code, filing_id, document_path, rule_id,
+                              page_reference, source_snippet, ai_interpretation, confidence, created_at
+                    """,
+                    (
+                        product_code,
+                        filing_id,
+                        document_path,
+                        rule_id,
+                        page_reference,
+                        source_snippet,
+                        ai_interpretation,
+                        confidence,
+                    ),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                return {
+                    "id": row[0],
+                    "product_code": row[1],
+                    "filing_id": row[2],
+                    "document_path": row[3],
+                    "rule_id": row[4],
+                    "page_reference": row[5],
+                    "source_snippet": row[6],
+                    "ai_interpretation": row[7],
+                    "confidence": row[8],
+                    "created_at": row[9],
+                }
+    except Exception as exc:  # noqa: BLE001
+        _note_failure(exc)
+        return None
+
+
+def list_filing_rule_evidence(product_code: str, filing_id: Optional[str]) -> List[Dict[str, Any]]:
+    """List filing rule evidence rows for a product + optional filing.
+
+    When Postgres is unavailable, returns an empty list instead of failing
+    callers.
+    """
+
+    ensure_schema()
+    try:
+        with _conn() as conn:
+            if conn is None:
+                return []
+            with conn.cursor() as cur:
+                if filing_id is not None and filing_id != "":
+                    cur.execute(
+                        """
+                        SELECT id, product_code, filing_id, document_path, rule_id,
+                               page_reference, source_snippet, ai_interpretation, confidence, created_at
+                          FROM filing_rule_evidence
+                         WHERE product_code = %s
+                           AND filing_id = %s
+                         ORDER BY rule_id, id
+                        """,
+                        (product_code, filing_id),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT id, product_code, filing_id, document_path, rule_id,
+                               page_reference, source_snippet, ai_interpretation, confidence, created_at
+                          FROM filing_rule_evidence
+                         WHERE product_code = %s
+                           AND filing_id IS NULL
+                         ORDER BY rule_id, id
+                        """,
+                        (product_code,),
+                    )
+                rows = cur.fetchall() or []
+                return [
+                    {
+                        "id": r[0],
+                        "product_code": r[1],
+                        "filing_id": r[2],
+                        "document_path": r[3],
+                        "rule_id": r[4],
+                        "page_reference": r[5],
+                        "source_snippet": r[6],
+                        "ai_interpretation": r[7],
+                        "confidence": r[8],
+                        "created_at": r[9],
                     }
                     for r in rows
                 ]
