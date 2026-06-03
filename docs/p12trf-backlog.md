@@ -107,3 +107,48 @@ Acceptance criteria:
 - Each scenario is wired to a distinct projection artefact with its own policy inputs (age, sex/gender, smoker/risk class, term, face, premium mode).
 - Product Model Review surfaces those distinct inputs and behaviours in the Scenario Evidence and Drill-Down sections.
 - Documentation describes the intent of each scenario and how it maps back to PAS / projection inputs.
+
+### Status (configurable scenario inputs wired end-to-end)
+
+- Added a configurable P12TRF scenario fixture at `examples/p12trf_scenarios.json` with three business cases:
+  - **S1 – Typical mid-age non-smoker**
+    - `issue_age = 35`, `gender = "M"`, `smoker_class = "NS"`, `risk_class = "SUPER_PREFERRED_NON_TOBACCO"`,
+      `level_period = 20`, `face_amount = 450000`, `premium_mode = "ANNUAL"`.
+  - **S2 – Young short-term coverage**
+    - `issue_age = 30`, `gender = "F"`, `smoker_class = "NS"`, `risk_class = "STANDARD_NON_TOBACCO"`,
+      `level_period = 10`, `face_amount = 250000`, `premium_mode = "ANNUAL"`.
+  - **S3 – Edge older age smoker**
+    - `issue_age = 60`, `gender = "M"`, `smoker_class = "S"`, `risk_class = "STANDARD_TOBACCO"`,
+      `level_period = 10`, `face_amount = 100000`, `premium_mode = "ANNUAL"`.
+- Implemented a CLI helper `project-p12trf-scenarios-minio` in `actuarypoc.cli.main` that:
+  - Reads the fixture JSON.
+  - Uses the P12TRF DSL (`dsl/examples/p12trf_term.yaml`) and Term23 mortality slice.
+  - Projects each scenario policy and writes a projection summary to MinIO under:
+    - `projections/p12trf/scenarios/S1.json`
+    - `projections/p12trf/scenarios/S2.json`
+    - `projections/p12trf/scenarios/S3.json`
+  - Each summary includes `inputs.policy_inputs` mirroring the configured scenario inputs.
+- Updated `_P12TRF_SCENARIO_CONFIG` in `ui.server` so Product Model Review uses these scenario artefacts instead of generic operator runs.
+
+**Runtime verification (Pi k3s cluster, 2026-06-03):**
+
+- Ran `python -m actuarypoc.cli.main project-p12trf-scenarios-minio` inside the `projection-ui` pod, producing:
+  - `S1: projections/p12trf/scenarios/S1.json`
+  - `S2: projections/p12trf/scenarios/S2.json`
+  - `S3: projections/p12trf/scenarios/S3.json`
+- Inspected the resulting projection JSON via `get_projection(...)` from within the pod and confirmed:
+  - `inputs.policy_inputs` for each scenario exactly matches the configured fixture values (issue_age, gender, smoker_class, risk_class, level_period, face_amount, premium_mode).
+- `/api/run-detail?key=projections/p12trf/scenarios/SX.json` now exposes:
+  - `policy_input.core_fields.issue_age` ∈ {35, 30, 60}
+  - `gender` ∈ {"M", "F"}
+  - `smoker_class` ∈ {"NS", "S"}
+  - `risk_class` ∈ {"SUPER_PREFERRED_NON_TOBACCO", "STANDARD_NON_TOBACCO", "STANDARD_TOBACCO"}
+  - `level_period` ∈ {20, 10}
+  - `face_amount` ∈ {450000.0, 250000.0, 100000.0}
+  - `premium_mode = "ANNUAL"`.
+- `/api/product-model-review/p12trf` scenarios now show real inputs instead of `"unknown"`:
+  - **S1** – `age = 35`, `sex = "male"`, `smokerClass = "NS"`, `termYears = 20`, `faceAmount = 450000.0`, `premiumMode = "ANNUAL"`.
+  - **S2** – `age = 30`, `sex = "female"`, `smokerClass = "NS"`, `termYears = 10`, `faceAmount = 250000.0`, `premiumMode = "ANNUAL"`.
+  - **S3** – `age = 60`, `sex = "male"`, `smokerClass = "S"`, `termYears = 10`, `faceAmount = 100000.0`, `premiumMode = "ANNUAL"`.
+
+This completes the MVP wiring for a configurable P12TRF scenario catalog: scenario inputs live in a fixture, are used directly for projections, are persisted into `policy_inputs`, surfaced via RunDetail, and rendered in the Product Model Review Trust Surface as distinguishable business cases.
