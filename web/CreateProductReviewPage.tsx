@@ -10,6 +10,7 @@ interface ProductSummary {
 interface ReviewStateSummary {
   status: string;
   version?: number;
+  filingId?: string | null;
   currentGeneration?: string | null;
   generatedAt?: string | null;
   writtenKeys?: string[];
@@ -58,6 +59,7 @@ export const CreateProductReviewPage: React.FC = () => {
   const [carrierName, setCarrierName] = useState<string>("");
   const [productName, setProductName] = useState<string>("");
   const [productType, setProductType] = useState<string>("Term Life");
+  const [filingId, setFilingId] = useState<string>("");
 
   const [reviewStatus, setReviewStatus] = useState<string>("draft");
   const [currentGeneration, setCurrentGeneration] = useState<string | undefined>(undefined);
@@ -90,6 +92,7 @@ export const CreateProductReviewPage: React.FC = () => {
       setCarrierName(payload.product.carrier || "");
       setProductName(payload.product.name || "");
       setProductType(payload.product.type || "Term Life");
+      setFilingId(payload.review?.filingId || "");
       setReviewStatus(payload.review?.status || "draft");
       setCurrentGeneration(payload.review?.currentGeneration || undefined);
       setGeneratedAt(payload.review?.generatedAt || undefined);
@@ -126,6 +129,7 @@ export const CreateProductReviewPage: React.FC = () => {
         product_name: productName.trim() || "P12TRF Term (demo)",
         product_code: code,
         product_type: productType.trim() || "term",
+        filing_id: filingId.trim() || undefined,
       };
       const res = await fetch("/api/product-review/draft", {
         method: "POST",
@@ -141,6 +145,7 @@ export const CreateProductReviewPage: React.FC = () => {
       setCarrierName(data.product.carrier || carrierName);
       setProductName(data.product.name || productName);
       setProductType(data.product.type || productType);
+      setFilingId(data.review?.filingId || filingId);
       setReviewStatus(data.review?.status || "draft");
       setCurrentGeneration(data.review?.currentGeneration || undefined);
       setGeneratedAt(data.review?.generatedAt || undefined);
@@ -293,6 +298,12 @@ export const CreateProductReviewPage: React.FC = () => {
         </p>
         <p>
           <strong>Current step:</strong> {step} / 4 &nbsp;·&nbsp; <strong>Review status:</strong> {reviewStatus}
+          {filingId && (
+            <>
+              {" "}
+              &nbsp;·&nbsp; <strong>Filing:</strong> {filingId}
+            </>
+          )}
           {currentGeneration && (
             <>
               {" "}
@@ -350,6 +361,16 @@ export const CreateProductReviewPage: React.FC = () => {
               value={productType}
               onChange={(e) => setProductType(e.target.value)}
               placeholder="e.g. Level term"
+            />
+          </div>
+          <div className="form-row">
+            <label htmlFor="pr-filing-id">Filing ID (optional)</label>
+            <input
+              id="pr-filing-id"
+              type="text"
+              value={filingId}
+              onChange={(e) => setFilingId(e.target.value)}
+              placeholder="e.g. P12TRF-ICC12-2026-DEMO"
             />
           </div>
           <div className="form-row">
@@ -565,8 +586,12 @@ export const CreateProductReviewPage: React.FC = () => {
               <td>{carrierName || "(not set)"}</td>
             </tr>
             <tr>
-              <th>Documents</th>
+              <th>Documents (for filing)</th>
               <td>{documents.length}</td>
+            </tr>
+            <tr>
+              <th>Filing</th>
+              <td>{filingId || "(not set)"}</td>
             </tr>
             <tr>
               <th>Scenarios</th>

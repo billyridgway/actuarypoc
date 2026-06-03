@@ -99,6 +99,7 @@ export interface ProductModelReview {
     ambiguousLanguage: any[];
   };
   reviewMeta?: {
+    filingId?: string | null;
     currentGeneration?: string | null;
     generatedAt?: string | null;
     documentCount?: number;
@@ -268,6 +269,10 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
             <tr>
               <th>Known gaps</th>
               <td>{knownGaps} missing / unmodeled feature(s) recorded</td>
+            </tr>
+            <tr>
+              <th>Filing ID</th>
+              <td>{reviewMeta?.filingId || "(not set)"}</td>
             </tr>
             <tr>
               <th>Product Review generation</th>

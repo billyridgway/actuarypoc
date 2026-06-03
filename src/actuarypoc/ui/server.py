@@ -85,6 +85,7 @@ class ProductReviewDraftRequest(BaseModel):  # type: ignore[misc]
     product_name: str
     product_code: str
     product_type: str
+    filing_id: Optional[str] = None
 
 
 class ScenarioConfig(BaseModel):  # type: ignore[misc]
@@ -815,6 +816,7 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
     # Optional review metadata: tie the Trust Surface back to the latest
     # Product Review generation when Postgres is configured.
     review_meta: Dict[str, Any] = {
+        "filingId": None,
         "currentGeneration": None,
         "generatedAt": None,
         "documentCount": 0,
@@ -823,12 +825,15 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
     try:
         rec = get_product_review(product_block["code"])
         meta = (rec or {}).get("metadata") or {}
+        filing_id: Optional[str] = None
         if isinstance(meta, dict):
             rs = meta.get("review") or {}
             if isinstance(rs, dict):
+                filing_id = rs.get("filing_id")
                 review_meta["currentGeneration"] = rs.get("current_generation")
                 review_meta["generatedAt"] = rs.get("generated_at")
-        docs = list_product_documents(product_block["code"])
+        review_meta["filingId"] = filing_id
+        docs = list_product_documents(product_block["code"], filing_id=filing_id)
         review_meta["documentCount"] = len(docs)
     except Exception:
         # Best-effort only; Trust Surface must remain robust when Postgres
@@ -922,7 +927,11 @@ def api_product_review_draft(payload: ProductReviewDraftRequest) -> Dict[str, An
     if not product_code:
         raise HTTPException(status_code=400, detail="product_code is required")
 
+    filing_id = (payload.filing_id or "").strip() or None
+
     review_meta: Dict[str, Any] = {"status": "draft"}
+    if filing_id is not None:
+        review_meta["filing_id"] = filing_id
 
     rec = upsert_product_review_draft(
         product_id=product_code,
@@ -953,6 +962,7 @@ def api_product_review_draft(payload: ProductReviewDraftRequest) -> Dict[str, An
         "review": {
             "status": review_state.get("status", "draft"),
             "version": rec.get("version"),
+            "filingId": review_state.get("filing_id"),
         },
     }
 
@@ -968,7 +978,11 @@ def _build_product_review_payload(product_code: str) -> Dict[str, Any]:
     if not isinstance(review_state, dict):
         review_state = {}
 
-    docs = list_product_documents(code)
+    filing_id = review_state.get("filing_id") if isinstance(review_state, dict) else None
+    if isinstance(filing_id, str):
+        filing_id = filing_id.strip() or None
+
+    docs = list_product_documents(code, filing_id=filing_id)
 
     # Map stored internal scenarios (when present) back into the
     # UI-friendly ScenarioConfig shape. When none are present we fall
@@ -1014,6 +1028,7 @@ def _build_product_review_payload(product_code: str) -> Dict[str, Any]:
         },
         "review": {
             "status": review_state.get("status", "draft"),
+            "filingId": review_state.get("filing_id"),
             "currentGeneration": review_state.get("current_generation"),
             "generatedAt": review_state.get("generated_at"),
             "writtenKeys": review_state.get("written_keys") or [],
@@ -1053,6 +1068,18 @@ async def api_upload_product_review_document(
     if not file.filename:
         raise HTTPException(status_code=400, detail="Filename is required")
 
+    # Filing context from the current Product Review, when available.
+    existing = get_product_review(code) or {}
+    meta = existing.get("metadata") or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    review_state = meta.get("review") or {}
+    if not isinstance(review_state, dict):
+        review_state = {}
+    filing_id_val = review_state.get("filing_id") if isinstance(review_state, dict) else None
+    if isinstance(filing_id_val, str):
+        filing_id_val = filing_id_val.strip() or None
+
     suffix = (Path(file.filename).suffix or "").lower()
     allowed_suffixes = {".pdf", ".docx", ".xlsx", ".csv"}
     if suffix not in allowed_suffixes:
@@ -1064,7 +1091,11 @@ async def api_upload_product_review_document(
 
     safe_name = Path(file.filename).name
     timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
-    object_name = f"docs/{code}/{timestamp}-{safe_name}"
+
+    if filing_id_val is not None:
+        object_name = f"docs/{code}/{filing_id_val}/{timestamp}-{safe_name}"
+    else:
+        object_name = f"docs/{code}/unassigned/{timestamp}-{safe_name}"
 
     content = await file.read()
     size = len(content)
@@ -1088,6 +1119,7 @@ async def api_upload_product_review_document(
         description=meta_description,
         object_path=object_name,
         object_hash=None,
+        filing_id=filing_id_val,
     )
 
     # Return the updated view for convenience.

@@ -376,6 +376,7 @@ def record_document_upload(
     description: str,
     object_path: str,
     object_hash: Optional[str] = None,
+    filing_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Record a single uploaded document for a product.
 
@@ -392,11 +393,11 @@ def record_document_upload(
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO documents (product_id, kind, description, object_path, object_hash)
-                    VALUES (%s, %s, %s, %s, %s)
-                    RETURNING id, product_id, kind, description, object_path, object_hash, created_at
+                    INSERT INTO documents (product_id, kind, serff_id, description, object_path, object_hash)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    RETURNING id, product_id, kind, serff_id, description, object_path, object_hash, created_at
                     """,
-                    (product_id, kind, description, object_path, object_hash),
+                    (product_id, kind, filing_id, description, object_path, object_hash),
                 )
                 row = cur.fetchone()
                 if not row:
@@ -405,21 +406,27 @@ def record_document_upload(
                     "id": row[0],
                     "product_id": row[1],
                     "kind": row[2],
-                    "description": row[3],
-                    "object_path": row[4],
-                    "object_hash": row[5],
-                    "created_at": row[6],
+                    "serff_id": row[3],
+                    "description": row[4],
+                    "object_path": row[5],
+                    "object_hash": row[6],
+                    "created_at": row[7],
                 }
     except Exception as exc:  # noqa: BLE001
         _note_failure(exc)
         return None
 
 
-def list_product_documents(product_id: str) -> List[Dict[str, Any]]:
-    """Return all documents recorded for a product, newest first.
+def list_product_documents(product_id: str, filing_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Return documents for a product + optional filing, newest first.
 
     When Postgres is unavailable, this returns an empty list instead of
     failing the caller.
+
+    - When ``filing_id`` is provided, only documents with matching
+      ``serff_id`` are returned.
+    - When ``filing_id`` is None, only documents with ``serff_id IS NULL``
+      are returned (unassigned filing context).
     """
 
     ensure_schema()
@@ -428,25 +435,39 @@ def list_product_documents(product_id: str) -> List[Dict[str, Any]]:
             if conn is None:
                 return []
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT id, product_id, kind, description, object_path, object_hash, created_at
-                      FROM documents
-                     WHERE product_id = %s
-                     ORDER BY created_at DESC, id DESC
-                    """,
-                    (product_id,),
-                )
+                if filing_id is not None and filing_id != "":
+                    cur.execute(
+                        """
+                        SELECT id, product_id, kind, serff_id, description, object_path, object_hash, created_at
+                          FROM documents
+                         WHERE product_id = %s
+                           AND serff_id = %s
+                         ORDER BY created_at DESC, id DESC
+                        """,
+                        (product_id, filing_id),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT id, product_id, kind, serff_id, description, object_path, object_hash, created_at
+                          FROM documents
+                         WHERE product_id = %s
+                           AND serff_id IS NULL
+                         ORDER BY created_at DESC, id DESC
+                        """,
+                        (product_id,),
+                    )
                 rows = cur.fetchall() or []
                 return [
                     {
                         "id": r[0],
                         "product_id": r[1],
                         "kind": r[2],
-                        "description": r[3],
-                        "object_path": r[4],
-                        "object_hash": r[5],
-                        "created_at": r[6],
+                        "serff_id": r[3],
+                        "description": r[4],
+                        "object_path": r[5],
+                        "object_hash": r[6],
+                        "created_at": r[7],
                     }
                     for r in rows
                 ]
