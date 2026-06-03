@@ -47,6 +47,7 @@ end-state production UX.
    - Product name – e.g. `ICC12 P12TRF Term (demo)`.
    - Product code – `P12TRF` (MVP flow is hard-wired to this code).
    - Product type – e.g. `Level term`.
+   - Filing ID (optional) – e.g. `P12TRF-ICC12-2026-DEMO`.
 3. Click **Save draft & continue to documents**.
 
 What happens:
@@ -54,7 +55,9 @@ What happens:
 - The UI calls `POST /api/product-review/draft`.
 - Backend stores a row in the existing `products` table with
   `product_id = "P12TRF"` and a `metadata` JSONB block containing:
-  - `name`, `type`, and a `review.status = "draft"` marker.
+  - `name`, `type`, and a `review` block with:
+    - `status = "draft"`
+    - `filing_id` when provided by the UI.
 
 ---
 
@@ -75,19 +78,32 @@ What happens:
 
 - The FastAPI handler:
   - Validates extension (`.pdf`, `.docx`, `.xlsx`, `.csv`).
-  - Writes the file to MinIO under:
+  - Reads the current Product Review state to determine the active
+    `filing_id` (if any).
+  - Writes the file to MinIO under a filing-scoped prefix when `filing_id`
+    is present:
 
     ```text
-    docs/P12TRF/<timestamp>-<original-filename>
+    docs/P12TRF/<filing_id>/<timestamp>-<original-filename>
+    ```
+
+    and under an `unassigned` prefix when no filing has been set:
+
+    ```text
+    docs/P12TRF/unassigned/<timestamp>-<original-filename>
     ```
 
   - Records a row in the `documents` table with:
     - `product_id = "P12TRF"`
+    - `serff_id = filing_id` (or `NULL` for unassigned docs)
     - `kind = "filing"` (MVP default)
     - `description` (from the form or filename)
     - `object_path` pointing at the MinIO key.
   - Returns the updated Product Review payload from
-    `GET /api/product-review/P12TRF` so the UI can refresh the list.
+    `GET /api/product-review/P12TRF` so the UI can refresh the list. The
+    document list is filtered to the **current filing context**:
+    - `filing_id` set → docs with `serff_id = filing_id`
+    - no `filing_id` → docs with `serff_id IS NULL`.
 
 This is deliberately a thin index over MinIO objects, *not* a generic
 document management system.
@@ -275,6 +291,7 @@ prefix while still maintaining compatibility with the original PMR layout.
     ```jsonc
     {
       "status": "generated",
+      "filing_id": "P12TRF-ICC12-2026-DEMO",
       "current_generation": "20260603T120000Z",
       "generated_at": "2026-06-03T12:00:00Z",
       "written_keys": [
@@ -292,6 +309,7 @@ prefix while still maintaining compatibility with the original PMR layout.
     ```jsonc
     "review": {
       "status": "generated",
+      "filingId": "P12TRF-ICC12-2026-DEMO",
       "currentGeneration": "20260603T120000Z",
       "generatedAt": "2026-06-03T12:00:00Z",
       "writtenKeys": [ ... ]
@@ -303,6 +321,7 @@ prefix while still maintaining compatibility with the original PMR layout.
 
     ```jsonc
     "reviewMeta": {
+      "filingId": "P12TRF-ICC12-2026-DEMO",
       "currentGeneration": "20260603T120000Z",
       "generatedAt": "2026-06-03T12:00:00Z",
       "documentCount": 3,

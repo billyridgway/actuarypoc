@@ -271,18 +271,35 @@ P12TRF that runs entirely inside the `projection-ui` Deployment:
 
 - **Product Setup (UI)**
   - Route: `/web?view=create-review` (React SPA)
-  - Captures carrier name, product name, product code, and product type.
+  - Captures carrier name, product name, product code, product type, and an
+    optional `filing_id` (e.g. `P12TRF-ICC12-2026-DEMO`).
   - Persists a minimal Product Review draft into Postgres via
     `/api/product-review/draft`, reusing the existing `products` table
-    (`metadata` JSONB stores review state).
+    (`metadata` JSONB stores review state under a `review` block).
 
 - **Document Upload (UI + API)**
   - Drag-and-drop upload UI accepts `PDF`, `DOCX`, `XLSX`, and `CSV`.
   - Backend endpoint: `POST /api/product-review/{product_code}/documents`.
-  - Files are written into MinIO under `docs/{product_code}/...` using the
-    existing MinIO client; basic metadata is recorded in the `documents`
-    Postgres table (kind, description, object path, hash placeholder).
-  - The UI lists uploaded documents from `/api/product-review/{product_code}`.
+  - Files are written into MinIO using the current Product Review's
+    `filing_id` when present:
+
+    ```text
+    docs/{product_code}/{filing_id}/{timestamp}-{filename}
+    ```
+
+    and into an `unassigned` bucket otherwise:
+
+    ```text
+    docs/{product_code}/unassigned/{timestamp}-{filename}
+    ```
+
+  - Each upload is indexed in the `documents` Postgres table with
+    `product_id = product_code` and `serff_id = filing_id` (or `NULL` for
+    unassigned documents).
+  - The UI lists uploaded documents from `/api/product-review/{product_code}`;
+    by default this is filtered to the current filing context:
+    - when `filing_id` is set → `serff_id = filing_id`
+    - when no `filing_id` → `serff_id IS NULL`.
 
 - **Scenario Configuration (UI + API)**
   - UI shows an editable table of scenarios (age, sex, smoker class, risk
