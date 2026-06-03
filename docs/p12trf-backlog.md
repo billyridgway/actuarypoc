@@ -35,7 +35,24 @@ Remaining / next candidate slices:
 
 ## Persist true policy inputs into projection artefacts / PAS snapshot
 
-Acceptance criteria:
+### Status
+
+- **Implemented in code and image** (projection-ui digest `ghcr.io/billyridgway/actuarypoc@sha256:89950259e2072e12ea15373ff89061839484dfe7931d76f197973862aab68cd9`):
+  - `build_projection_summary(...)` now writes a `policy_inputs` block under `summary.inputs` containing:
+    - `issue_age`, `gender`, `smoker_class`, `risk_class`, `level_period`, `face_amount`, `premium_mode`.
+  - `build_p12trf_projection_summary(...)` does the same for the P12TRF sample path using `policies_p12trf.csv`.
+  - `build_input_snapshot_from_summary(...)` already copies `summary.inputs` verbatim, so `policy_inputs` is preserved in the input snapshot artefact.
+  - `_build_run_detail(...)` now:
+    - Prefers real PAS fields when present.
+    - Falls back to `inputs.policy_inputs` only when PAS fields are missing / defaulty (`""` / `0` / `None`).
+    - Leaves values at their existing defaults when neither PAS nor `policy_inputs` supplies a value (no fabrication).
+  - `_build_p12trf_scenarios_and_rates(...)` continues to read from `RunDetail.policy_input.core_fields`, so when upstream inputs are present, Product Model Review scenarios automatically surface real values.
+
+- **Runtime verification (Pi k3s cluster)**:
+  - Deployed the new image and confirmed that `/api/product-model-review/p12trf` remains healthy and that the `policy_inputs` preservation path is live in the container.
+  - Existing P12TRF projection artefacts referenced by S1/S2 were created *before* `policy_inputs` was added, and the PAS snapshot for those runs does not carry rich policy fields beyond `face_amount` and `premium_mode`. As a result, S1/S2 still show `"unknown"` for age/sex/smoker today, which is now an honest reflection of the upstream data rather than a drop in the Trust Surface plumbing.
+
+### Acceptance criteria
 
 - Projection artefacts (projection JSON + inputs snapshot and/or PAS export) include:
   - issue_age / age
@@ -44,9 +61,11 @@ Acceptance criteria:
   - term / level_period
   - face_amount
   - premium_mode
-- Product Model Review (`_build_p12trf_scenarios_and_rates`) uses those stored values directly instead of inferring from projection horizon or defaulting to `"unknown"`.
-- Trust Surface no longer needs to infer `termYears` from projection years for P12TRF; it reads `level_period` (or equivalent) from the stored inputs.
+- Product Model Review (`_build_p12trf_scenarios_and_rates`) uses those stored values directly instead of inferring from projection horizon or defaulting to `"unknown"` **for newly generated runs where upstream inputs are present**.
+- Trust Surface no longer needs to infer `termYears` from projection years for P12TRF; it reads `level_period` (or equivalent) from the stored inputs when available, and only falls back to horizon-based derivation when `level_period` is truly missing.
 - Scenario inputs only show `"unknown"` when the upstream source data truly lacks that field (not because the pipeline dropped it).
+
+**Next operational step:** re-run the P12TRF projection Job (or regenerate the specific S1/S2 projection artefacts) under the new image so that their projection JSON objects gain a `policy_inputs` block populated from real policy data. Once that happens, the existing PMR wiring will surface real values for S1/S2 without further code changes.
 
 ## Create meaningful scenario catalog for P12TRF
 
