@@ -233,11 +233,13 @@ def project_p12trf_scenarios_minio(
     """
 
     base = Path(__file__).resolve().parents[1]
-    # Default bundled fixture under examples/ when no explicit path is given.
+    project_root = Path(__file__).resolve().parents[3]
+    # Default bundled fixture under project_root/examples when no explicit
+    # path is given. In the Docker image this is `/opt/dagster/app/examples`.
     if scenarios_path:
         scenarios_file = Path(scenarios_path)
     else:
-        scenarios_file = base / "examples" / "p12trf_scenarios.json"
+        scenarios_file = project_root / "examples" / "p12trf_scenarios.json"
 
     if not scenarios_file.exists():
         raise typer.Exit(f"Scenario fixture not found: {scenarios_file}")
