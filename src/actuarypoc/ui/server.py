@@ -302,6 +302,9 @@ class ScenarioConfig(BaseModel):  # type: ignore[misc]
     levelPeriod: Optional[int] = None
     premiumMode: Optional[str] = None
     modalPremium: Optional[float] = None
+    purpose: Optional[str] = None
+    dimensionsExercised: Optional[List[str]] = None
+    source: Optional[str] = None
 
 
 class ScenarioConfigPayload(BaseModel):  # type: ignore[misc]
@@ -401,6 +404,116 @@ _P12TRF_SCENARIO_CONFIG: List[Dict[str, Any]] = [
 ]
 
 
+def _default_p12trf_scenarios_from_product_definition(
+    product_code: str,
+    filing_id: Optional[str],
+) -> List[Dict[str, Any]]:
+    """Generate default P12TRF scenarios from the ProductDefinition.
+
+    This is a deterministic, P12TRF-specific helper that uses the
+    ProductDefinition's dimensionality to suggest three scenarios:
+
+    - S1: mid-age non-smoker, longest term, higher face amount
+    - S2: younger non-smoker, shortest term, mid-range face amount
+    - S3: older smoker, shortest term, lower face amount
+
+    The caller is still free to override these scenarios via the
+    onboarding UI; this helper is only used when no scenarios have been
+    persisted for the current Product Review.
+    """
+
+    if not filing_id:
+        return []
+
+    pd = _load_or_seed_product_definition(product_code, filing_id)
+    if pd is None:
+        return []
+
+    ages_min = pd.issue_age_min or 18
+    ages_max = pd.issue_age_max or max(ages_min, 75)
+    term_periods = sorted(pd.term_periods or [20])
+    long_term = term_periods[-1]
+    short_term = term_periods[0]
+
+    smoker_classes = list(pd.smoker_classes or [])
+    ns = smoker_classes[0] if smoker_classes else "NS"
+    s = smoker_classes[-1] if len(smoker_classes) > 1 else ns
+
+    risk_classes = list(pd.risk_classes or [])
+    best_rc = risk_classes[0] if risk_classes else "SUPER_PREFERRED_NON_TOBACCO"
+    std_rc = risk_classes[1] if len(risk_classes) > 1 else (risk_classes[0] if risk_classes else "STANDARD_NON_TOBACCO")
+
+    modes = list(pd.premium_modes or [])
+    mode = (modes[0] if modes else "ANNUAL").upper()
+
+    fa_min = pd.face_amount_min or 100_000.0
+    fa_max = pd.face_amount_max or 450_000.0
+    fa_mid = (fa_min + fa_max) / 2.0 if fa_min and fa_max else fa_max
+
+    # Simple age choices: lower-third, mid, upper-third of allowed range.
+    span = max(0, ages_max - ages_min)
+    age_young = ages_min + max(0, span // 5)
+    age_mid = ages_min + max(0, span // 2)
+    age_old = ages_max - max(0, span // 5)
+
+    dimensions = [
+        "issue_age",
+        "term_period",
+        "smoker_class",
+        "risk_class",
+        "face_amount",
+        "premium_mode",
+    ]
+
+    return [
+        {
+            "id": "S1",
+            "name": "Mid-age non-smoker, base coverage",
+            "age": age_mid,
+            "sex": "M",
+            "smokerClass": ns,
+            "riskClass": best_rc,
+            "faceAmount": fa_max,
+            "levelPeriod": long_term,
+            "premiumMode": mode,
+            "modalPremium": None,
+            "purpose": "Typical mid-age non-smoker exercising base term coverage at the longest available term.",
+            "dimensionsExercised": dimensions,
+            "source": "product_definition",
+        },
+        {
+            "id": "S2",
+            "name": "Younger non-smoker, short-term coverage",
+            "age": age_young,
+            "sex": "F",
+            "smokerClass": ns,
+            "riskClass": std_rc,
+            "faceAmount": fa_mid,
+            "levelPeriod": short_term,
+            "premiumMode": mode,
+            "modalPremium": None,
+            "purpose": "Younger non-smoker testing shorter term coverage and mid-range face amount.",
+            "dimensionsExercised": dimensions,
+            "source": "product_definition",
+        },
+        {
+            "id": "S3",
+            "name": "Older smoker, short-term coverage",
+            "age": age_old,
+            "sex": "M",
+            "smokerClass": s,
+            "riskClass": std_rc,
+            "faceAmount": fa_min,
+            "levelPeriod": short_term,
+            "premiumMode": mode,
+            "modalPremium": None,
+            "purpose": "Edge-case older smoker at lower face amount and shortest term.",
+            "dimensionsExercised": dimensions,
+            "source": "product_definition",
+        },
+    ]
+
+
 def _default_p12trf_scenarios_for_ui() -> List[Dict[str, Any]]:
     """Return default P12TRF scenarios in UI-friendly shape.
 
@@ -469,7 +582,14 @@ def _ui_scenarios_to_internal(product_code: str, scenarios: List[ScenarioConfig]
             "modal_premium": s.modalPremium,
             "premium_mode": s.premiumMode,
         }
-        internal.append({"id": sid, "name": name, "policy": policy})
+        entry: Dict[str, Any] = {"id": sid, "name": name, "policy": policy}
+        if s.purpose is not None:
+            entry["purpose"] = s.purpose
+        if s.dimensionsExercised is not None:
+            entry["dimensions_exercised"] = list(s.dimensionsExercised)
+        if s.source is not None:
+            entry["source"] = s.source
+        internal.append(entry)
     return internal
 
 
@@ -1057,6 +1177,39 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
                 review_meta["generatedAt"] = rs.get("generated_at")
         review_meta["filingId"] = filing_id
 
+        # Attach scenario-level metadata (purpose, dimensions, source)
+        # from the Product Review draft to the Scenario Evidence block
+        # so that the Trust Surface can explain why each scenario exists.
+        internal_scenarios = None
+        if isinstance(meta, dict):
+            rs2 = meta.get("review") or {}
+            if isinstance(rs2, dict):
+                internal_scenarios = rs2.get("scenarios")
+        meta_by_id: Dict[str, Dict[str, Any]] = {}
+        if isinstance(internal_scenarios, list):
+            for s in internal_scenarios:
+                if not isinstance(s, dict):
+                    continue
+                sid = str(s.get("id") or "").strip()
+                if not sid:
+                    continue
+                meta_by_id[sid] = {
+                    "purpose": s.get("purpose"),
+                    "dimensionsExercised": s.get("dimensions_exercised"),
+                    "source": s.get("source"),
+                }
+
+        for scen in scen_and_rates["scenarios"]:
+            sid = scen.get("id")
+            if not isinstance(sid, str):
+                continue
+            extra = meta_by_id.get(sid)
+            if not extra:
+                continue
+            for key, value in extra.items():
+                if value is not None:
+                    scen[key] = value
+
         # Load or seed a ProductDefinition artefact for this (product, filing)
         # pair so that the Trust Surface can show a concise product
         # dimensionality summary.
@@ -1400,8 +1553,9 @@ def _build_product_review_payload(product_code: str) -> Dict[str, Any]:
     docs = list_product_documents(code, filing_id=filing_id)
 
     # Map stored internal scenarios (when present) back into the
-    # UI-friendly ScenarioConfig shape. When none are present we fall
-    # back to the bundled default P12TRF scenarios.
+    # UI-friendly ScenarioConfig shape. When none are present we first
+    # try ProductDefinition-driven defaults, then fall back to the
+    # bundled P12TRF fixture.
     scenarios_ui: List[Dict[str, Any]] = []
     internal_scenarios = review_state.get("scenarios") if isinstance(review_state, dict) else None
     if isinstance(internal_scenarios, list) and internal_scenarios:
@@ -1428,11 +1582,16 @@ def _build_product_review_payload(product_code: str) -> Dict[str, Any]:
                     "levelPeriod": policy.get("level_period"),
                     "premiumMode": policy.get("premium_mode"),
                     "modalPremium": policy.get("modal_premium"),
+                    "purpose": s.get("purpose"),
+                    "dimensionsExercised": s.get("dimensions_exercised"),
+                    "source": s.get("source"),
                 }
             )
 
     if not scenarios_ui and code == "P12TRF":
-        scenarios_ui = _default_p12trf_scenarios_for_ui()
+        # Prefer ProductDefinition-driven suggestions when available.
+        pd_scenarios = _default_p12trf_scenarios_from_product_definition(code, filing_id)
+        scenarios_ui = pd_scenarios or _default_p12trf_scenarios_for_ui()
 
     return {
         "product": {

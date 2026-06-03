@@ -56,6 +56,9 @@ export interface ProductModelReview {
   scenarios: {
     id: string;
     name: string;
+    purpose?: string;
+    dimensionsExercised?: string[];
+    source?: string;
     inputs: {
       age: number | string;
       sex: string;
@@ -535,6 +538,22 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                   <td>{selectedScenario.ruleIds.join(", ")}</td>
                 </tr>
                 <tr>
+                  <th>Scenario purpose</th>
+                  <td>{selectedScenario.purpose || "(not recorded)"}</td>
+                </tr>
+                <tr>
+                  <th>Dimensions exercised</th>
+                  <td>
+                    {Array.isArray(selectedScenario.dimensionsExercised)
+                      ? selectedScenario.dimensionsExercised.join(", ")
+                      : "(not recorded)"}
+                  </td>
+                </tr>
+                <tr>
+                  <th>Scenario source</th>
+                  <td>{selectedScenario.source || "unknown"}</td>
+                </tr>
+                <tr>
                   <th>Objective checks</th>
                   <td>
                     <ul>
@@ -764,6 +783,9 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                 </h3>
                 <p>
                   <strong>Inputs:</strong> Age {inp.age}, {inp.sex}, {inp.smokerClass}, term {inp.termYears} years, face {faceDisplay} ({inp.premiumMode} premium)
+                </p>
+                <p>
+                  <strong>Purpose:</strong> {s.purpose || "(not recorded)"}
                 </p>
                 <p>
                   <strong>Expected behavior:</strong>

@@ -35,6 +35,9 @@ export interface ScenarioRow {
   levelPeriod?: number | null;
   premiumMode?: string | null;
   modalPremium?: number | null;
+  purpose?: string | null;
+  dimensionsExercised?: string[] | null;
+  source?: string | null;
 }
 
 interface ProductReviewPayload {
