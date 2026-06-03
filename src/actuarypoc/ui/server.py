@@ -822,6 +822,7 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
         "documentCount": 0,
         "scenarioCount": len(scen_and_rates["scenarios"]),
     }
+    documents_payload: List[Dict[str, Any]] = []
     try:
         rec = get_product_review(product_block["code"])
         meta = (rec or {}).get("metadata") or {}
@@ -835,6 +836,17 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
         review_meta["filingId"] = filing_id
         docs = list_product_documents(product_block["code"], filing_id=filing_id)
         review_meta["documentCount"] = len(docs)
+        for d in docs:
+            documents_payload.append(
+                {
+                    "id": d.get("id"),
+                    "kind": d.get("kind"),
+                    "description": d.get("description"),
+                    "objectPath": d.get("object_path"),
+                    "createdAt": d.get("created_at"),
+                    "filingId": d.get("serff_id") or filing_id,
+                }
+            )
     except Exception:
         # Best-effort only; Trust Surface must remain robust when Postgres
         # is not configured.
@@ -849,6 +861,7 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
         "assumptions": assumptions,
         "gaps": gaps,
         "reviewMeta": review_meta,
+        "documents": documents_payload,
     }
 
 

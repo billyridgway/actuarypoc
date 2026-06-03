@@ -108,11 +108,20 @@ export interface ProductModelReview {
 }
 
 interface ProductModelReviewPageProps {
-  review: ProductModelReview;
+  review: ProductModelReview & {
+    documents?: {
+      id: number | string;
+      kind?: string | null;
+      description?: string | null;
+      objectPath?: string | null;
+      createdAt?: string | null;
+      filingId?: string | null;
+    }[];
+  };
 }
 
 export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ review }) => {
-  const { product, scope, traceability, rates, scenarios, assumptions, gaps, reviewMeta } = review;
+  const { product, scope, traceability, rates, scenarios, assumptions, gaps, reviewMeta, documents } = review;
 
   const totalScenarios = scenarios.length;
   const scenarioPassCount = scenarios.filter((s) => s.status.toLowerCase() === "pass").length;
@@ -594,6 +603,40 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
               ))}
             </tbody>
           </table>
+        )}
+      </section>
+
+      <section className="card">
+        <h2>Uploaded Documents (current filing context)</h2>
+        <p className="muted">
+          Uploaded documents are stored and associated with this filing context. Automatic parsing/extraction is not yet
+          implemented in this MVP.
+        </p>
+        {documents && documents.length > 0 ? (
+          <table className="kv-table">
+            <thead>
+              <tr>
+                <th>Description</th>
+                <th>Kind</th>
+                <th>Filing ID</th>
+                <th>Object path</th>
+                <th>Uploaded at</th>
+              </tr>
+            </thead>
+            <tbody>
+              {documents.map((d) => (
+                <tr key={d.id}>
+                  <td>{d.description || "(none)"}</td>
+                  <td>{d.kind || "(n/a)"}</td>
+                  <td>{d.filingId || reviewMeta?.filingId || "(not set)"}</td>
+                  <td>{d.objectPath}</td>
+                  <td>{d.createdAt ? String(d.createdAt) : ""}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <p className="muted">No uploaded documents for this filing context.</p>
         )}
       </section>
 
