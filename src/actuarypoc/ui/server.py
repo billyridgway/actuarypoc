@@ -10,7 +10,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from actuarypoc.connectors.base import CSVConnector
-from actuarypoc.domain.product_definition_v1 import ProductDefinitionV1
+from actuarypoc.domain.product_definition_v1 import ProductDefinitionLineage, ProductDefinitionV1
 from actuarypoc.product_registry import get_product_definition
 from actuarypoc.storage.minio_client import ensure_bucket, get_minio_client, get_bucket_name
 from actuarypoc.config.assumptions import list_assumption_sets, approve_assumption_set
@@ -70,6 +70,10 @@ _P12TRF_DEFINITION_PATH = _PROJECT_ROOT / "examples" / "product-definitions" / "
 
 def _product_definition_object_key(product_code: str, filing_id: str) -> str:
     return f"product-definitions/{product_code.upper()}/{filing_id}/product-definition.json"
+
+
+def _product_definition_build_report_key(product_code: str, filing_id: str) -> str:
+    return f"product-definitions/{product_code.upper()}/{filing_id}/build-report.json"
 
 
 def _load_or_seed_product_definition(product_code: str, filing_id: str) -> Optional[ProductDefinitionV1]:
@@ -1066,6 +1070,263 @@ def api_get_product_definition(product_code: str, filing_id: str = Query(...)) -
     return {"productDefinition": pd.dict()}  # type: ignore[call-arg]
 
 
+@app.post("/api/product-definition/{product_code}/build")
+def api_build_product_definition(product_code: str) -> Dict[str, Any]:
+    """Rebuild a ProductDefinition artefact for the current filing context.
+
+    This endpoint is intentionally P12TRF-first and deterministic. It:
+
+    - looks up the current Product Review for the given product,
+    - derives the active filing_id,
+    - reads filing-scoped documents, evidence, and scenarios, and
+    - assembles an enriched ProductDefinitionV1 with lineage metadata.
+
+    The updated ProductDefinition and a build-report.json artefact are
+    written to MinIO. Re-running the build overwrites the same keys for
+    the product+filing, making this endpoint idempotent.
+    """
+
+    code = (product_code or "").strip().upper()
+    if not code:
+        raise HTTPException(status_code=400, detail="product_code is required")
+    if code != "P12TRF":
+        raise HTTPException(status_code=400, detail="ProductDefinition builder is only implemented for P12TRF in this MVP")
+
+    rec = get_product_review(code)
+    if rec is None:
+        raise HTTPException(status_code=400, detail="No Product Review draft found for this product")
+
+    meta = rec.get("metadata") or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    review_state = meta.get("review") or {}
+    if not isinstance(review_state, dict):
+        review_state = {}
+
+    filing_id = review_state.get("filing_id") if isinstance(review_state, dict) else None
+    if isinstance(filing_id, str):
+        filing_id = filing_id.strip() or None
+    if not filing_id:
+        raise HTTPException(status_code=400, detail="No filing_id configured on current Product Review")
+
+    # Source inputs for the builder.
+    docs = list_product_documents(code, filing_id=filing_id)
+    evidence_rows = list_filing_rule_evidence(code, filing_id=filing_id)
+    internal_scenarios = review_state.get("scenarios") if isinstance(review_state, dict) else None
+    if not isinstance(internal_scenarios, list):
+        internal_scenarios = []
+
+    base_def = get_product_definition(code) or _load_p12trf_definition()
+    issue_limits = base_def.get("issue_age_limits") or {}
+    underwriting = base_def.get("underwriting_classes") or []
+
+    # Dimensionality from scenarios (prefer saved scenarios, fall back to
+    # the bundled fixture).
+    term_periods: List[int] = []
+    risk_classes: List[str] = []
+    smoker_classes: List[str] = []
+    premium_modes: List[str] = []
+    face_amounts: List[float] = []
+
+    scenario_source_count = 0
+
+    def _harvest_from_policy(policy: Dict[str, Any]) -> None:
+        nonlocal scenario_source_count
+        scenario_source_count += 1
+        lp = policy.get("level_period")
+        try:
+            lp_int = int(lp) if lp is not None else None
+        except (TypeError, ValueError):
+            lp_int = None
+        if lp_int and lp_int > 0:
+            term_periods.append(lp_int)
+
+        rc = policy.get("risk_class")
+        if isinstance(rc, str) and rc.strip():
+            risk_classes.append(rc.strip())
+
+        sc = policy.get("smoker_class")
+        if isinstance(sc, str) and sc.strip():
+            smoker_classes.append(sc.strip())
+
+        pm = policy.get("premium_mode")
+        if isinstance(pm, str) and pm.strip():
+            premium_modes.append(pm.strip().upper())
+
+        fa = policy.get("face_amount")
+        try:
+            fa_val = float(fa) if fa is not None else None
+        except (TypeError, ValueError):
+            fa_val = None
+        if fa_val is not None and fa_val > 0:
+            face_amounts.append(fa_val)
+
+    # Prefer saved scenarios from the Product Review.
+    if internal_scenarios:
+        for s in internal_scenarios:
+            if not isinstance(s, dict):
+                continue
+            policy = s.get("policy") or {}
+            if not isinstance(policy, dict):
+                continue
+            _harvest_from_policy(policy)
+    else:
+        # Fall back to the P12TRF fixture.
+        for s in _default_p12trf_scenarios_for_ui():
+            policy = {
+                "issue_age": s.get("age"),
+                "gender": s.get("sex"),
+                "smoker_class": s.get("smokerClass"),
+                "risk_class": s.get("riskClass"),
+                "face_amount": s.get("faceAmount"),
+                "level_period": s.get("levelPeriod"),
+                "premium_mode": s.get("premiumMode"),
+                "modal_premium": s.get("modalPremium"),
+            }
+            _harvest_from_policy(policy)
+
+    # Normalise sets.
+    def _sorted_unique(values: List[Any]) -> List[Any]:
+        seen = set()
+        out: List[Any] = []
+        for v in values:
+            if v in seen:
+                continue
+            seen.add(v)
+            out.append(v)
+        try:
+            return sorted(out)
+        except Exception:
+            return out
+
+    term_periods = _sorted_unique(term_periods)
+    risk_classes = _sorted_unique(risk_classes)
+    smoker_classes = _sorted_unique(smoker_classes)
+    premium_modes = _sorted_unique(premium_modes)
+
+    face_min = min(face_amounts) if face_amounts else None
+    face_max = max(face_amounts) if face_amounts else None
+
+    pd = ProductDefinitionV1(
+        schema_version="product-definition-v1",
+        product_code=code,
+        filing_id=filing_id,
+        coverages=[
+            {
+                "id": "base_term",
+                "name": base_def.get("marketing_name") or f"{code} Term (base)",
+                "kind": "base",
+                "term_periods": term_periods or [20],
+                "notes": "Base term coverage for P12TRF; term periods inferred from scenarios.",
+            }
+        ],
+        issue_age_min=issue_limits.get("min"),
+        issue_age_max=issue_limits.get("max"),
+        term_periods=term_periods or [20],
+        underwriting_classes=list(underwriting),
+        risk_classes=risk_classes,
+        smoker_classes=smoker_classes,
+        premium_modes=premium_modes or ["ANNUAL"],
+        face_amount_min=face_min,
+        face_amount_max=face_max,
+        source_documents=[],
+        evidence_refs=[],
+        extra={
+            "unmodeled_coverages": base_def.get("riders") or [],
+        },
+    )
+
+    # Attach documents and evidence.
+    pd.source_documents = [
+        {
+            "document_path": str(d.get("object_path")),
+            "description": d.get("description"),
+            "filing_id": d.get("serff_id") or filing_id,
+        }
+        for d in docs
+        if d.get("object_path")
+    ]
+
+    refs: List[Dict[str, Any]] = []
+    for ev in evidence_rows:
+        rule_id = ev.get("rule_id")
+        if rule_id not in {"rule_death_benefit_term", "rule_level_premiums"}:
+            continue
+        feature_id = "base_term_coverage" if rule_id == "rule_death_benefit_term" else "level_premiums"
+        refs.append(
+            {
+                "feature_id": feature_id,
+                "rule_id": rule_id,
+                "document_path": ev.get("document_path"),
+                "page_reference": ev.get("page_reference"),
+            }
+        )
+    pd.evidence_refs = refs
+
+    # Lineage / build metadata.
+    generated_at = datetime.utcnow().isoformat() + "Z"
+    generator_version = "v1"
+
+    warnings: List[str] = []
+    if not docs:
+        warnings.append("no uploaded documents")
+    if not evidence_rows:
+        warnings.append("no filing rule evidence")
+    if not internal_scenarios:
+        warnings.append("no saved scenarios; used fixture scenarios instead")
+    if not pd.source_documents:
+        warnings.append("no source documents linked to ProductDefinition")
+    if not pd.evidence_refs:
+        warnings.append("no evidence refs linked to ProductDefinition")
+
+    pd.lineage = ProductDefinitionLineage(
+        generatedAt=generated_at,
+        generatorVersion=generator_version,
+        sources={
+            "documents": len(docs),
+            "evidence": len(evidence_rows),
+            "scenarios": scenario_source_count,
+        },
+        warnings=warnings,
+    )
+
+    # Persist ProductDefinition and build-report to MinIO (idempotent).
+    minio_client = get_minio_client()
+    ensure_bucket(minio_client)
+    bucket = get_bucket_name()
+
+    pd_key = _product_definition_object_key(code, filing_id)
+    report_key = _product_definition_build_report_key(code, filing_id)
+
+    import json
+
+    pd_body = json.dumps(pd.dict()).encode("utf-8")  # type: ignore[call-arg]
+    report = {
+        "productCode": code,
+        "filingId": filing_id,
+        "generatedAt": generated_at,
+        "generatorVersion": generator_version,
+        "sources": {
+            "documents": len(docs),
+            "evidence": len(evidence_rows),
+            "scenarios": scenario_source_count,
+        },
+        "warnings": warnings,
+        "summary": pd.summary(),
+    }
+    report_body = json.dumps(report).encode("utf-8")
+
+    minio_client.put_object(bucket, pd_key, data=pd_body, length=len(pd_body), content_type="application/json")
+    minio_client.put_object(bucket, report_key, data=report_body, length=len(report_body), content_type="application/json")
+
+    return {
+        "productCode": code,
+        "filingId": filing_id,
+        "productDefinition": pd.dict(),
+        "buildReport": report,
+    }
+
+
 @app.get("/api/debug/p12trf/scenario-suggestions")
 def api_debug_p12trf_scenario_suggestions() -> Dict[str, Any]:
     """Debug helper: show ProductDefinition-driven scenario suggestions.
@@ -1203,6 +1464,7 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
     documents_payload: List[Dict[str, Any]] = []
     product_definition_summary: Optional[Dict[str, Any]] = None
     product_definition_full: Optional[ProductDefinitionV1] = None
+    product_definition_build: Optional[Dict[str, Any]] = None
     coverage_matrix: List[Dict[str, Any]] = []
     try:
         rec = get_product_review(product_block["code"])
@@ -1482,6 +1744,21 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
         # is not configured.
         pass
 
+    # ProductDefinition build metadata (when lineage is present).
+    if product_definition_full is not None and getattr(product_definition_full, "lineage", None) is not None:  # type: ignore[truthy-function]
+        ln = product_definition_full.lineage  # type: ignore[assignment]
+        if ln is not None:
+            sources = ln.sources or {}
+            product_definition_build = {
+                "generatedAt": ln.generatedAt,
+                "generatorVersion": ln.generatorVersion,
+                "documentCount": len(product_definition_full.source_documents or []),
+                "evidenceCount": len(product_definition_full.evidence_refs or []),
+                "scenarioCount": int(sources.get("scenarios", 0)),
+                "warningCount": len(ln.warnings or []),
+                "warnings": list(ln.warnings or []),
+            }
+
     # Derive a lightweight progress checklist so the UI can show how
     # complete this review feels from a workflow perspective.
     try:
@@ -1527,6 +1804,7 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
         "lastDecision": last_decision,
         "reviewProgress": review_progress,
         "productDefinition": product_definition_summary,
+        "productDefinitionBuild": product_definition_build,
         "coverageMatrix": coverage_matrix,
     }
 

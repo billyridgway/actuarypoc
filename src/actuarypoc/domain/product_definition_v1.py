@@ -45,6 +45,19 @@ class ProductDefinitionEvidenceRef(BaseModel):  # type: ignore[misc]
     page_reference: Optional[str] = None
 
 
+class ProductDefinitionLineage(BaseModel):  # type: ignore[misc]
+    """Lightweight build/lineage metadata for a ProductDefinition.
+
+    This is intentionally simple and keeps only the information needed to
+    explain how a given ProductDefinition was assembled.
+    """
+
+    generatedAt: Optional[str] = None
+    generatorVersion: Optional[str] = None
+    sources: Dict[str, int] = {}
+    warnings: List[str] = []
+
+
 class ProductCoverage(BaseModel):  # type: ignore[misc]
     """Represents a base coverage or rider in the product.
 
@@ -90,6 +103,7 @@ class ProductDefinitionV1(BaseModel):  # type: ignore[misc]
     evidence_refs: List[ProductDefinitionEvidenceRef] = []
 
     extra: Dict[str, Any] = {}
+    lineage: Optional[ProductDefinitionLineage] = None
 
     def summary(self) -> Dict[str, Any]:
         """Return a small summary dict suitable for the Trust Surface UI."""

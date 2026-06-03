@@ -65,6 +65,10 @@ under conventional prefixes:
 - `product-definitions/{product_code}/{filing_id}/product-definition.json` –
   ProductDefinition v1 artefacts for a specific product + filing context
   (used by the P12TRF Product Model Review Trust Surface).
+- `product-definitions/{product_code}/{filing_id}/build-report.json` –
+  ProductDefinition builder reports (v1) describing how a given
+  ProductDefinition was assembled from documents, evidence, and
+  scenarios.
 
 These prefixes are typically populated by:
 
@@ -109,6 +113,11 @@ These prefixes are typically populated by:
     - `/health` – simple health check
     - `/projections` / `/projections/{key}` – raw projection JSON
     - `/api/run-detail` – structured Run Detail JSON for one projection
+    - `/api/product-definition/{product_code}` – load a ProductDefinition
+      artefact for a given product+filing
+    - `/api/product-definition/{product_code}/build` – P12TRF-only builder
+      that assembles and persists a ProductDefinition and
+      `build-report.json` from the current Product Review context
     - `/ui` – redirector into the React UI
     - `/ui/list` – simple HTML list of projection objects (debugging)
     - `/web` – static React SPA (projection viewer)

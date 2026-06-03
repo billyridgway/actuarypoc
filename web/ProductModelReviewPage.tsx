@@ -149,6 +149,15 @@ export interface ProductModelReview {
     evidence?: string;
     status: "covered" | "partial" | "gap" | "not_applicable" | string;
   }[];
+  productDefinitionBuild?: {
+    generatedAt?: string | null;
+    generatorVersion?: string | null;
+    documentCount?: number;
+    evidenceCount?: number;
+    scenarioCount?: number;
+    warningCount?: number;
+    warnings?: string[];
+  } | null;
 }
 
 interface ProductModelReviewPageProps {
@@ -184,7 +193,7 @@ interface ProductModelReviewPageProps {
 }
 
 export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ review }) => {
-  const { product, scope, traceability, rates, scenarios, assumptions, gaps, reviewMeta, documents, lastDecision, reviewProgress, productDefinition, coverageMatrix } = review;
+  const { product, scope, traceability, rates, scenarios, assumptions, gaps, reviewMeta, documents, lastDecision, reviewProgress, productDefinition, coverageMatrix, productDefinitionBuild } = review;
 
   const totalScenarios = scenarios.length;
   const scenarioPassCount = scenarios.filter((s) => s.status.toLowerCase() === "pass").length;
@@ -530,6 +539,46 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                 ))}
               </tbody>
             </table>
+          </>
+        )}
+        {productDefinitionBuild && (
+          <>
+            <h3>ProductDefinition Build (v1)</h3>
+            <table className="kv-table">
+              <tbody>
+                <tr>
+                  <th>Generated</th>
+                  <td>{productDefinitionBuild.generatedAt || "(builder not run yet)"}</td>
+                </tr>
+                <tr>
+                  <th>Generator</th>
+                  <td>{productDefinitionBuild.generatorVersion || "(n/a)"}</td>
+                </tr>
+                <tr>
+                  <th>Sources</th>
+                  <td>
+                    {(productDefinitionBuild.documentCount ?? 0)} document(s),{" "}
+                    {(productDefinitionBuild.evidenceCount ?? 0)} evidence link(s),{" "}
+                    {(productDefinitionBuild.scenarioCount ?? 0)} scenario(s)
+                  </td>
+                </tr>
+                <tr>
+                  <th>Warnings</th>
+                  <td>
+                    {productDefinitionBuild.warningCount
+                      ? `${productDefinitionBuild.warningCount} warning(s)`
+                      : "None"}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            {productDefinitionBuild.warnings && productDefinitionBuild.warnings.length > 0 && (
+              <ul className="muted">
+                {productDefinitionBuild.warnings.map((w, idx) => (
+                  <li key={idx}>{w}</li>
+                ))}
+              </ul>
+            )}
           </>
         )}
         {selectedScenario && selectedInputs && (
