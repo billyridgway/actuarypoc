@@ -333,7 +333,9 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                 </tr>
               </tbody>
             </table>
-            {selectedScenario.projection && selectedScenario.projection.years && selectedScenario.projection.deathBenefits && (
+            {selectedScenario.projection &&
+              selectedScenario.projection.years &&
+              selectedScenario.projection.deathBenefits && (
               <>
                 <h4>Projection evidence (death benefit excerpts)</h4>
                 <table className="kv-table">
@@ -377,7 +379,7 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
               </>
             )}
           </div>
-        )()}
+        )}
       </section>
 
       <section className="card">
