@@ -1066,6 +1066,43 @@ def api_get_product_definition(product_code: str, filing_id: str = Query(...)) -
     return {"productDefinition": pd.dict()}  # type: ignore[call-arg]
 
 
+@app.get("/api/debug/p12trf/scenario-suggestions")
+def api_debug_p12trf_scenario_suggestions() -> Dict[str, Any]:
+    """Debug helper: show ProductDefinition-driven scenario suggestions.
+
+    This endpoint is **read-only** and does not modify Postgres or MinIO
+    state. It is intended to validate the ProductDefinition-driven
+    scenario generator in a live environment without disturbing the
+    existing P12TRF demo state.
+    """
+
+    product_code = "P12TRF"
+    rec = get_product_review(product_code)
+    meta = (rec or {}).get("metadata") or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    review_state = meta.get("review") or {}
+    if not isinstance(review_state, dict):
+        review_state = {}
+
+    filing_id = review_state.get("filing_id") if isinstance(review_state, dict) else None
+    if isinstance(filing_id, str):
+        filing_id = filing_id.strip() or None
+
+    if not filing_id:
+        raise HTTPException(status_code=400, detail="No filing_id on current Product Review for P12TRF")
+
+    pd_scenarios = _default_p12trf_scenarios_from_product_definition(product_code, filing_id)
+    fixture_scenarios = _default_p12trf_scenarios_for_ui()
+
+    return {
+        "productCode": product_code,
+        "filingId": filing_id,
+        "fromProductDefinition": pd_scenarios,
+        "fromFixture": fixture_scenarios,
+    }
+
+
 @app.get("/api/product-model-review/p12trf")
 def api_product_model_review_p12trf() -> Dict[str, Any]:
     """Return a Product Model Review payload for P12TRF.
