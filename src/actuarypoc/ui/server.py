@@ -2465,8 +2465,9 @@ def api_product_model_review_decision(product_code: str, payload: ProductModelRe
     validation_warning_count: Optional[int] = None
     validation_fail_count: Optional[int] = None
 
-    # Immutable evidence snapshot fields (best-effort; populated for
-    # P12TRF when artefacts are available).
+    # Immutable evidence snapshot fields. For P12TRF we now require
+    # these snapshots to be persisted successfully; failures surface as
+    # 5xx responses instead of being silently ignored.
     product_definition_path: Optional[str] = None
     product_definition_hash: Optional[str] = None
     build_report_path: Optional[str] = None
@@ -2476,10 +2477,12 @@ def api_product_model_review_decision(product_code: str, payload: ProductModelRe
     validation_report_path: Optional[str] = None
     validation_snapshot_hash: Optional[str] = None
 
-    try:
-        # For now the richer context is only implemented for P12TRF; other
-        # products keep the simpler decision record.
-        if product_code.strip().upper() == "P12TRF":
+    # For now the richer context (including snapshot persistence) is
+    # only implemented for P12TRF; other products keep the simpler
+    # decision record.
+    code_norm = product_code.strip().upper()
+    if code_norm == "P12TRF":
+        try:
             pmr = api_product_model_review_p12trf()
             review_meta = pmr.get("reviewMeta") or {}
             if isinstance(review_meta, dict):
@@ -2507,100 +2510,179 @@ def api_product_model_review_decision(product_code: str, payload: ProductModelRe
 
             # Immutable evidence snapshot fields: capture the exact
             # ProductDefinition/build artefacts and stable snapshots for
-            # coverageMatrix and productDefinitionValidation.
+            # coverageMatrix and productDefinitionValidation. For P12TRF
+            # we treat failures as fatal for the decision save.
+
+            # Resolve artefact paths from the current filing context.
+            if isinstance(filing_id, str):
+                filing_norm = filing_id.strip()
+            else:
+                filing_norm = None
+
+            if not filing_norm:
+                raise HTTPException(
+                    status_code=500,
+                    detail="PMR decision snapshot missing filing_id for P12TRF",
+                )
+
+            product_definition_path = _product_definition_object_key(code_norm, filing_norm)
+            build_report_path = _product_definition_build_report_key(code_norm, filing_norm)
+
             try:
-                # Resolve artefact paths from the current filing context.
-                if isinstance(filing_id, str):
-                    filing_norm = filing_id.strip()
-                else:
-                    filing_norm = None
+                minio_client = get_minio_client()
+                ensure_bucket(minio_client)
+                bucket = get_bucket_name()
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[pmr_decision_snapshot] minio_init_failed product_code={code_norm} "
+                    f"filing_id={filing_norm}: {exc}",
+                    flush=True,
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail="Failed to initialise MinIO client for PMR decision snapshot",
+                ) from exc
 
-                code_norm = product_code.strip().upper()
-                if filing_norm:
-                    product_definition_path = _product_definition_object_key(code_norm, filing_norm)
-                    build_report_path = _product_definition_build_report_key(code_norm, filing_norm)
+            # Hash exact JSON bytes for existing ProductDefinition artefact.
+            try:
+                response = minio_client.get_object(bucket, product_definition_path)
+                try:
+                    body = response.read()
+                    if body:
+                        product_definition_hash = sha256(body).hexdigest()
+                finally:
+                    response.close()
+                    response.release_conn()
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[pmr_decision_snapshot] product_definition_hash_failed key={product_definition_path}: {exc}",
+                    flush=True,
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail="Failed to read ProductDefinition artefact for PMR decision snapshot",
+                ) from exc
 
-                    minio_client = get_minio_client()
-                    ensure_bucket(minio_client)
-                    bucket = get_bucket_name()
+            # Hash exact JSON bytes for existing build-report artefact.
+            try:
+                response = minio_client.get_object(bucket, build_report_path)
+                try:
+                    body = response.read()
+                    if body:
+                        build_report_hash = sha256(body).hexdigest()
+                finally:
+                    response.close()
+                    response.release_conn()
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[pmr_decision_snapshot] build_report_hash_failed key={build_report_path}: {exc}",
+                    flush=True,
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail="Failed to read ProductDefinition build-report for PMR decision snapshot",
+                ) from exc
 
-                    # Hash exact JSON bytes for ProductDefinition.
-                    try:
-                        response = minio_client.get_object(bucket, product_definition_path)
-                        try:
-                            body = response.read()
-                            if body:
-                                product_definition_hash = sha256(body).hexdigest()
-                        finally:
-                            response.close()
-                            response.release_conn()
-                    except Exception:
-                        # Best-effort only; missing artefacts should not
-                        # block decision capture.
-                        pass
+            # Persist coverageMatrix snapshot.
+            import io
+            import json
 
-                    # Hash exact JSON bytes for build-report.
-                    try:
-                        response = minio_client.get_object(bucket, build_report_path)
-                        try:
-                            body = response.read()
-                            if body:
-                                build_report_hash = sha256(body).hexdigest()
-                        finally:
-                            response.close()
-                            response.release_conn()
-                    except Exception:
-                        pass
+            coverage_matrix = pmr.get("coverageMatrix")
+            if coverage_matrix is None:
+                print(
+                    f"[pmr_decision_snapshot] coverage_matrix_missing product_code={code_norm} "
+                    f"filing_id={filing_norm}",
+                    flush=True,
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail="PMR decision snapshot missing coverageMatrix for P12TRF",
+                )
 
-                # Persist coverageMatrix and validation snapshots as
-                # their own MinIO artefacts when available, and compute
-                # SHA256 hashes from the exact bytes written.
-                import io
-                import json
+            coverage_matrix_path = _coverage_matrix_object_key(code_norm, filing_norm)
+            try:
+                body = json.dumps(
+                    coverage_matrix,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+                minio_client.put_object(
+                    bucket,
+                    coverage_matrix_path,
+                    data=io.BytesIO(body),
+                    length=len(body),
+                    content_type="application/json",
+                )
+                coverage_matrix_hash = sha256(body).hexdigest()
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[pmr_decision_snapshot] coverage_matrix_write_failed key={coverage_matrix_path}: {exc}",
+                    flush=True,
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail="Failed to persist coverageMatrix snapshot for PMR decision",
+                ) from exc
 
-                coverage_matrix = pmr.get("coverageMatrix")
-                if filing_norm and coverage_matrix is not None:
-                    coverage_matrix_path = _coverage_matrix_object_key(code_norm, filing_norm)
-                    try:
-                        body = json.dumps(coverage_matrix, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-                        minio_client.put_object(
-                            bucket,
-                            coverage_matrix_path,
-                            data=io.BytesIO(body),
-                            length=len(body),
-                            content_type="application/json",
-                        )
-                        coverage_matrix_hash = sha256(body).hexdigest()
-                    except Exception:
-                        # Best-effort only; leave path/hash as None when
-                        # snapshot persistence fails.
-                        coverage_matrix_path = None
-                        coverage_matrix_hash = None
+            # Persist validation snapshot.
+            validation_snapshot = pmr.get("productDefinitionValidation")
+            if validation_snapshot is None:
+                print(
+                    f"[pmr_decision_snapshot] validation_snapshot_missing product_code={code_norm} "
+                    f"filing_id={filing_norm}",
+                    flush=True,
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail="PMR decision snapshot missing productDefinitionValidation for P12TRF",
+                )
 
-                validation_snapshot = pmr.get("productDefinitionValidation")
-                if filing_norm and validation_snapshot is not None:
-                    validation_report_path = _validation_report_object_key(code_norm, filing_norm)
-                    try:
-                        body = json.dumps(validation_snapshot, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-                        minio_client.put_object(
-                            bucket,
-                            validation_report_path,
-                            data=io.BytesIO(body),
-                            length=len(body),
-                            content_type="application/json",
-                        )
-                        validation_snapshot_hash = sha256(body).hexdigest()
-                    except Exception:
-                        validation_report_path = None
-                        validation_snapshot_hash = None
-            except Exception:
-                # Evidence snapshot is best-effort; keep decision
-                # recording resilient to transient MinIO/JSON issues.
-                pass
-    except Exception:
-        # Context is best-effort only; decision persistence should still work
-        # even if we cannot compute a full PMR payload.
-        pass
+            validation_report_path = _validation_report_object_key(code_norm, filing_norm)
+            try:
+                body = json.dumps(
+                    validation_snapshot,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+                minio_client.put_object(
+                    bucket,
+                    validation_report_path,
+                    data=io.BytesIO(body),
+                    length=len(body),
+                    content_type="application/json",
+                )
+                validation_snapshot_hash = sha256(body).hexdigest()
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[pmr_decision_snapshot] validation_report_write_failed key={validation_report_path}: {exc}",
+                    flush=True,
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail="Failed to persist validation snapshot for PMR decision",
+                ) from exc
+
+            if not (
+                coverage_matrix_path
+                and coverage_matrix_hash
+                and validation_report_path
+                and validation_snapshot_hash
+            ):
+                raise HTTPException(
+                    status_code=500,
+                    detail="PMR decision snapshot incomplete for P12TRF (expected coverage and validation artefacts)",
+                )
+        except HTTPException:
+            # Re-raise FastAPI HTTP errors untouched.
+            raise
+        except Exception as exc:  # noqa: BLE001
+            print(f"[pmr_decision_snapshot] unexpected_error: {exc}", flush=True)
+            raise HTTPException(
+                status_code=500,
+                detail="Unexpected error while building PMR decision snapshot",
+            ) from exc
 
     # Best-effort Postgres persistence. If Postgres is not configured or
     # unavailable, we still return a 200-level response with the echoed
