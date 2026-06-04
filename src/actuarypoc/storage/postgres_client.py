@@ -106,6 +106,19 @@ CREATE TABLE IF NOT EXISTS product_model_review_decisions (
     decision text NOT NULL,
     exclusions text,
     comments text,
+    filing_id text,
+    generation_id text,
+    pd_generated_at timestamptz,
+    pd_generator_version text,
+    pd_warning_count integer,
+    coverage_covered_count integer,
+    coverage_partial_count integer,
+    coverage_gap_count integer,
+    coverage_not_applicable_count integer,
+    validation_status text,
+    validation_pass_count integer,
+    validation_warning_count integer,
+    validation_fail_count integer,
     created_at timestamptz DEFAULT now()
 );
 
@@ -127,6 +140,46 @@ CREATE TABLE IF NOT EXISTS filing_rule_evidence (
 
 CREATE INDEX IF NOT EXISTS idx_filing_rule_evidence_product_filing
     ON filing_rule_evidence(product_code, filing_id);
+
+-- Backfill columns for extended Product Model Review decision context
+ALTER TABLE product_model_review_decisions
+    ADD COLUMN IF NOT EXISTS filing_id text;
+
+ALTER TABLE product_model_review_decisions
+    ADD COLUMN IF NOT EXISTS generation_id text;
+
+ALTER TABLE product_model_review_decisions
+    ADD COLUMN IF NOT EXISTS pd_generated_at timestamptz;
+
+ALTER TABLE product_model_review_decisions
+    ADD COLUMN IF NOT EXISTS pd_generator_version text;
+
+ALTER TABLE product_model_review_decisions
+    ADD COLUMN IF NOT EXISTS pd_warning_count integer;
+
+ALTER TABLE product_model_review_decisions
+    ADD COLUMN IF NOT EXISTS coverage_covered_count integer;
+
+ALTER TABLE product_model_review_decisions
+    ADD COLUMN IF NOT EXISTS coverage_partial_count integer;
+
+ALTER TABLE product_model_review_decisions
+    ADD COLUMN IF NOT EXISTS coverage_gap_count integer;
+
+ALTER TABLE product_model_review_decisions
+    ADD COLUMN IF NOT EXISTS coverage_not_applicable_count integer;
+
+ALTER TABLE product_model_review_decisions
+    ADD COLUMN IF NOT EXISTS validation_status text;
+
+ALTER TABLE product_model_review_decisions
+    ADD COLUMN IF NOT EXISTS validation_pass_count integer;
+
+ALTER TABLE product_model_review_decisions
+    ADD COLUMN IF NOT EXISTS validation_warning_count integer;
+
+ALTER TABLE product_model_review_decisions
+    ADD COLUMN IF NOT EXISTS validation_fail_count integer;
 """
 
 
@@ -628,7 +681,26 @@ def get_last_product_model_review_decision(product_code: str) -> Optional[Dict[s
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT id, product_code, reviewer, decision, exclusions, comments, created_at
+                    SELECT id,
+                           product_code,
+                           reviewer,
+                           decision,
+                           exclusions,
+                           comments,
+                           filing_id,
+                           generation_id,
+                           pd_generated_at,
+                           pd_generator_version,
+                           pd_warning_count,
+                           coverage_covered_count,
+                           coverage_partial_count,
+                           coverage_gap_count,
+                           coverage_not_applicable_count,
+                           validation_status,
+                           validation_pass_count,
+                           validation_warning_count,
+                           validation_fail_count,
+                           created_at
                       FROM product_model_review_decisions
                      WHERE product_code = %s
                      ORDER BY created_at DESC, id DESC
@@ -646,7 +718,20 @@ def get_last_product_model_review_decision(product_code: str) -> Optional[Dict[s
                     "decision": row[3],
                     "exclusions": row[4],
                     "comments": row[5],
-                    "created_at": row[6].isoformat() if getattr(row[6], "isoformat", None) else row[6],
+                    "filing_id": row[6],
+                    "generation_id": row[7],
+                    "pd_generated_at": row[8].isoformat() if getattr(row[8], "isoformat", None) else row[8],
+                    "pd_generator_version": row[9],
+                    "pd_warning_count": row[10],
+                    "coverage_covered_count": row[11],
+                    "coverage_partial_count": row[12],
+                    "coverage_gap_count": row[13],
+                    "coverage_not_applicable_count": row[14],
+                    "validation_status": row[15],
+                    "validation_pass_count": row[16],
+                    "validation_warning_count": row[17],
+                    "validation_fail_count": row[18],
+                    "created_at": row[19].isoformat() if getattr(row[19], "isoformat", None) else row[19],
                 }
     except Exception as exc:  # noqa: BLE001
         _note_failure(exc)
@@ -660,6 +745,19 @@ def record_product_model_review_decision(
     decision: str,
     exclusions: str | None = None,
     comments: str | None = None,
+    filing_id: str | None = None,
+    generation_id: str | None = None,
+    pd_generated_at: str | None = None,
+    pd_generator_version: str | None = None,
+    pd_warning_count: int | None = None,
+    coverage_covered_count: int | None = None,
+    coverage_partial_count: int | None = None,
+    coverage_gap_count: int | None = None,
+    coverage_not_applicable_count: int | None = None,
+    validation_status: str | None = None,
+    validation_pass_count: int | None = None,
+    validation_warning_count: int | None = None,
+    validation_fail_count: int | None = None,
 ) -> Optional[Dict[str, Any]]:
     """Persist a Product Model Review decision, returning the stored row.
 
@@ -677,12 +775,73 @@ def record_product_model_review_decision(
                 cur.execute(
                     """
                     INSERT INTO product_model_review_decisions (
-                        product_code, reviewer, decision, exclusions, comments
+                        product_code,
+                        reviewer,
+                        decision,
+                        exclusions,
+                        comments,
+                        filing_id,
+                        generation_id,
+                        pd_generated_at,
+                        pd_generator_version,
+                        pd_warning_count,
+                        coverage_covered_count,
+                        coverage_partial_count,
+                        coverage_gap_count,
+                        coverage_not_applicable_count,
+                        validation_status,
+                        validation_pass_count,
+                        validation_warning_count,
+                        validation_fail_count
                     )
-                    VALUES (%s, %s, %s, %s, %s)
-                    RETURNING id, product_code, reviewer, decision, exclusions, comments, created_at
+                    VALUES (
+                        %s, %s, %s, %s, %s,
+                        %s, %s,
+                        %s, %s, %s,
+                        %s, %s, %s, %s,
+                        %s, %s, %s, %s
+                    )
+                    RETURNING id,
+                              product_code,
+                              reviewer,
+                              decision,
+                              exclusions,
+                              comments,
+                              filing_id,
+                              generation_id,
+                              pd_generated_at,
+                              pd_generator_version,
+                              pd_warning_count,
+                              coverage_covered_count,
+                              coverage_partial_count,
+                              coverage_gap_count,
+                              coverage_not_applicable_count,
+                              validation_status,
+                              validation_pass_count,
+                              validation_warning_count,
+                              validation_fail_count,
+                              created_at
                     """,
-                    (product_code, reviewer, decision, exclusions, comments),
+                    (
+                        product_code,
+                        reviewer,
+                        decision,
+                        exclusions,
+                        comments,
+                        filing_id,
+                        generation_id,
+                        pd_generated_at,
+                        pd_generator_version,
+                        pd_warning_count,
+                        coverage_covered_count,
+                        coverage_partial_count,
+                        coverage_gap_count,
+                        coverage_not_applicable_count,
+                        validation_status,
+                        validation_pass_count,
+                        validation_warning_count,
+                        validation_fail_count,
+                    ),
                 )
                 row = cur.fetchone()
                 if not row:
@@ -694,7 +853,20 @@ def record_product_model_review_decision(
                     "decision": row[3],
                     "exclusions": row[4],
                     "comments": row[5],
-                    "created_at": row[6].isoformat() if getattr(row[6], "isoformat", None) else row[6],
+                    "filing_id": row[6],
+                    "generation_id": row[7],
+                    "pd_generated_at": row[8].isoformat() if getattr(row[8], "isoformat", None) else row[8],
+                    "pd_generator_version": row[9],
+                    "pd_warning_count": row[10],
+                    "coverage_covered_count": row[11],
+                    "coverage_partial_count": row[12],
+                    "coverage_gap_count": row[13],
+                    "coverage_not_applicable_count": row[14],
+                    "validation_status": row[15],
+                    "validation_pass_count": row[16],
+                    "validation_warning_count": row[17],
+                    "validation_fail_count": row[18],
+                    "created_at": row[19].isoformat() if getattr(row[19], "isoformat", None) else row[19],
                 }
     except Exception as exc:  # noqa: BLE001
         _note_failure(exc)

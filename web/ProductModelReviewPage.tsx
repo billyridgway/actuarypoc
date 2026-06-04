@@ -188,6 +188,19 @@ interface ProductModelReviewPageProps {
       exclusions?: string | null;
       comments?: string | null;
       created_at?: string | null;
+      filing_id?: string | null;
+      generation_id?: string | null;
+      pd_generated_at?: string | null;
+      pd_generator_version?: string | null;
+      pd_warning_count?: number | null;
+      coverage_covered_count?: number | null;
+      coverage_partial_count?: number | null;
+      coverage_gap_count?: number | null;
+      coverage_not_applicable_count?: number | null;
+      validation_status?: string | null;
+      validation_pass_count?: number | null;
+      validation_warning_count?: number | null;
+      validation_fail_count?: number | null;
     } | null;
     reviewProgress?: {
       filingContextEstablished?: boolean;
@@ -420,6 +433,23 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                   : "No decision recorded yet"}
               </td>
             </tr>
+            {lastDecision && lastDecision.decision && (
+              <tr>
+                <th>Decision context</th>
+                <td className="muted">
+                  Filing: {lastDecision.filing_id || reviewMeta?.filingId || "(unknown)"}; Generation: {lastDecision.generation_id || reviewMeta?.currentGeneration || "(unknown)"};
+                  {" "}ProductDefinition build: {lastDecision.pd_generated_at || "(n/a)"}
+                  {lastDecision.pd_generator_version && ` (generator ${lastDecision.pd_generator_version})`};
+                  {" "}Warnings: {lastDecision.pd_warning_count ?? productDefinitionBuild?.warningCount ?? 0};
+                  {" "}Validation: {lastDecision.validation_status || productDefinitionValidation?.status || "(n/a)"}
+                  {lastDecision.validation_pass_count != null
+                    ? ` [pass=${lastDecision.validation_pass_count}, warning=${lastDecision.validation_warning_count ?? 0}, fail=${lastDecision.validation_fail_count ?? 0}]`
+                    : productDefinitionValidation && productDefinitionValidation.summary
+                      ? ` [pass=${productDefinitionValidation.summary.pass}, warning=${productDefinitionValidation.summary.warning}, fail=${productDefinitionValidation.summary.fail}]`
+                      : ""}
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </section>

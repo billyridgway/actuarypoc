@@ -285,6 +285,19 @@ class ProductModelReviewDecisionResponse(BaseModel):  # type: ignore[misc]
     exclusions: Optional[str] = None
     comments: Optional[str] = None
     created_at: Optional[str] = None
+    filing_id: Optional[str] = None
+    generation_id: Optional[str] = None
+    pd_generated_at: Optional[str] = None
+    pd_generator_version: Optional[str] = None
+    pd_warning_count: Optional[int] = None
+    coverage_covered_count: Optional[int] = None
+    coverage_partial_count: Optional[int] = None
+    coverage_gap_count: Optional[int] = None
+    coverage_not_applicable_count: Optional[int] = None
+    validation_status: Optional[str] = None
+    validation_pass_count: Optional[int] = None
+    validation_warning_count: Optional[int] = None
+    validation_fail_count: Optional[int] = None
 
 
 class ProductReviewDraftRequest(BaseModel):  # type: ignore[misc]
@@ -2399,6 +2412,56 @@ def api_product_model_review_decision(product_code: str, payload: ProductModelRe
     exclusions = (payload.exclusions or "").strip() or None
     comments = (payload.comments or "").strip() or None
 
+    # Capture the current evidence context (filing/generation, ProductDefinition
+    # build, coverage summary, and validation summary) at decision time so that
+    # the approved "package" is clearly linked to the decision.
+    filing_id: Optional[str] = None
+    generation_id: Optional[str] = None
+    pd_generated_at: Optional[str] = None
+    pd_generator_version: Optional[str] = None
+    pd_warning_count: Optional[int] = None
+    coverage_covered_count: Optional[int] = None
+    coverage_partial_count: Optional[int] = None
+    coverage_gap_count: Optional[int] = None
+    coverage_not_applicable_count: Optional[int] = None
+    validation_status: Optional[str] = None
+    validation_pass_count: Optional[int] = None
+    validation_warning_count: Optional[int] = None
+    validation_fail_count: Optional[int] = None
+
+    try:
+        # For now the richer context is only implemented for P12TRF; other
+        # products keep the simpler decision record.
+        if product_code.strip().upper() == "P12TRF":
+            pmr = api_product_model_review_p12trf()
+            review_meta = pmr.get("reviewMeta") or {}
+            if isinstance(review_meta, dict):
+                filing_id = review_meta.get("filingId")
+                generation_id = review_meta.get("currentGeneration")
+                coverage_covered_count = review_meta.get("coverageCoveredCount")
+                coverage_partial_count = review_meta.get("coveragePartialCount")
+                coverage_gap_count = review_meta.get("coverageGapCount")
+                coverage_not_applicable_count = review_meta.get("coverageNotApplicableCount")
+
+            pd_build = pmr.get("productDefinitionBuild") or {}
+            if isinstance(pd_build, dict):
+                pd_generated_at = pd_build.get("generatedAt")
+                pd_generator_version = pd_build.get("generatorVersion")
+                pd_warning_count = pd_build.get("warningCount")
+
+            v = pmr.get("productDefinitionValidation") or None
+            if isinstance(v, dict):
+                validation_status = v.get("status")
+                summary = v.get("summary") or {}
+                if isinstance(summary, dict):
+                    validation_pass_count = summary.get("pass")
+                    validation_warning_count = summary.get("warning")
+                    validation_fail_count = summary.get("fail")
+    except Exception:
+        # Context is best-effort only; decision persistence should still work
+        # even if we cannot compute a full PMR payload.
+        pass
+
     # Best-effort Postgres persistence. If Postgres is not configured or
     # unavailable, we still return a 200-level response with the echoed
     # payload so that the UI remains responsive, but in the Pi cluster we
@@ -2409,6 +2472,19 @@ def api_product_model_review_decision(product_code: str, payload: ProductModelRe
         decision=decision,
         exclusions=exclusions,
         comments=comments,
+        filing_id=filing_id,
+        generation_id=generation_id,
+        pd_generated_at=pd_generated_at,
+        pd_generator_version=pd_generator_version,
+        pd_warning_count=pd_warning_count,
+        coverage_covered_count=coverage_covered_count,
+        coverage_partial_count=coverage_partial_count,
+        coverage_gap_count=coverage_gap_count,
+        coverage_not_applicable_count=coverage_not_applicable_count,
+        validation_status=validation_status,
+        validation_pass_count=validation_pass_count,
+        validation_warning_count=validation_warning_count,
+        validation_fail_count=validation_fail_count,
     )
 
     if rec is None:
@@ -2430,6 +2506,19 @@ def api_product_model_review_decision(product_code: str, payload: ProductModelRe
         exclusions=rec.get("exclusions", exclusions),
         comments=rec.get("comments", comments),
         created_at=str(rec.get("created_at")) if rec.get("created_at") is not None else None,
+        filing_id=rec.get("filing_id"),
+        generation_id=rec.get("generation_id"),
+        pd_generated_at=rec.get("pd_generated_at"),
+        pd_generator_version=rec.get("pd_generator_version"),
+        pd_warning_count=rec.get("pd_warning_count"),
+        coverage_covered_count=rec.get("coverage_covered_count"),
+        coverage_partial_count=rec.get("coverage_partial_count"),
+        coverage_gap_count=rec.get("coverage_gap_count"),
+        coverage_not_applicable_count=rec.get("coverage_not_applicable_count"),
+        validation_status=rec.get("validation_status"),
+        validation_pass_count=rec.get("validation_pass_count"),
+        validation_warning_count=rec.get("validation_warning_count"),
+        validation_fail_count=rec.get("validation_fail_count"),
     )
 
 
