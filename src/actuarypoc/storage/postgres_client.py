@@ -828,6 +828,15 @@ def record_product_model_review_decision(
             if conn is None:
                 return None
             with conn.cursor() as cur:
+                print(
+                    "[pmr_decision_db_debug] "
+                    f"product_code={product_code} "
+                    f"coverage_matrix_path={coverage_matrix_path} "
+                    f"coverage_matrix_hash={coverage_matrix_hash} "
+                    f"validation_report_path={validation_report_path} "
+                    f"validation_snapshot_hash={validation_snapshot_hash}",
+                    flush=True,
+                )
                 cur.execute(
                     """
                     INSERT INTO product_model_review_decisions (

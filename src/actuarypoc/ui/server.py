@@ -2674,6 +2674,16 @@ def api_product_model_review_decision(product_code: str, payload: ProductModelRe
                     status_code=500,
                     detail="PMR decision snapshot incomplete for P12TRF (expected coverage and validation artefacts)",
                 )
+
+            print(
+                "[pmr_decision_snapshot_debug] "
+                f"code_norm={code_norm} filing_norm={filing_norm} "
+                f"coverage_matrix_path={coverage_matrix_path} "
+                f"coverage_matrix_hash={coverage_matrix_hash} "
+                f"validation_report_path={validation_report_path} "
+                f"validation_snapshot_hash={validation_snapshot_hash}",
+                flush=True,
+            )
         except HTTPException:
             # Re-raise FastAPI HTTP errors untouched.
             raise
