@@ -847,7 +847,9 @@ def record_product_model_review_decision(
                         %s, %s,
                         %s, %s, %s,
                         %s, %s, %s, %s,
-                        %s, %s, %s, %s
+                        %s, %s, %s, %s,
+                        %s, %s, %s, %s,
+                        %s, %s
                     )
                     RETURNING id,
                               product_code,
