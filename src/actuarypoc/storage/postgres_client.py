@@ -127,6 +127,9 @@ CREATE TABLE IF NOT EXISTS product_model_review_decisions (
     validation_snapshot_hash text,
     coverage_matrix_path text,
     validation_report_path text,
+    bundle_path text,
+    bundle_hash text,
+    bundle_created_at timestamptz,
     created_at timestamptz DEFAULT now()
 );
 
@@ -212,6 +215,15 @@ ALTER TABLE product_model_review_decisions
 
 ALTER TABLE product_model_review_decisions
     ADD COLUMN IF NOT EXISTS validation_report_path text;
+
+ALTER TABLE product_model_review_decisions
+    ADD COLUMN IF NOT EXISTS bundle_path text;
+
+ALTER TABLE product_model_review_decisions
+    ADD COLUMN IF NOT EXISTS bundle_hash text;
+
+ALTER TABLE product_model_review_decisions
+    ADD COLUMN IF NOT EXISTS bundle_created_at timestamptz;
 """
 
 
@@ -738,6 +750,9 @@ def get_last_product_model_review_decision(product_code: str) -> Optional[Dict[s
                            build_report_hash,
                            coverage_matrix_hash,
                            validation_snapshot_hash,
+                           bundle_path,
+                           bundle_hash,
+                           bundle_created_at,
                            created_at,
                            coverage_matrix_path,
                            validation_report_path
@@ -777,9 +792,12 @@ def get_last_product_model_review_decision(product_code: str) -> Optional[Dict[s
                     "build_report_hash": row[22],
                     "coverage_matrix_hash": row[23],
                     "validation_snapshot_hash": row[24],
-                    "created_at": row[25].isoformat() if getattr(row[25], "isoformat", None) else row[25],
-                    "coverage_matrix_path": row[26],
-                    "validation_report_path": row[27],
+                    "bundle_path": row[25],
+                    "bundle_hash": row[26],
+                    "bundle_created_at": row[27].isoformat() if getattr(row[27], "isoformat", None) else row[27],
+                    "created_at": row[28].isoformat() if getattr(row[28], "isoformat", None) else row[28],
+                    "coverage_matrix_path": row[29],
+                    "validation_report_path": row[30],
                 }
     except Exception as exc:  # noqa: BLE001
         _note_failure(exc)
@@ -814,6 +832,9 @@ def record_product_model_review_decision(
     coverage_matrix_hash: str | None = None,
     validation_report_path: str | None = None,
     validation_snapshot_hash: str | None = None,
+    bundle_path: str | None = None,
+    bundle_hash: str | None = None,
+    bundle_created_at: str | None = None,
 ) -> Optional[Dict[str, Any]]:
     """Persist a Product Model Review decision, returning the stored row.
 
@@ -865,7 +886,10 @@ def record_product_model_review_decision(
                         coverage_matrix_path,
                         coverage_matrix_hash,
                         validation_report_path,
-                        validation_snapshot_hash
+                        validation_snapshot_hash,
+                        bundle_path,
+                        bundle_hash,
+                        bundle_created_at
                     )
                     VALUES (
                         %s, %s, %s, %s, %s,
@@ -903,6 +927,9 @@ def record_product_model_review_decision(
                               coverage_matrix_hash,
                               validation_report_path,
                               validation_snapshot_hash,
+                              bundle_path,
+                              bundle_hash,
+                              bundle_created_at,
                               created_at
                     """,
                     (
@@ -932,6 +959,9 @@ def record_product_model_review_decision(
                         coverage_matrix_hash,
                         validation_report_path,
                         validation_snapshot_hash,
+                        bundle_path,
+                        bundle_hash,
+                        bundle_created_at,
                     ),
                 )
                 row = cur.fetchone()
@@ -965,8 +995,69 @@ def record_product_model_review_decision(
                     "coverage_matrix_hash": row[24],
                     "validation_report_path": row[25],
                     "validation_snapshot_hash": row[26],
-                    "created_at": row[27].isoformat() if getattr(row[27], "isoformat", None) else row[27],
+                    "bundle_path": row[27],
+                    "bundle_hash": row[28],
+                    "bundle_created_at": row[29].isoformat() if getattr(row[29], "isoformat", None) else row[29],
+                    "created_at": row[30].isoformat() if getattr(row[30], "isoformat", None) else row[30],
                 }
     except Exception as exc:  # noqa: BLE001
         _note_failure(exc)
         return None
+
+
+def update_product_model_review_bundle(
+    decision_id: int,
+    *,
+    bundle_path: str,
+    bundle_hash: str,
+    bundle_created_at: str,
+) -> None:
+    """Update bundle metadata for an existing PMR decision row."""
+
+    ensure_schema()
+    try:
+        with _conn() as conn:
+            if conn is None:
+                return
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE product_model_review_decisions
+                       SET bundle_path = %s,
+                           bundle_hash = %s,
+                           bundle_created_at = %s
+                     WHERE id = %s
+                    """,
+                    (bundle_path, bundle_hash, bundle_created_at, decision_id),
+                )
+    except Exception as exc:  # noqa: BLE001
+        _note_failure(exc)
+
+
+def update_product_model_review_bundle(
+    decision_id: int,
+    *,
+    bundle_path: str,
+    bundle_hash: str,
+    bundle_created_at: str,
+) -> None:
+    """Update bundle metadata for an existing PMR decision row."""
+
+    ensure_schema()
+    try:
+        with _conn() as conn:
+            if conn is None:
+                return
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE product_model_review_decisions
+                       SET bundle_path = %s,
+                           bundle_hash = %s,
+                           bundle_created_at = %s
+                     WHERE id = %s
+                    """,
+                    (bundle_path, bundle_hash, bundle_created_at, decision_id),
+                )
+    except Exception as exc:  # noqa: BLE001
+        _note_failure(exc)

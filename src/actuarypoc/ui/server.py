@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import datetime
+import io
+import json
+import zipfile
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -28,6 +31,7 @@ from actuarypoc.storage.postgres_client import (
     record_document_upload,
     record_filing_rule_evidence,
     record_product_model_review_decision,
+    update_product_model_review_bundle,
     upsert_product_review_draft,
 )
 
@@ -317,6 +321,8 @@ class ProductModelReviewDecisionResponse(BaseModel):  # type: ignore[misc]
     coverage_matrix_hash: Optional[str] = None
     validation_report_path: Optional[str] = None
     validation_snapshot_hash: Optional[str] = None
+    bundle_path: Optional[str] = None
+    bundle_hash: Optional[str] = None
 
 
 class ProductReviewDraftRequest(BaseModel):  # type: ignore[misc]
@@ -2727,6 +2733,9 @@ def api_product_model_review_decision(product_code: str, payload: ProductModelRe
         validation_snapshot_hash=validation_snapshot_hash,
     )
 
+    # When Postgres persistence fails we still return a 200-level
+    # response with the computed context, but we cannot build an
+    # immutable evidence bundle without a stored decision ID.
     if rec is None:
         return ProductModelReviewDecisionResponse(
             id=None,
@@ -2757,7 +2766,115 @@ def api_product_model_review_decision(product_code: str, payload: ProductModelRe
             coverage_matrix_hash=coverage_matrix_hash,
             validation_report_path=validation_report_path,
             validation_snapshot_hash=validation_snapshot_hash,
+            bundle_path=None,
+            bundle_hash=None,
         )
+
+    # Build an immutable evidence bundle at decision time for P12TRF
+    # decisions. Best-effort: failures are logged but do not block the
+    # decision response.
+    bundle_path: Optional[str] = None
+    bundle_hash: Optional[str] = None
+    try:
+        if rec.get("product_code", "").strip().upper() == "P12TRF":
+            decision_id = rec.get("id")
+            filing_id_val = rec.get("filing_id") or filing_id
+            generation_val = rec.get("generation_id") or generation_id
+
+            if isinstance(decision_id, int) and isinstance(filing_id_val, str):
+                bucket = get_bucket_name()
+                minio_client = get_minio_client()
+                ensure_bucket(minio_client)
+
+                # Collect artefact bytes from MinIO using the paths
+                # recorded with the decision.
+                artefacts: Dict[str, bytes] = {}
+
+                def _read_bytes(key: Optional[str], label: str) -> None:
+                    if not key:
+                        return
+                    resp = minio_client.get_object(bucket, key)
+                    try:
+                        data = resp.read()
+                    finally:
+                        resp.close()
+                        resp.release_conn()
+                    artefacts[label] = data or b""
+
+                _read_bytes(rec.get("product_definition_path"), "product-definition.json")
+                _read_bytes(rec.get("build_report_path"), "build-report.json")
+                _read_bytes(rec.get("coverage_matrix_path"), "coverage-matrix.json")
+                _read_bytes(rec.get("validation_report_path"), "validation-report.json")
+
+                # decision.json – frozen view of the decision record.
+                decision_payload = {
+                    k: v
+                    for k, v in rec.items()
+                    if k not in {"created_at"}
+                }
+                artefacts["decision.json"] = json.dumps(
+                    decision_payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+
+                # manifest.json
+                manifest = {
+                    "bundleVersion": "v1",
+                    "productCode": rec.get("product_code", product_code),
+                    "filingId": filing_id_val,
+                    "decisionId": decision_id,
+                    "createdAt": rec.get("created_at") or datetime.utcnow().isoformat() + "Z",
+                    "generationId": generation_val,
+                }
+                artefacts["manifest.json"] = json.dumps(
+                    manifest,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+
+                # hashes.json – SHA256 for every file in the bundle.
+                hashes: Dict[str, str] = {}
+                for name, data in artefacts.items():
+                    hashes[name] = sha256(data).hexdigest()
+                artefacts["hashes.json"] = json.dumps(
+                    hashes,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+
+                # Build ZIP in-memory.
+                buf = io.BytesIO()
+                with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+                    for name, data in artefacts.items():
+                        zf.writestr(name, data)
+                bundle_bytes = buf.getvalue()
+                bundle_hash = sha256(bundle_bytes).hexdigest()
+                bundle_created_ts = datetime.utcnow().isoformat() + "Z"
+
+                bundle_path = f"evidence-bundles/{code_norm}/{decision_id}/bundle.zip"
+                minio_client.put_object(
+                    bucket,
+                    bundle_path,
+                    data=io.BytesIO(bundle_bytes),
+                    length=len(bundle_bytes),
+                    content_type="application/zip",
+                )
+
+                # Persist bundle metadata back to Postgres.
+                update_product_model_review_bundle(
+                    decision_id=decision_id,
+                    bundle_path=bundle_path,
+                    bundle_hash=bundle_hash,
+                    bundle_created_at=bundle_created_ts,
+                )
+    except Exception:
+        # Best-effort only; bundle generation and metadata persistence
+        # should not prevent the decision from being recorded.
+        pass
 
     return ProductModelReviewDecisionResponse(
         id=rec.get("id"),
@@ -2788,6 +2905,8 @@ def api_product_model_review_decision(product_code: str, payload: ProductModelRe
         coverage_matrix_hash=rec.get("coverage_matrix_hash"),
         validation_report_path=rec.get("validation_report_path"),
         validation_snapshot_hash=rec.get("validation_snapshot_hash"),
+        bundle_path=bundle_path or rec.get("bundle_path"),
+        bundle_hash=bundle_hash or rec.get("bundle_hash"),
     )
 
 

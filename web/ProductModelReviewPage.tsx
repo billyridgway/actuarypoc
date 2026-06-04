@@ -209,6 +209,8 @@ interface ProductModelReviewPageProps {
       coverage_matrix_hash?: string | null;
       validation_report_path?: string | null;
       validation_snapshot_hash?: string | null;
+      bundle_path?: string | null;
+      bundle_hash?: string | null;
     } | null;
     reviewProgress?: {
       filingContextEstablished?: boolean;
@@ -477,6 +479,18 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                         <span>(hash {shortenHash(lastDecision.validation_snapshot_hash)})</span>
                       </>
                     )}
+                  </div>
+                </td>
+              </tr>
+            )}
+            {lastDecision && (
+              <tr>
+                <th>Evidence Bundle</th>
+                <td className="muted">
+                  <div>Decision ID: {lastDecision.id ?? "(unknown)"}</div>
+                  <div>Bundle path: {lastDecision.bundle_path || "(not recorded)"}</div>
+                  <div>
+                    Bundle hash: {lastDecision.bundle_hash ? shortenHash(lastDecision.bundle_hash) : "(n/a)"}
                   </div>
                 </td>
               </tr>
