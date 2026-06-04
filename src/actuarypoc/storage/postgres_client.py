@@ -898,7 +898,8 @@ def record_product_model_review_decision(
                         %s, %s, %s, %s,
                         %s, %s, %s, %s,
                         %s, %s, %s, %s,
-                        %s, %s, %s, %s
+                        %s, %s, %s, %s,
+                        %s, %s, %s
                     )
                     RETURNING id,
                               product_code,
@@ -1003,35 +1004,6 @@ def record_product_model_review_decision(
     except Exception as exc:  # noqa: BLE001
         _note_failure(exc)
         return None
-
-
-def update_product_model_review_bundle(
-    decision_id: int,
-    *,
-    bundle_path: str,
-    bundle_hash: str,
-    bundle_created_at: str,
-) -> None:
-    """Update bundle metadata for an existing PMR decision row."""
-
-    ensure_schema()
-    try:
-        with _conn() as conn:
-            if conn is None:
-                return
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE product_model_review_decisions
-                       SET bundle_path = %s,
-                           bundle_hash = %s,
-                           bundle_created_at = %s
-                     WHERE id = %s
-                    """,
-                    (bundle_path, bundle_hash, bundle_created_at, decision_id),
-                )
-    except Exception as exc:  # noqa: BLE001
-        _note_failure(exc)
 
 
 def update_product_model_review_bundle(
