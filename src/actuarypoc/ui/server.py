@@ -1054,6 +1054,19 @@ def _build_p12trf_scenarios_and_rates() -> Dict[str, Any]:
     return {"scenarios": scenarios, "rates": rates}
 
 
+def _field(obj: Any, name: str, default: Any = None) -> Any:
+    """Safe field accessor for dicts and Pydantic models.
+
+    Handles both mapping-style objects (with .get) and attribute-style
+    objects (e.g. Pydantic BaseModel instances) so validation logic can
+    work against either dicts or strongly-typed models.
+    """
+
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
+
+
 def _validate_p12trf_product_definition(
     pd: Optional[ProductDefinitionV1],
     scenarios: List[Dict[str, Any]],
@@ -1280,8 +1293,8 @@ def _validate_p12trf_product_definition(
             )
 
     # Evidence references.
-    doc_paths_pd = {d.get("document_path") for d in (pd.source_documents or []) if d.get("document_path")}
-    doc_paths_docs = {d.get("object_path") for d in docs if d.get("object_path")}
+    doc_paths_pd = { _field(d, "document_path") for d in (pd.source_documents or []) if _field(d, "document_path") }
+    doc_paths_docs = { _field(d, "object_path") for d in docs if _field(d, "object_path") }
     doc_paths_all = {p for p in (doc_paths_pd | doc_paths_docs) if p}
 
     missing_doc_path = 0
