@@ -205,7 +205,9 @@ interface ProductModelReviewPageProps {
       product_definition_hash?: string | null;
       build_report_path?: string | null;
       build_report_hash?: string | null;
+      coverage_matrix_path?: string | null;
       coverage_matrix_hash?: string | null;
+      validation_report_path?: string | null;
       validation_snapshot_hash?: string | null;
     } | null;
     reviewProgress?: {
@@ -459,10 +461,22 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                     )}
                   </div>
                   <div>
-                    Coverage matrix hash: {shortenHash(lastDecision.coverage_matrix_hash) || "(n/a)"}
+                    Coverage matrix: {lastDecision.coverage_matrix_path || "(path not recorded)"}
+                    {lastDecision.coverage_matrix_hash && (
+                      <>
+                        {" "}
+                        <span>(hash {shortenHash(lastDecision.coverage_matrix_hash)})</span>
+                      </>
+                    )}
                   </div>
                   <div>
-                    Validation snapshot hash: {shortenHash(lastDecision.validation_snapshot_hash) || "(n/a)"}
+                    Validation report: {lastDecision.validation_report_path || "(path not recorded)"}
+                    {lastDecision.validation_snapshot_hash && (
+                      <>
+                        {" "}
+                        <span>(hash {shortenHash(lastDecision.validation_snapshot_hash)})</span>
+                      </>
+                    )}
                   </div>
                 </td>
               </tr>

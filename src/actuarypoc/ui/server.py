@@ -77,6 +77,14 @@ def _product_definition_build_report_key(product_code: str, filing_id: str) -> s
     return f"product-definitions/{product_code.upper()}/{filing_id}/build-report.json"
 
 
+def _coverage_matrix_object_key(product_code: str, filing_id: str) -> str:
+    return f"product-definitions/{product_code.upper()}/{filing_id}/coverage-matrix.json"
+
+
+def _validation_report_object_key(product_code: str, filing_id: str) -> str:
+    return f"product-definitions/{product_code.upper()}/{filing_id}/validation-report.json"
+
+
 def _load_or_seed_product_definition(product_code: str, filing_id: str) -> Optional[ProductDefinitionV1]:
     """Best-effort load of a ProductDefinition artefact for (product, filing).
 
@@ -305,7 +313,9 @@ class ProductModelReviewDecisionResponse(BaseModel):  # type: ignore[misc]
     product_definition_hash: Optional[str] = None
     build_report_path: Optional[str] = None
     build_report_hash: Optional[str] = None
+    coverage_matrix_path: Optional[str] = None
     coverage_matrix_hash: Optional[str] = None
+    validation_report_path: Optional[str] = None
     validation_snapshot_hash: Optional[str] = None
 
 
@@ -2461,7 +2471,9 @@ def api_product_model_review_decision(product_code: str, payload: ProductModelRe
     product_definition_hash: Optional[str] = None
     build_report_path: Optional[str] = None
     build_report_hash: Optional[str] = None
+    coverage_matrix_path: Optional[str] = None
     coverage_matrix_hash: Optional[str] = None
+    validation_report_path: Optional[str] = None
     validation_snapshot_hash: Optional[str] = None
 
     try:
@@ -2494,7 +2506,7 @@ def api_product_model_review_decision(product_code: str, payload: ProductModelRe
                     validation_fail_count = summary.get("fail")
 
             # Immutable evidence snapshot fields: capture the exact
-            # ProductDefinition/build artefacts and canonical hashes for
+            # ProductDefinition/build artefacts and stable snapshots for
             # coverageMatrix and productDefinitionValidation.
             try:
                 # Resolve artefact paths from the current filing context.
@@ -2540,15 +2552,47 @@ def api_product_model_review_decision(product_code: str, payload: ProductModelRe
                     except Exception:
                         pass
 
-                # Canonical JSON hashes for coverageMatrix and
-                # productDefinitionValidation snapshots at decision time.
+                # Persist coverageMatrix and validation snapshots as
+                # their own MinIO artefacts when available, and compute
+                # SHA256 hashes from the exact bytes written.
+                import io
+                import json
+
                 coverage_matrix = pmr.get("coverageMatrix")
-                if coverage_matrix is not None:
-                    coverage_matrix_hash = _canonical_json_sha256(coverage_matrix)
+                if filing_norm and coverage_matrix is not None:
+                    coverage_matrix_path = _coverage_matrix_object_key(code_norm, filing_norm)
+                    try:
+                        body = json.dumps(coverage_matrix, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+                        minio_client.put_object(
+                            bucket,
+                            coverage_matrix_path,
+                            data=io.BytesIO(body),
+                            length=len(body),
+                            content_type="application/json",
+                        )
+                        coverage_matrix_hash = sha256(body).hexdigest()
+                    except Exception:
+                        # Best-effort only; leave path/hash as None when
+                        # snapshot persistence fails.
+                        coverage_matrix_path = None
+                        coverage_matrix_hash = None
 
                 validation_snapshot = pmr.get("productDefinitionValidation")
-                if validation_snapshot is not None:
-                    validation_snapshot_hash = _canonical_json_sha256(validation_snapshot)
+                if filing_norm and validation_snapshot is not None:
+                    validation_report_path = _validation_report_object_key(code_norm, filing_norm)
+                    try:
+                        body = json.dumps(validation_snapshot, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+                        minio_client.put_object(
+                            bucket,
+                            validation_report_path,
+                            data=io.BytesIO(body),
+                            length=len(body),
+                            content_type="application/json",
+                        )
+                        validation_snapshot_hash = sha256(body).hexdigest()
+                    except Exception:
+                        validation_report_path = None
+                        validation_snapshot_hash = None
             except Exception:
                 # Evidence snapshot is best-effort; keep decision
                 # recording resilient to transient MinIO/JSON issues.
@@ -2615,7 +2659,9 @@ def api_product_model_review_decision(product_code: str, payload: ProductModelRe
             product_definition_hash=product_definition_hash,
             build_report_path=build_report_path,
             build_report_hash=build_report_hash,
+            coverage_matrix_path=coverage_matrix_path,
             coverage_matrix_hash=coverage_matrix_hash,
+            validation_report_path=validation_report_path,
             validation_snapshot_hash=validation_snapshot_hash,
         )
 
@@ -2644,7 +2690,9 @@ def api_product_model_review_decision(product_code: str, payload: ProductModelRe
         product_definition_hash=rec.get("product_definition_hash"),
         build_report_path=rec.get("build_report_path"),
         build_report_hash=rec.get("build_report_hash"),
+        coverage_matrix_path=rec.get("coverage_matrix_path"),
         coverage_matrix_hash=rec.get("coverage_matrix_hash"),
+        validation_report_path=rec.get("validation_report_path"),
         validation_snapshot_hash=rec.get("validation_snapshot_hash"),
     )
 

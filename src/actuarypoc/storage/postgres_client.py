@@ -125,6 +125,8 @@ CREATE TABLE IF NOT EXISTS product_model_review_decisions (
     build_report_hash text,
     coverage_matrix_hash text,
     validation_snapshot_hash text,
+    coverage_matrix_path text,
+    validation_report_path text,
     created_at timestamptz DEFAULT now()
 );
 
@@ -204,6 +206,12 @@ ALTER TABLE product_model_review_decisions
 
 ALTER TABLE product_model_review_decisions
     ADD COLUMN IF NOT EXISTS validation_snapshot_hash text;
+
+ALTER TABLE product_model_review_decisions
+    ADD COLUMN IF NOT EXISTS coverage_matrix_path text;
+
+ALTER TABLE product_model_review_decisions
+    ADD COLUMN IF NOT EXISTS validation_report_path text;
 """
 
 
@@ -730,7 +738,9 @@ def get_last_product_model_review_decision(product_code: str) -> Optional[Dict[s
                            build_report_hash,
                            coverage_matrix_hash,
                            validation_snapshot_hash,
-                           created_at
+                           created_at,
+                           coverage_matrix_path,
+                           validation_report_path
                       FROM product_model_review_decisions
                      WHERE product_code = %s
                      ORDER BY created_at DESC, id DESC
@@ -768,6 +778,8 @@ def get_last_product_model_review_decision(product_code: str) -> Optional[Dict[s
                     "coverage_matrix_hash": row[23],
                     "validation_snapshot_hash": row[24],
                     "created_at": row[25].isoformat() if getattr(row[25], "isoformat", None) else row[25],
+                    "coverage_matrix_path": row[26],
+                    "validation_report_path": row[27],
                 }
     except Exception as exc:  # noqa: BLE001
         _note_failure(exc)
@@ -798,7 +810,9 @@ def record_product_model_review_decision(
     product_definition_hash: str | None = None,
     build_report_path: str | None = None,
     build_report_hash: str | None = None,
+    coverage_matrix_path: str | None = None,
     coverage_matrix_hash: str | None = None,
+    validation_report_path: str | None = None,
     validation_snapshot_hash: str | None = None,
 ) -> Optional[Dict[str, Any]]:
     """Persist a Product Model Review decision, returning the stored row.
@@ -839,7 +853,9 @@ def record_product_model_review_decision(
                         product_definition_hash,
                         build_report_path,
                         build_report_hash,
+                        coverage_matrix_path,
                         coverage_matrix_hash,
+                        validation_report_path,
                         validation_snapshot_hash
                     )
                     VALUES (
@@ -849,7 +865,7 @@ def record_product_model_review_decision(
                         %s, %s, %s, %s,
                         %s, %s, %s, %s,
                         %s, %s, %s, %s,
-                        %s, %s
+                        %s, %s, %s, %s
                     )
                     RETURNING id,
                               product_code,
@@ -874,7 +890,9 @@ def record_product_model_review_decision(
                               product_definition_hash,
                               build_report_path,
                               build_report_hash,
+                              coverage_matrix_path,
                               coverage_matrix_hash,
+                              validation_report_path,
                               validation_snapshot_hash,
                               created_at
                     """,
@@ -901,7 +919,9 @@ def record_product_model_review_decision(
                         product_definition_hash,
                         build_report_path,
                         build_report_hash,
+                        coverage_matrix_path,
                         coverage_matrix_hash,
+                        validation_report_path,
                         validation_snapshot_hash,
                     ),
                 )
@@ -932,9 +952,11 @@ def record_product_model_review_decision(
                     "product_definition_hash": row[20],
                     "build_report_path": row[21],
                     "build_report_hash": row[22],
-                    "coverage_matrix_hash": row[23],
-                    "validation_snapshot_hash": row[24],
-                    "created_at": row[25].isoformat() if getattr(row[25], "isoformat", None) else row[25],
+                    "coverage_matrix_path": row[23],
+                    "coverage_matrix_hash": row[24],
+                    "validation_report_path": row[25],
+                    "validation_snapshot_hash": row[26],
+                    "created_at": row[27].isoformat() if getattr(row[27], "isoformat", None) else row[27],
                 }
     except Exception as exc:  # noqa: BLE001
         _note_failure(exc)
