@@ -201,6 +201,12 @@ interface ProductModelReviewPageProps {
       validation_pass_count?: number | null;
       validation_warning_count?: number | null;
       validation_fail_count?: number | null;
+      product_definition_path?: string | null;
+      product_definition_hash?: string | null;
+      build_report_path?: string | null;
+      build_report_hash?: string | null;
+      coverage_matrix_hash?: string | null;
+      validation_snapshot_hash?: string | null;
     } | null;
     reviewProgress?: {
       filingContextEstablished?: boolean;
@@ -234,6 +240,11 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
   );
   const selectedScenario =
     scenarios.find((s) => s.id === selectedScenarioId) || (scenarios.length > 0 ? scenarios[0] : null);
+
+  const shortenHash = (hash?: string | null, length = 8): string | null => {
+    if (!hash) return null;
+    return hash.length > length ? hash.slice(0, length) : hash;
+  };
 
   const normaliseInputs = (inputs: any) => {
     const age = inputs && inputs.age !== undefined ? inputs.age : "unknown";
@@ -425,6 +436,37 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                 {(reviewMeta?.coverageCoveredCount ?? 0)} covered, {(reviewMeta?.coveragePartialCount ?? 0)} partial, {(reviewMeta?.coverageGapCount ?? 0)} gap
               </td>
             </tr>
+            {lastDecision && (
+              <tr>
+                <th>Evidence Snapshot</th>
+                <td className="muted">
+                  <div>
+                    ProductDefinition: {lastDecision.product_definition_path || "(path not recorded)"}
+                    {lastDecision.product_definition_hash && (
+                      <>
+                        {" "}
+                        <span>(hash {shortenHash(lastDecision.product_definition_hash)})</span>
+                      </>
+                    )}
+                  </div>
+                  <div>
+                    Build report: {lastDecision.build_report_path || "(path not recorded)"}
+                    {lastDecision.build_report_hash && (
+                      <>
+                        {" "}
+                        <span>(hash {shortenHash(lastDecision.build_report_hash)})</span>
+                      </>
+                    )}
+                  </div>
+                  <div>
+                    Coverage matrix hash: {shortenHash(lastDecision.coverage_matrix_hash) || "(n/a)"}
+                  </div>
+                  <div>
+                    Validation snapshot hash: {shortenHash(lastDecision.validation_snapshot_hash) || "(n/a)"}
+                  </div>
+                </td>
+              </tr>
+            )}
             <tr>
               <th>Decision status</th>
               <td>

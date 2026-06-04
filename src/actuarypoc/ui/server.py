@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import datetime
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -299,6 +300,14 @@ class ProductModelReviewDecisionResponse(BaseModel):  # type: ignore[misc]
     validation_warning_count: Optional[int] = None
     validation_fail_count: Optional[int] = None
 
+    # Immutable evidence snapshot fields
+    product_definition_path: Optional[str] = None
+    product_definition_hash: Optional[str] = None
+    build_report_path: Optional[str] = None
+    build_report_hash: Optional[str] = None
+    coverage_matrix_hash: Optional[str] = None
+    validation_snapshot_hash: Optional[str] = None
+
 
 class ProductReviewDraftRequest(BaseModel):  # type: ignore[misc]
     carrier_name: str
@@ -334,6 +343,23 @@ _ALLOWED_PMR_DECISIONS = {
     "request_changes",
     "reject",
 }
+
+
+def _canonical_json_sha256(obj: Any) -> Optional[str]:
+    """Return a stable SHA256 hash for a JSON-serialisable object.
+
+    Uses sorted keys and compact separators so that semantically identical
+    structures produce the same hash regardless of key order or
+    whitespace. When the object cannot be serialised, returns None.
+    """
+
+    try:
+        import json
+
+        payload = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    except Exception:
+        return None
+    return sha256(payload).hexdigest()
 
 
 def _load_p12trf_definition() -> Dict[str, Any]:
@@ -2429,6 +2455,15 @@ def api_product_model_review_decision(product_code: str, payload: ProductModelRe
     validation_warning_count: Optional[int] = None
     validation_fail_count: Optional[int] = None
 
+    # Immutable evidence snapshot fields (best-effort; populated for
+    # P12TRF when artefacts are available).
+    product_definition_path: Optional[str] = None
+    product_definition_hash: Optional[str] = None
+    build_report_path: Optional[str] = None
+    build_report_hash: Optional[str] = None
+    coverage_matrix_hash: Optional[str] = None
+    validation_snapshot_hash: Optional[str] = None
+
     try:
         # For now the richer context is only implemented for P12TRF; other
         # products keep the simpler decision record.
@@ -2457,6 +2492,67 @@ def api_product_model_review_decision(product_code: str, payload: ProductModelRe
                     validation_pass_count = summary.get("pass")
                     validation_warning_count = summary.get("warning")
                     validation_fail_count = summary.get("fail")
+
+            # Immutable evidence snapshot fields: capture the exact
+            # ProductDefinition/build artefacts and canonical hashes for
+            # coverageMatrix and productDefinitionValidation.
+            try:
+                # Resolve artefact paths from the current filing context.
+                if isinstance(filing_id, str):
+                    filing_norm = filing_id.strip()
+                else:
+                    filing_norm = None
+
+                code_norm = product_code.strip().upper()
+                if filing_norm:
+                    product_definition_path = _product_definition_object_key(code_norm, filing_norm)
+                    build_report_path = _product_definition_build_report_key(code_norm, filing_norm)
+
+                    minio_client = get_minio_client()
+                    ensure_bucket(minio_client)
+                    bucket = get_bucket_name()
+
+                    # Hash exact JSON bytes for ProductDefinition.
+                    try:
+                        response = minio_client.get_object(bucket, product_definition_path)
+                        try:
+                            body = response.read()
+                            if body:
+                                product_definition_hash = sha256(body).hexdigest()
+                        finally:
+                            response.close()
+                            response.release_conn()
+                    except Exception:
+                        # Best-effort only; missing artefacts should not
+                        # block decision capture.
+                        pass
+
+                    # Hash exact JSON bytes for build-report.
+                    try:
+                        response = minio_client.get_object(bucket, build_report_path)
+                        try:
+                            body = response.read()
+                            if body:
+                                build_report_hash = sha256(body).hexdigest()
+                        finally:
+                            response.close()
+                            response.release_conn()
+                    except Exception:
+                        pass
+
+                # Canonical JSON hashes for coverageMatrix and
+                # productDefinitionValidation snapshots at decision time.
+                coverage_matrix = pmr.get("coverageMatrix")
+                if coverage_matrix is not None:
+                    coverage_matrix_hash = _canonical_json_sha256(coverage_matrix)
+
+                validation_snapshot = pmr.get("productDefinitionValidation")
+                if validation_snapshot is not None:
+                    validation_snapshot_hash = _canonical_json_sha256(validation_snapshot)
+            except Exception:
+                # Evidence snapshot is best-effort; keep decision
+                # recording resilient to transient MinIO/JSON issues.
+                pass
     except Exception:
         # Context is best-effort only; decision persistence should still work
         # even if we cannot compute a full PMR payload.
@@ -2485,6 +2581,12 @@ def api_product_model_review_decision(product_code: str, payload: ProductModelRe
         validation_pass_count=validation_pass_count,
         validation_warning_count=validation_warning_count,
         validation_fail_count=validation_fail_count,
+        product_definition_path=product_definition_path,
+        product_definition_hash=product_definition_hash,
+        build_report_path=build_report_path,
+        build_report_hash=build_report_hash,
+        coverage_matrix_hash=coverage_matrix_hash,
+        validation_snapshot_hash=validation_snapshot_hash,
     )
 
     if rec is None:
@@ -2496,6 +2598,25 @@ def api_product_model_review_decision(product_code: str, payload: ProductModelRe
             exclusions=exclusions,
             comments=comments,
             created_at=None,
+            filing_id=filing_id,
+            generation_id=generation_id,
+            pd_generated_at=pd_generated_at,
+            pd_generator_version=pd_generator_version,
+            pd_warning_count=pd_warning_count,
+            coverage_covered_count=coverage_covered_count,
+            coverage_partial_count=coverage_partial_count,
+            coverage_gap_count=coverage_gap_count,
+            coverage_not_applicable_count=coverage_not_applicable_count,
+            validation_status=validation_status,
+            validation_pass_count=validation_pass_count,
+            validation_warning_count=validation_warning_count,
+            validation_fail_count=validation_fail_count,
+            product_definition_path=product_definition_path,
+            product_definition_hash=product_definition_hash,
+            build_report_path=build_report_path,
+            build_report_hash=build_report_hash,
+            coverage_matrix_hash=coverage_matrix_hash,
+            validation_snapshot_hash=validation_snapshot_hash,
         )
 
     return ProductModelReviewDecisionResponse(
@@ -2519,6 +2640,12 @@ def api_product_model_review_decision(product_code: str, payload: ProductModelRe
         validation_pass_count=rec.get("validation_pass_count"),
         validation_warning_count=rec.get("validation_warning_count"),
         validation_fail_count=rec.get("validation_fail_count"),
+        product_definition_path=rec.get("product_definition_path"),
+        product_definition_hash=rec.get("product_definition_hash"),
+        build_report_path=rec.get("build_report_path"),
+        build_report_hash=rec.get("build_report_hash"),
+        coverage_matrix_hash=rec.get("coverage_matrix_hash"),
+        validation_snapshot_hash=rec.get("validation_snapshot_hash"),
     )
 
 

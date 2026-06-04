@@ -119,6 +119,12 @@ CREATE TABLE IF NOT EXISTS product_model_review_decisions (
     validation_pass_count integer,
     validation_warning_count integer,
     validation_fail_count integer,
+    product_definition_path text,
+    product_definition_hash text,
+    build_report_path text,
+    build_report_hash text,
+    coverage_matrix_hash text,
+    validation_snapshot_hash text,
     created_at timestamptz DEFAULT now()
 );
 
@@ -180,6 +186,24 @@ ALTER TABLE product_model_review_decisions
 
 ALTER TABLE product_model_review_decisions
     ADD COLUMN IF NOT EXISTS validation_fail_count integer;
+
+ALTER TABLE product_model_review_decisions
+    ADD COLUMN IF NOT EXISTS product_definition_path text;
+
+ALTER TABLE product_model_review_decisions
+    ADD COLUMN IF NOT EXISTS product_definition_hash text;
+
+ALTER TABLE product_model_review_decisions
+    ADD COLUMN IF NOT EXISTS build_report_path text;
+
+ALTER TABLE product_model_review_decisions
+    ADD COLUMN IF NOT EXISTS build_report_hash text;
+
+ALTER TABLE product_model_review_decisions
+    ADD COLUMN IF NOT EXISTS coverage_matrix_hash text;
+
+ALTER TABLE product_model_review_decisions
+    ADD COLUMN IF NOT EXISTS validation_snapshot_hash text;
 """
 
 
@@ -700,6 +724,12 @@ def get_last_product_model_review_decision(product_code: str) -> Optional[Dict[s
                            validation_pass_count,
                            validation_warning_count,
                            validation_fail_count,
+                           product_definition_path,
+                           product_definition_hash,
+                           build_report_path,
+                           build_report_hash,
+                           coverage_matrix_hash,
+                           validation_snapshot_hash,
                            created_at
                       FROM product_model_review_decisions
                      WHERE product_code = %s
@@ -731,7 +761,13 @@ def get_last_product_model_review_decision(product_code: str) -> Optional[Dict[s
                     "validation_pass_count": row[16],
                     "validation_warning_count": row[17],
                     "validation_fail_count": row[18],
-                    "created_at": row[19].isoformat() if getattr(row[19], "isoformat", None) else row[19],
+                    "product_definition_path": row[19],
+                    "product_definition_hash": row[20],
+                    "build_report_path": row[21],
+                    "build_report_hash": row[22],
+                    "coverage_matrix_hash": row[23],
+                    "validation_snapshot_hash": row[24],
+                    "created_at": row[25].isoformat() if getattr(row[25], "isoformat", None) else row[25],
                 }
     except Exception as exc:  # noqa: BLE001
         _note_failure(exc)
@@ -758,6 +794,12 @@ def record_product_model_review_decision(
     validation_pass_count: int | None = None,
     validation_warning_count: int | None = None,
     validation_fail_count: int | None = None,
+    product_definition_path: str | None = None,
+    product_definition_hash: str | None = None,
+    build_report_path: str | None = None,
+    build_report_hash: str | None = None,
+    coverage_matrix_hash: str | None = None,
+    validation_snapshot_hash: str | None = None,
 ) -> Optional[Dict[str, Any]]:
     """Persist a Product Model Review decision, returning the stored row.
 
@@ -792,7 +834,13 @@ def record_product_model_review_decision(
                         validation_status,
                         validation_pass_count,
                         validation_warning_count,
-                        validation_fail_count
+                        validation_fail_count,
+                        product_definition_path,
+                        product_definition_hash,
+                        build_report_path,
+                        build_report_hash,
+                        coverage_matrix_hash,
+                        validation_snapshot_hash
                     )
                     VALUES (
                         %s, %s, %s, %s, %s,
@@ -820,6 +868,12 @@ def record_product_model_review_decision(
                               validation_pass_count,
                               validation_warning_count,
                               validation_fail_count,
+                              product_definition_path,
+                              product_definition_hash,
+                              build_report_path,
+                              build_report_hash,
+                              coverage_matrix_hash,
+                              validation_snapshot_hash,
                               created_at
                     """,
                     (
@@ -841,6 +895,12 @@ def record_product_model_review_decision(
                         validation_pass_count,
                         validation_warning_count,
                         validation_fail_count,
+                        product_definition_path,
+                        product_definition_hash,
+                        build_report_path,
+                        build_report_hash,
+                        coverage_matrix_hash,
+                        validation_snapshot_hash,
                     ),
                 )
                 row = cur.fetchone()
@@ -866,7 +926,13 @@ def record_product_model_review_decision(
                     "validation_pass_count": row[16],
                     "validation_warning_count": row[17],
                     "validation_fail_count": row[18],
-                    "created_at": row[19].isoformat() if getattr(row[19], "isoformat", None) else row[19],
+                    "product_definition_path": row[19],
+                    "product_definition_hash": row[20],
+                    "build_report_path": row[21],
+                    "build_report_hash": row[22],
+                    "coverage_matrix_hash": row[23],
+                    "validation_snapshot_hash": row[24],
+                    "created_at": row[25].isoformat() if getattr(row[25], "isoformat", None) else row[25],
                 }
     except Exception as exc:  # noqa: BLE001
         _note_failure(exc)
