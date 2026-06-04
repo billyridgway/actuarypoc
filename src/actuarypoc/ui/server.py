@@ -2721,7 +2721,9 @@ def api_product_model_review_decision(product_code: str, payload: ProductModelRe
         product_definition_hash=product_definition_hash,
         build_report_path=build_report_path,
         build_report_hash=build_report_hash,
+        coverage_matrix_path=coverage_matrix_path,
         coverage_matrix_hash=coverage_matrix_hash,
+        validation_report_path=validation_report_path,
         validation_snapshot_hash=validation_snapshot_hash,
     )
 
