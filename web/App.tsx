@@ -23,7 +23,7 @@ export const App: React.FC = () => {
     const fetchData = async () => {
       // The onboarding flow has its own data fetching; keep the shared
       // bootstrap simple and skip backend calls for that view.
-      if (view === "create-review" || view === "home") {
+      if (view === "create-review") {
         setRunDetail(null);
         setProductReview(null);
         setError(null);
@@ -35,9 +35,10 @@ export const App: React.FC = () => {
       try {
         setError(null);
 
-        // POC: when view=product-model, load the static P12TRF product model
-        // review JSON. Otherwise, fall back to the existing RunDetail flow.
-        if (view === "product-model") {
+        // When view is "product-model" or "home", load the current
+        // Product Model Review snapshot. Otherwise, fall back to the
+        // existing RunDetail flow.
+        if (view === "product-model" || view === "home") {
           const res = await fetch("/api/product-model-review/p12trf");
           if (!res.ok) {
             throw new Error(`HTTP ${res.status}`);
@@ -74,7 +75,7 @@ export const App: React.FC = () => {
     }
 
     if (view === "home") {
-      return <HomePage />;
+      return <HomePage productReview={productReview} />;
     }
 
     if (view === "create-review") {
@@ -111,7 +112,17 @@ export const App: React.FC = () => {
 };
 
 
-const HomePage: React.FC = () => {
+const HomePage: React.FC<{ productReview: ProductModelReview | null }> = ({ productReview }) => {
+  const anyReview: any = productReview;
+  const lastDecision = anyReview?.lastDecision;
+  const reviewMeta = anyReview?.reviewMeta;
+  const validation = anyReview?.productDefinitionValidation;
+
+  const shortenHash = (hash?: string | null, length = 8): string | null => {
+    if (!hash) return null;
+    return hash.length > length ? hash.slice(0, length) : hash;
+  };
+
   return (
     <div className="home-page">
       <h1>ActuaryPOC – Home</h1>
@@ -119,6 +130,86 @@ const HomePage: React.FC = () => {
         Welcome to the ActuaryPOC dashboard. Start with a new Product Review, inspect the Trust Surface, or drill into
         individual illustration runs.
       </p>
+
+      <section className="card home-card">
+        <h2>Current Product Model Review Status (P12TRF)</h2>
+        {productReview ? (
+          <>
+            <p className="muted">
+              Snapshot from <code>/api/product-model-review/p12trf</code>. For full details, open the Trust Surface.
+            </p>
+            <table className="kv-table">
+              <tbody>
+                <tr>
+                  <th>Current filing</th>
+                  <td>{reviewMeta?.filingId || "(not set)"}</td>
+                </tr>
+                <tr>
+                  <th>Current generation</th>
+                  <td>{reviewMeta?.currentGeneration || "(not set)"}</td>
+                </tr>
+                <tr>
+                  <th>Validation status</th>
+                  <td>
+                    {lastDecision?.validation_status
+                      || validation?.status
+                      || "(unknown)"}
+                    {lastDecision?.validation_pass_count != null && (
+                      <span className="muted">
+                        {" "}[pass={lastDecision.validation_pass_count}, warning=
+                        {lastDecision.validation_warning_count ?? 0}, fail=
+                        {lastDecision.validation_fail_count ?? 0}]
+                      </span>
+                    )}
+                  </td>
+                </tr>
+                <tr>
+                  <th>Latest decision</th>
+                  <td>
+                    {lastDecision?.id != null ? (
+                      <>
+                        #{lastDecision.id} – {lastDecision.decision || "(no label)"} by {lastDecision.reviewer || "(unknown)"}
+                        {lastDecision.created_at && (
+                          <span className="muted"> at {lastDecision.created_at}</span>
+                        )}
+                      </>
+                    ) : (
+                      <span className="muted">No decisions recorded yet.</span>
+                    )}
+                  </td>
+                </tr>
+                <tr>
+                  <th>Latest bundle</th>
+                  <td>
+                    {lastDecision?.bundle_path ? (
+                      <>
+                        <div>Path: {lastDecision.bundle_path}</div>
+                        <div>
+                          Hash: {lastDecision.bundle_hash ? shortenHash(lastDecision.bundle_hash, 12) : "(n/a)"}
+                          {lastDecision.bundle_hash && (
+                            <span className="muted"> ({lastDecision.bundle_hash})</span>
+                          )}
+                        </div>
+                      </>
+                    ) : (
+                      <span className="muted">No evidence bundle recorded for the latest decision.</span>
+                    )}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            <p>
+              <a href="/web?view=product-model" className="button">
+                Open Trust Surface
+              </a>
+            </p>
+          </>
+        ) : (
+          <p className="muted">
+            No Product Model Review data is available yet. Generate a review from the Create Product Review flow.
+          </p>
+        )}
+      </section>
 
       <div className="home-grid">
         <section className="card home-card">
