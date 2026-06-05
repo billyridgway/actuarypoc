@@ -25,6 +25,7 @@ from actuarypoc.projection.premium import PremiumLookupService, build_premium_ta
 from actuarypoc.projection.service import store_projection
 from actuarypoc.storage.postgres_client import (
     get_last_product_model_review_decision,
+    list_product_model_review_decisions,
     get_product_review,
     list_filing_rule_evidence,
     list_product_documents,
@@ -2285,8 +2286,10 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
     # complete this review feels from a workflow perspective.
     try:
         last_decision = get_last_product_model_review_decision(product_block["code"])
+        decision_history = list_product_model_review_decisions(product_block["code"])
     except Exception:
         last_decision = None
+        decision_history = []
 
     completed_steps = 0
     total_steps = 6
@@ -2324,6 +2327,7 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
         "reviewMeta": review_meta,
         "documents": documents_payload,
         "lastDecision": last_decision,
+        "decisionHistory": decision_history,
         "reviewProgress": review_progress,
         "productDefinition": product_definition_summary,
         "productDefinitionBuild": product_definition_build,

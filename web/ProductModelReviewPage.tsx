@@ -212,6 +212,39 @@ interface ProductModelReviewPageProps {
       bundle_path?: string | null;
       bundle_hash?: string | null;
     } | null;
+    decisionHistory?: {
+      id?: number | string;
+      product_code?: string | null;
+      reviewer?: string | null;
+      decision?: string | null;
+      exclusions?: string | null;
+      comments?: string | null;
+      created_at?: string | null;
+      filing_id?: string | null;
+      generation_id?: string | null;
+      pd_generated_at?: string | null;
+      pd_generator_version?: string | null;
+      pd_warning_count?: number | null;
+      coverage_covered_count?: number | null;
+      coverage_partial_count?: number | null;
+      coverage_gap_count?: number | null;
+      coverage_not_applicable_count?: number | null;
+      validation_status?: string | null;
+      validation_pass_count?: number | null;
+      validation_warning_count?: number | null;
+      validation_fail_count?: number | null;
+      product_definition_path?: string | null;
+      product_definition_hash?: string | null;
+      build_report_path?: string | null;
+      build_report_hash?: string | null;
+      coverage_matrix_path?: string | null;
+      coverage_matrix_hash?: string | null;
+      validation_report_path?: string | null;
+      validation_snapshot_hash?: string | null;
+      bundle_path?: string | null;
+      bundle_hash?: string | null;
+      bundle_created_at?: string | null;
+    }[];
     reviewProgress?: {
       filingContextEstablished?: boolean;
       documentsUploaded?: boolean;
@@ -226,7 +259,24 @@ interface ProductModelReviewPageProps {
 }
 
 export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ review }) => {
-  const { product, scope, traceability, rates, scenarios, assumptions, gaps, reviewMeta, documents, lastDecision, reviewProgress, productDefinition, coverageMatrix, productDefinitionBuild, productDefinitionValidation } = review;
+  const {
+    product,
+    scope,
+    traceability,
+    rates,
+    scenarios,
+    assumptions,
+    gaps,
+    reviewMeta,
+    documents,
+    lastDecision,
+    decisionHistory,
+    reviewProgress,
+    productDefinition,
+    coverageMatrix,
+    productDefinitionBuild,
+    productDefinitionValidation,
+  } = review;
 
   const totalScenarios = scenarios.length;
   const scenarioPassCount = scenarios.filter((s) => s.status.toLowerCase() === "pass").length;
@@ -523,6 +573,80 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
           </tbody>
         </table>
       </section>
+
+      {Array.isArray(decisionHistory) && decisionHistory.length > 0 && (
+        <section className="card">
+          <h2>Decision History</h2>
+          <p className="muted">
+            Each decision row shows the immutable snapshot that was approved at that point in time. New decisions
+            append to this history and write a new evidence bundle; existing rows and bundles are never mutated.
+          </p>
+          <table className="kv-table">
+            <thead>
+              <tr>
+                <th>Decision ID</th>
+                <th>Decision</th>
+                <th>Reviewer</th>
+                <th>Created at</th>
+                <th>Filing</th>
+                <th>Generation</th>
+                <th>Validation</th>
+                <th>Coverage (C/P/G/N)</th>
+                <th>Bundle path</th>
+                <th>Bundle hash</th>
+                <th>Comments / exclusions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {decisionHistory.map((d) => {
+                const latestId = lastDecision && lastDecision.id != null ? String(lastDecision.id) : null;
+                const isLatest = latestId !== null && d.id != null && String(d.id) === latestId;
+                const validationLabel = d.validation_status || "(n/a)";
+                const vPass = d.validation_pass_count ?? 0;
+                const vWarn = d.validation_warning_count ?? 0;
+                const vFail = d.validation_fail_count ?? 0;
+                const cCov = d.coverage_covered_count ?? 0;
+                const cPart = d.coverage_partial_count ?? 0;
+                const cGap = d.coverage_gap_count ?? 0;
+                const cNA = d.coverage_not_applicable_count ?? 0;
+
+                return (
+                  <tr key={d.id ?? Math.random()} className={isLatest ? "decision-row decision-row--latest" : "decision-row"}>
+                    <td>
+                      {d.id}
+                      {isLatest && <span className="tag">latest</span>}
+                    </td>
+                    <td>{d.decision || "(unknown)"}</td>
+                    <td>{d.reviewer || "(unknown)"}</td>
+                    <td>{d.created_at || "(n/a)"}</td>
+                    <td>{d.filing_id || reviewMeta?.filingId || "(n/a)"}</td>
+                    <td>{d.generation_id || reviewMeta?.currentGeneration || "(n/a)"}</td>
+                    <td>
+                      {validationLabel}
+                      {" "}
+                      <span className="muted">[pass={vPass}, warn={vWarn}, fail={vFail}]</span>
+                    </td>
+                    <td>
+                      {cCov}/{cPart}/{cGap}/{cNA}
+                    </td>
+                    <td>{d.bundle_path || "(none)"}</td>
+                    <td>{d.bundle_hash ? shortenHash(d.bundle_hash) : "(n/a)"}</td>
+                    <td className="muted">
+                      {d.comments || "(no comments)"}
+                      {d.exclusions && (
+                        <>
+                          <br />
+                          <strong>Exclusions:</strong> {d.exclusions}
+                        </>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </section>
+      )}
 
       <section className="card">
         <h2>Step 1 – Confirm Product Scope</h2>
