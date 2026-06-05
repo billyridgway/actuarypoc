@@ -15,14 +15,15 @@ export const App: React.FC = () => {
   // placeholder. This keeps the frontend dumb: it just calls the backend
   // endpoint and renders the RunDetail it gets back.
   const searchParams = new URLSearchParams(window.location.search);
-  const view = searchParams.get("view");
+  const viewParam = searchParams.get("view");
+  const view = viewParam || "home";
   const objectKey = searchParams.get("key") || "projections/projection-1779276320.json";
 
   useEffect(() => {
     const fetchData = async () => {
       // The onboarding flow has its own data fetching; keep the shared
       // bootstrap simple and skip backend calls for that view.
-      if (view === "create-review") {
+      if (view === "create-review" || view === "home") {
         setRunDetail(null);
         setProductReview(null);
         setError(null);
@@ -63,28 +64,118 @@ export const App: React.FC = () => {
     void fetchData();
   }, [objectKey, view]);
 
-  if (loading && !runDetail && !productReview && view !== "create-review") {
+  if (loading && !runDetail && !productReview && view !== "create-review" && view !== "home") {
     return <div className="loading">Loading…</div>;
   }
 
-  if (error) {
-    return <div className="error">Error loading data: {error}</div>;
-  }
-
-  if (view === "create-review") {
-    return <CreateProductReviewPage />;
-  }
-
-  if (view === "product-model") {
-    if (!productReview) {
-      return <div>No product model review data available.</div>;
+  const renderContent = () => {
+    if (error) {
+      return <div className="error">Error loading data: {error}</div>;
     }
-    return <ProductModelReviewPage review={productReview} />;
-  }
 
-  if (!runDetail) {
-    return <div>No run detail available.</div>;
-  }
+    if (view === "home") {
+      return <HomePage />;
+    }
 
-  return <RunDetailPage runDetail={runDetail} />;
+    if (view === "create-review") {
+      return <CreateProductReviewPage />;
+    }
+
+    if (view === "product-model") {
+      if (!productReview) {
+        return <div>No product model review data available.</div>;
+      }
+      return <ProductModelReviewPage review={productReview} />;
+    }
+
+    if (!runDetail) {
+      return <div>No run detail available.</div>;
+    }
+
+    return <RunDetailPage runDetail={runDetail} />;
+  };
+
+  return (
+    <div className="app-shell">
+      <header className="top-nav">
+        <div className="top-nav__brand">ActuaryPOC</div>
+        <nav className="top-nav__links">
+          <a href="/web?view=home">Home</a>
+          <a href="/web?view=create-review">Create Review</a>
+          <a href="/web?view=product-model">Trust Surface</a>
+        </nav>
+      </header>
+      <main className="app-shell__main">{renderContent()}</main>
+    </div>
+  );
+};
+
+
+const HomePage: React.FC = () => {
+  return (
+    <div className="home-page">
+      <h1>ActuaryPOC – Home</h1>
+      <p className="muted">
+        Welcome to the ActuaryPOC dashboard. Start with a new Product Review, inspect the Trust Surface, or drill into
+        individual illustration runs.
+      </p>
+
+      <div className="home-grid">
+        <section className="card home-card">
+          <h2>Create Product Review</h2>
+          <p className="muted">
+            Configure product metadata and filing context, upload documents, configure scenarios, and generate a Product
+            Model Review.
+          </p>
+          <p>
+            <a href="/web?view=create-review" className="button">
+              Go to Create Review
+            </a>
+          </p>
+        </section>
+
+        <section className="card home-card">
+          <h2>Product Model Review / Trust Surface</h2>
+          <p className="muted">
+            Review the ProductDefinition, coverage matrix, validation results, evidence links, and Product Model Review
+            decisions and bundles for P12TRF.
+          </p>
+          <p>
+            <a href="/web?view=product-model" className="button">
+              Open Trust Surface
+            </a>
+          </p>
+        </section>
+
+        <section className="card home-card">
+          <h2>Latest Decision / Evidence Bundle</h2>
+          <p className="muted">
+            View the latest Product Model Review decision history and download or inspect immutable evidence bundles.
+          </p>
+          <p>
+            <a href="/web?view=product-model" className="button">
+              View Decisions &amp; Bundles
+            </a>
+          </p>
+        </section>
+
+        <section className="card home-card">
+          <h2>Run Detail / Illustration Viewer</h2>
+          <p className="muted">
+            Inspect a single projection run with premium comparison, projection graphs, and audit information. Requires
+            a projection object key.
+          </p>
+          <p className="muted">
+            The default example uses the fallback key configured in the app; you can also supply <code>?key=…</code> in
+            the URL for other runs.
+          </p>
+          <p>
+            <a href="/web" className="button">
+              Open Run Detail (example)
+            </a>
+          </p>
+        </section>
+      </div>
+    </div>
+  );
 };
