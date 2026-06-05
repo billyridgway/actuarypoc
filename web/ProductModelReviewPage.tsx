@@ -334,6 +334,12 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
   const [saveMessage, setSaveMessage] = React.useState<string | null>(null);
   const [saveError, setSaveError] = React.useState<string | null>(null);
 
+  // Bundle inspection state for Decision History rows.
+  const [inspectedDecisionId, setInspectedDecisionId] = React.useState<number | string | null>(null);
+  const [bundleManifest, setBundleManifest] = React.useState<any | null>(null);
+  const [bundleManifestLoading, setBundleManifestLoading] = React.useState(false);
+  const [bundleManifestError, setBundleManifestError] = React.useState<string | null>(null);
+
   const onSubmitDecision = async (e: React.FormEvent) => {
     e.preventDefault();
     setSaveMessage(null);
@@ -379,6 +385,28 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
       setSaveError(err?.message || "Failed to save decision.");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const onInspectBundle = async (decisionId: number | string) => {
+    setInspectedDecisionId(decisionId);
+    setBundleManifest(null);
+    setBundleManifestError(null);
+    setBundleManifestLoading(true);
+    try {
+      const res = await fetch(
+        `/api/product-model-review/${encodeURIComponent(product.code)}/decisions/${encodeURIComponent(String(decisionId))}/bundle/manifest`,
+      );
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      setBundleManifest(data);
+    } catch (err: any) {
+      setBundleManifestError(err?.message || "Failed to load bundle manifest.");
+    } finally {
+      setBundleManifestLoading(false);
     }
   };
 
@@ -641,6 +669,14 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                           >
                             Download bundle
                           </a>
+                          {" "}
+                          <button
+                            type="button"
+                            className="link-button"
+                            onClick={() => onInspectBundle(d.id as number | string)}
+                          >
+                            Inspect bundle
+                          </button>
                         </>
                       )}
                     </td>
@@ -659,6 +695,105 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
               })}
             </tbody>
           </table>
+          {inspectedDecisionId != null && (
+            <div className="bundle-inspection">
+              <h3>
+                Bundle inspection – decision {inspectedDecisionId}
+              </h3>
+              <p className="muted">
+                This view is read-only and reflects the exact artefacts that were approved at the time of the
+                decision. Bundles are immutable and append-only; new decisions create new bundles rather than
+                mutating prior ones.
+              </p>
+              {bundleManifestLoading && <p className="muted">Loading bundle manifest…</p>}
+              {bundleManifestError && <p className="error">{bundleManifestError}</p>}
+              {bundleManifest && !bundleManifestLoading && !bundleManifestError && (
+                <>
+                  <p>
+                    <strong>Bundle path:</strong> {bundleManifest.bundle_path || "(unknown)"}
+                  </p>
+                  {Array.isArray(bundleManifest.entries) && bundleManifest.entries.length > 0 && (
+                    <>
+                      <h4>ZIP entries</h4>
+                      <ul>
+                        {bundleManifest.entries.map((name: string) => (
+                          <li key={name}>{name}</li>
+                        ))}
+                      </ul>
+                    </>
+                  )}
+                  {bundleManifest.manifest && (
+                    <>
+                      <h4>Bundle manifest</h4>
+                      <table className="kv-table">
+                        <tbody>
+                          <tr>
+                            <th>bundleVersion</th>
+                            <td>{bundleManifest.manifest.bundleVersion || "(n/a)"}</td>
+                          </tr>
+                          <tr>
+                            <th>productCode</th>
+                            <td>{bundleManifest.manifest.productCode || "(n/a)"}</td>
+                          </tr>
+                          <tr>
+                            <th>filingId</th>
+                            <td>{bundleManifest.manifest.filingId || "(n/a)"}</td>
+                          </tr>
+                          <tr>
+                            <th>decisionId</th>
+                            <td>{bundleManifest.manifest.decisionId ?? "(n/a)"}</td>
+                          </tr>
+                          <tr>
+                            <th>createdAt</th>
+                            <td>{bundleManifest.manifest.createdAt || "(n/a)"}</td>
+                          </tr>
+                          <tr>
+                            <th>generationId</th>
+                            <td>{bundleManifest.manifest.generationId || "(n/a)"}</td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </>
+                  )}
+                  {bundleManifest.hashes && (
+                    <>
+                      <h4>File hashes (hashes.json)</h4>
+                      <table className="kv-table">
+                        <thead>
+                          <tr>
+                            <th>File</th>
+                            <th>Short hash</th>
+                            <th>Full hash</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {[
+                            "product-definition.json",
+                            "build-report.json",
+                            "coverage-matrix.json",
+                            "validation-report.json",
+                            "decision.json",
+                            "manifest.json",
+                          ].map((name) => {
+                            const full = bundleManifest.hashes[name];
+                            return (
+                              <tr key={name}>
+                                <td>{name}</td>
+                                <td>{full ? shortenHash(full, 12) : "(n/a)"}</td>
+                                <td>
+                                  {full ? <code>{full}</code> : <span className="muted">(no hash recorded)</span>}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </>
+                  )}
+                </>
+              )}
+            </div>
+          )}
         </section>
       )}
 
