@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Query, UploadFile, File, Form
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from actuarypoc.connectors.base import CSVConnector
@@ -26,6 +26,7 @@ from actuarypoc.projection.service import store_projection
 from actuarypoc.storage.postgres_client import (
     get_last_product_model_review_decision,
     list_product_model_review_decisions,
+    get_product_model_review_decision,
     get_product_review,
     list_filing_rule_evidence,
     list_product_documents,
@@ -2882,7 +2883,7 @@ def api_product_model_review_decision(product_code: str, payload: ProductModelRe
         # should not prevent the decision from being recorded.
         pass
 
-    return ProductModelReviewDecisionResponse(
+    response = ProductModelReviewDecisionResponse(
         id=rec.get("id"),
         product_code=rec.get("product_code", product_code),
         reviewer=rec.get("reviewer", reviewer),
@@ -2914,6 +2915,143 @@ def api_product_model_review_decision(product_code: str, payload: ProductModelRe
         bundle_path=bundle_path or rec.get("bundle_path"),
         bundle_hash=bundle_hash or rec.get("bundle_hash"),
     )
+
+    return response
+
+
+@app.get("/api/product-model-review/{product_code}/decisions/{decision_id}/bundle")
+def api_product_model_review_decision_bundle(product_code: str, decision_id: int) -> Response:
+    """Download the immutable evidence bundle ZIP for a specific decision.
+
+    The decision is looked up case-insensitively by ``product_code`` and
+    constrained by ``decision_id``. When a bundle exists, the exact ZIP bytes
+    stored in MinIO are returned as ``application/zip`` with a stable
+    filename.
+    """
+
+    code_norm = (product_code or "").strip().upper()
+    if not code_norm:
+        raise HTTPException(status_code=400, detail="product_code is required")
+
+    rec = get_product_model_review_decision(code_norm, decision_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="Decision not found for product")
+
+    rec_code = (rec.get("product_code") or "").strip().upper()
+    if rec_code != code_norm:
+        raise HTTPException(status_code=404, detail="Decision product_code mismatch")
+
+    bundle_path = rec.get("bundle_path")
+    if not bundle_path:
+        raise HTTPException(status_code=404, detail="Decision does not have an evidence bundle")
+
+    try:
+        minio_client = get_minio_client()
+        ensure_bucket(minio_client)
+        bucket = get_bucket_name()
+
+        obj = minio_client.get_object(bucket, bundle_path)
+        try:
+            data = obj.read() or b""
+        finally:
+            obj.close()
+            obj.release_conn()
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[pmr_bundle_download] failed product_code={code_norm} "
+            f"decision_id={decision_id} bundle_path={bundle_path}: {exc}",
+            flush=True,
+        )
+        raise HTTPException(status_code=500, detail="Failed to read evidence bundle from storage") from exc
+
+    filename = f"{code_norm}-decision-{decision_id}-evidence-bundle.zip"
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+    }
+    return Response(content=data, media_type="application/zip", headers=headers)
+
+
+@app.get("/api/product-model-review/{product_code}/decisions/{decision_id}/bundle/manifest")
+def api_product_model_review_decision_bundle_manifest(product_code: str, decision_id: int) -> Dict[str, Any]:
+    """Return manifest + hashes metadata for a decision's evidence bundle.
+
+    This is a convenience endpoint for the Trust Surface UI so that users can
+    quickly inspect which artefacts are included in a bundle without
+    downloading the ZIP.
+    """
+
+    code_norm = (product_code or "").strip().upper()
+    if not code_norm:
+        raise HTTPException(status_code=400, detail="product_code is required")
+
+    rec = get_product_model_review_decision(code_norm, decision_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="Decision not found for product")
+
+    rec_code = (rec.get("product_code") or "").strip().upper()
+    if rec_code != code_norm:
+        raise HTTPException(status_code=404, detail="Decision product_code mismatch")
+
+    bundle_path = rec.get("bundle_path")
+    if not bundle_path:
+        raise HTTPException(status_code=404, detail="Decision does not have an evidence bundle")
+
+    try:
+        minio_client = get_minio_client()
+        ensure_bucket(minio_client)
+        bucket = get_bucket_name()
+
+        obj = minio_client.get_object(bucket, bundle_path)
+        try:
+            bundle_bytes = obj.read() or b""
+        finally:
+            obj.close()
+            obj.release_conn()
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[pmr_bundle_manifest] failed product_code={code_norm} "
+            f"decision_id={decision_id} bundle_path={bundle_path}: {exc}",
+            flush=True,
+        )
+        raise HTTPException(status_code=500, detail="Failed to read evidence bundle from storage") from exc
+
+    entries: List[str] = []
+    manifest: Dict[str, Any] = {}
+    hashes: Dict[str, Any] = {}
+
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(bundle_bytes), "r")
+        entries = sorted(zf.namelist())
+
+        if "manifest.json" in entries:
+            try:
+                manifest = json.loads(zf.read("manifest.json"))
+            except Exception as exc:  # noqa: BLE001
+                print(f"[pmr_bundle_manifest] manifest_parse_failed: {exc}", flush=True)
+                manifest = {}
+
+        if "hashes.json" in entries:
+            try:
+                hashes = json.loads(zf.read("hashes.json"))
+            except Exception as exc:  # noqa: BLE001
+                print(f"[pmr_bundle_manifest] hashes_parse_failed: {exc}", flush=True)
+                hashes = {}
+    except Exception as exc:  # noqa: BLE001
+        print(f"[pmr_bundle_manifest] zip_inspect_failed: {exc}", flush=True)
+        raise HTTPException(status_code=500, detail="Failed to inspect evidence bundle contents") from exc
+
+    return {
+        "decision_id": rec.get("id"),
+        "product_code": rec.get("product_code"),
+        "bundle_path": bundle_path,
+        "entries": entries,
+        "manifest": manifest,
+        "hashes": hashes,
+    }
 
 
 # ---------------------------------------------------------------------------

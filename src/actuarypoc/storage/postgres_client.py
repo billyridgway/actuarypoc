@@ -906,6 +906,101 @@ def list_product_model_review_decisions(product_code: str) -> List[Dict[str, Any
         return []
 
 
+def get_product_model_review_decision(product_code: str, decision_id: int) -> Optional[Dict[str, Any]]:
+    """Return a single Product Model Review decision by ID for a product.
+
+    The lookup is case-insensitive on ``product_code`` and constrains on the
+    numeric ``decision_id``. When Postgres is unavailable or no matching row
+    exists, returns None.
+    """
+
+    ensure_schema()
+    try:
+        with _conn() as conn:
+            if conn is None:
+                return None
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id,
+                           product_code,
+                           reviewer,
+                           decision,
+                           exclusions,
+                           comments,
+                           filing_id,
+                           generation_id,
+                           pd_generated_at,
+                           pd_generator_version,
+                           pd_warning_count,
+                           coverage_covered_count,
+                           coverage_partial_count,
+                           coverage_gap_count,
+                           coverage_not_applicable_count,
+                           validation_status,
+                           validation_pass_count,
+                           validation_warning_count,
+                           validation_fail_count,
+                           product_definition_path,
+                           product_definition_hash,
+                           build_report_path,
+                           build_report_hash,
+                           coverage_matrix_hash,
+                           validation_snapshot_hash,
+                           bundle_path,
+                           bundle_hash,
+                           bundle_created_at,
+                           created_at,
+                           coverage_matrix_path,
+                           validation_report_path
+                      FROM product_model_review_decisions
+                     WHERE id = %s
+                       AND UPPER(product_code) = UPPER(%s)
+                     LIMIT 1
+                    """,
+                    (decision_id, product_code),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                return {
+                    "id": row[0],
+                    "product_code": row[1],
+                    "reviewer": row[2],
+                    "decision": row[3],
+                    "exclusions": row[4],
+                    "comments": row[5],
+                    "filing_id": row[6],
+                    "generation_id": row[7],
+                    "pd_generated_at": row[8].isoformat() if getattr(row[8], "isoformat", None) else row[8],
+                    "pd_generator_version": row[9],
+                    "pd_warning_count": row[10],
+                    "coverage_covered_count": row[11],
+                    "coverage_partial_count": row[12],
+                    "coverage_gap_count": row[13],
+                    "coverage_not_applicable_count": row[14],
+                    "validation_status": row[15],
+                    "validation_pass_count": row[16],
+                    "validation_warning_count": row[17],
+                    "validation_fail_count": row[18],
+                    "product_definition_path": row[19],
+                    "product_definition_hash": row[20],
+                    "build_report_path": row[21],
+                    "build_report_hash": row[22],
+                    "coverage_matrix_hash": row[23],
+                    "validation_snapshot_hash": row[24],
+                    "bundle_path": row[25],
+                    "bundle_hash": row[26],
+                    "bundle_created_at": row[27].isoformat() if getattr(row[27], "isoformat", None) else row[27],
+                    "created_at": row[28].isoformat() if getattr(row[28], "isoformat", None) else row[28],
+                    "coverage_matrix_path": row[29],
+                    "validation_report_path": row[30],
+                }
+    except Exception as exc:  # noqa: BLE001
+        _note_failure(exc)
+        return None
+
+
 def record_product_model_review_decision(
     *,
     product_code: str,

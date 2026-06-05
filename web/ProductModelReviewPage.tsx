@@ -629,7 +629,21 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                     <td>
                       {cCov}/{cPart}/{cGap}/{cNA}
                     </td>
-                    <td>{d.bundle_path || "(none)"}</td>
+                    <td>
+                      {d.bundle_path || "(none)"}
+                      {d.bundle_path && d.id != null && (
+                        <>
+                          <br />
+                          <a
+                            href={`/api/product-model-review/${encodeURIComponent(
+                              product.code,
+                            )}/decisions/${encodeURIComponent(String(d.id))}/bundle`}
+                          >
+                            Download bundle
+                          </a>
+                        </>
+                      )}
+                    </td>
                     <td>{d.bundle_hash ? shortenHash(d.bundle_hash) : "(n/a)"}</td>
                     <td className="muted">
                       {d.comments || "(no comments)"}
