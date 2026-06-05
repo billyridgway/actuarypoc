@@ -715,6 +715,11 @@ def get_last_product_model_review_decision(product_code: str) -> Optional[Dict[s
     """Return the most recent Product Model Review decision for a product.
 
     When Postgres is unavailable or no decisions exist, returns None.
+
+    The lookup is deliberately case-insensitive on ``product_code`` so that
+    older rows written with inconsistent casing (e.g. "P12TRF" vs "p12trf")
+    still participate in the ordering. The *most recent* row is selected by
+    ``created_at DESC, id DESC``.
     """
 
     ensure_schema()
@@ -757,7 +762,7 @@ def get_last_product_model_review_decision(product_code: str) -> Optional[Dict[s
                            coverage_matrix_path,
                            validation_report_path
                       FROM product_model_review_decisions
-                     WHERE product_code = %s
+                     WHERE UPPER(product_code) = UPPER(%s)
                      ORDER BY created_at DESC, id DESC
                      LIMIT 1
                     """,

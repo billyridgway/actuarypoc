@@ -2485,7 +2485,9 @@ def api_product_model_review_decision(product_code: str, payload: ProductModelRe
 
     # For now the richer context (including snapshot persistence) is
     # only implemented for P12TRF; other products keep the simpler
-    # decision record.
+    # decision record. Decisions are always stored using an
+    # upper-cased product_code so that last-decision lookups remain
+    # consistent regardless of the casing used at the API boundary.
     code_norm = product_code.strip().upper()
     if code_norm == "P12TRF":
         try:
@@ -2705,7 +2707,7 @@ def api_product_model_review_decision(product_code: str, payload: ProductModelRe
     # payload so that the UI remains responsive, but in the Pi cluster we
     # expect POSTGRES_DSN to be set and the insert to succeed.
     rec = record_product_model_review_decision(
-        product_code=product_code,
+        product_code=code_norm,
         reviewer=reviewer,
         decision=decision,
         exclusions=exclusions,
