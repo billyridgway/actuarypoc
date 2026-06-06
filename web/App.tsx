@@ -3,6 +3,7 @@ import { RunDetailPage } from "./RunDetailPage";
 import type { RunDetail } from "./run-detail.types";
 import { ProductModelReviewPage, type ProductModelReview } from "./ProductModelReviewPage";
 import { CreateProductReviewPage } from "./CreateProductReviewPage";
+import { ProductDetailPage } from "./ProductDetailPage";
 
 export const App: React.FC = () => {
   const [runDetail, setRunDetail] = useState<RunDetail | null>(null);
@@ -18,6 +19,7 @@ export const App: React.FC = () => {
   const viewParam = searchParams.get("view");
   const view = viewParam || "home";
   const objectKey = searchParams.get("key") || "projections/projection-1779276320.json";
+  const productCodeParam = searchParams.get("productCode") || "P12TRF";
 
   useEffect(() => {
     const fetchData = async () => {
@@ -35,10 +37,10 @@ export const App: React.FC = () => {
       try {
         setError(null);
 
-        // When view is "product-model" or "home", load the current
-        // Product Model Review snapshot. Otherwise, fall back to the
-        // existing RunDetail flow.
-        if (view === "product-model" || view === "home") {
+        // When view is "product-model" or "home" or "product",
+        // load the current Product Model Review snapshot. The product
+        // detail page will then call its own product-level endpoint.
+        if (view === "product-model" || view === "home" || view === "product") {
           const res = await fetch("/api/product-model-review/p12trf");
           if (!res.ok) {
             throw new Error(`HTTP ${res.status}`);
@@ -89,6 +91,13 @@ export const App: React.FC = () => {
       return <ProductModelReviewPage review={productReview} />;
     }
 
+    if (view === "product") {
+      if (!productReview) {
+        return <div>No product model review data available.</div>;
+      }
+      return <ProductDetailPage productCode={productCodeParam} />;
+    }
+
     if (!runDetail) {
       return <div>No run detail available.</div>;
     }
@@ -114,6 +123,7 @@ export const App: React.FC = () => {
 
 const HomePage: React.FC<{ productReview: ProductModelReview | null }> = ({ productReview }) => {
   const anyReview: any = productReview;
+  const productBlock = anyReview?.product;
   const lastDecision = anyReview?.lastDecision;
   const reviewMeta = anyReview?.reviewMeta;
   const validation = anyReview?.productDefinitionValidation;
@@ -121,6 +131,8 @@ const HomePage: React.FC<{ productReview: ProductModelReview | null }> = ({ prod
   const scenarioValidation = anyReview?.scenarioValidation;
   const decisionRisk = lastDecision?.decisionRisk;
   const decisionTimeline = anyReview?.decisionTimeline as any;
+  const productCode = productBlock?.code || "P12TRF";
+  const productName = productBlock?.name || "P12TRF Term (POC)";
 
   const shortenHash = (hash?: string | null, length = 8): string | null => {
     if (!hash) return null;
@@ -344,6 +356,68 @@ const HomePage: React.FC<{ productReview: ProductModelReview | null }> = ({ prod
       </section>
 
       <div className="home-grid">
+        <section className="card home-card">
+          <h2>Products</h2>
+          {productReview ? (
+            <table className="kv-table">
+              <thead>
+                <tr>
+                  <th>Product</th>
+                  <th>Filing</th>
+                  <th>Latest generation</th>
+                  <th>Latest decision</th>
+                  <th>Freshness</th>
+                  <th>Risk</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>
+                    <a href={`/web?view=product&productCode=${encodeURIComponent(productCode)}`}>
+                      {productName} ({productCode})
+                    </a>
+                  </td>
+                  <td>{reviewMeta?.filingId || "(not set)"}</td>
+                  <td>{reviewMeta?.currentGeneration || "(not set)"}</td>
+                  <td>
+                    {lastDecision?.id != null ? (
+                      <>
+                        #{lastDecision.id} – {lastDecision.decision || "(no label)"}
+                      </>
+                    ) : (
+                      <span className="muted">(none)</span>
+                    )}
+                  </td>
+                  <td>
+                    {reviewFreshness ? (
+                      <span className={`tag tag--freshness-${reviewFreshness.status}`}>
+                        {String(reviewFreshness.status).toUpperCase()}
+                      </span>
+                    ) : (
+                      <span className="muted">(unknown)</span>
+                    )}
+                  </td>
+                  <td>
+                    {decisionRisk ? (
+                      <span
+                        className={`tag tag--decision-risk-${String(
+                          decisionRisk.status || "unknown",
+                        ).toLowerCase()}`}
+                      >
+                        {String(decisionRisk.status || "unknown").toUpperCase()}
+                      </span>
+                    ) : (
+                      <span className="muted">(unknown)</span>
+                    )}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          ) : (
+            <p className="muted">No products available yet. Generate a Product Review to populate the catalog.</p>
+          )}
+        </section>
+
         <section className="card home-card">
           <h2>Create Product Review</h2>
           <p className="muted">

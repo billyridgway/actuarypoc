@@ -2117,6 +2117,124 @@ def _build_decision_timeline(decision_history: Optional[List[Dict[str, Any]]]) -
     }
 
 
+@app.get("/api/products")
+def api_products() -> Dict[str, Any]:
+    """Return a simple product catalog for the dashboard.
+
+    For now this is POC-only and returns a single P12TRF entry, but the
+    shape is generic so additional products can be added later.
+    """
+
+    products: List[Dict[str, Any]] = []
+
+    # P12TRF Product Model Review snapshot as the canonical source.
+    try:
+        pmr = api_product_model_review_p12trf()
+        product_block = pmr.get("product") or {}
+        review_meta = pmr.get("reviewMeta") or {}
+        last_decision = pmr.get("lastDecision") or {}
+        review_freshness = pmr.get("reviewFreshness") or {}
+        decision_risk = (last_decision.get("decisionRisk") or {}) if isinstance(last_decision, dict) else {}
+
+        products.append(
+            {
+                "productCode": product_block.get("code"),
+                "productName": product_block.get("name"),
+                "filingId": review_meta.get("filingId"),
+                "latestGeneration": review_meta.get("currentGeneration"),
+                "latestDecisionId": last_decision.get("id"),
+                "latestDecision": last_decision.get("decision"),
+                "latestRiskStatus": decision_risk.get("status"),
+                "reviewFreshnessStatus": review_freshness.get("status"),
+                "bundlePath": last_decision.get("bundle_path"),
+            }
+        )
+    except Exception:
+        # Best-effort only; if the PMR endpoint fails we still return an
+        # empty catalog so the frontend remains responsive.
+        pass
+
+    return {"products": products}
+
+
+@app.get("/api/products/{product_code}")
+def api_product_detail(product_code: str) -> Dict[str, Any]:
+    """Return product-level detail for the Product Catalog view.
+
+    Currently this is implemented for P12TRF only but uses a
+    product-generic response shape so additional products can be added
+    later without breaking consumers.
+    """
+
+    code_norm = (product_code or "").strip().upper()
+    if code_norm != "P12TRF":
+        raise HTTPException(status_code=404, detail=f"Unknown product_code '{product_code}'.")
+
+    pmr = api_product_model_review_p12trf()
+    product_block = pmr.get("product") or {}
+    review_meta = pmr.get("reviewMeta") or {}
+    review_freshness = pmr.get("reviewFreshness") or {}
+    last_decision = pmr.get("lastDecision") or {}
+    decision_history = pmr.get("decisionHistory") or []
+    decision_timeline = pmr.get("decisionTimeline") or None
+
+    decision_risk = (last_decision.get("decisionRisk") or {}) if isinstance(last_decision, dict) else {}
+
+    latest_version: Optional[Dict[str, Any]] = None
+    versions: List[Dict[str, Any]] = []
+
+    # For now we only expose a single "latest" version derived from the
+    # current reviewMeta + decision snapshot.
+    version = {
+        "generationId": review_meta.get("currentGeneration"),
+        "generatedAt": review_meta.get("generatedAt"),
+        "filingId": review_meta.get("filingId"),
+        "documentCount": review_meta.get("documentCount"),
+        "scenarioCount": review_meta.get("scenarioCount"),
+        "latestDecisionId": last_decision.get("id"),
+        "latestDecisionCreatedAt": last_decision.get("created_at"),
+        "riskStatus": decision_risk.get("status"),
+        "freshnessStatus": review_freshness.get("status"),
+        "bundlePath": last_decision.get("bundle_path"),
+    }
+
+    if version.get("generationId") or version.get("filingId"):
+        versions.append(version)
+        latest_version = version
+
+    decisions: List[Dict[str, Any]] = []
+    if isinstance(decision_history, list):
+        for row in decision_history:
+            if not isinstance(row, dict):
+                continue
+            dr = row.get("decisionRisk") or {}
+            decisions.append(
+                {
+                    "id": row.get("id"),
+                    "createdAt": row.get("created_at"),
+                    "decision": row.get("decision"),
+                    "reviewer": row.get("reviewer"),
+                    "riskStatus": dr.get("status"),
+                    "bundlePath": row.get("bundle_path"),
+                    "comments": row.get("comments"),
+                }
+            )
+
+    product_summary = {
+        "productCode": product_block.get("code"),
+        "productName": product_block.get("name"),
+        "filingId": review_meta.get("filingId"),
+    }
+
+    return {
+        "product": product_summary,
+        "latestVersion": latest_version,
+        "versions": versions,
+        "decisions": decisions,
+        "timeline": decision_timeline,
+    }
+
+
 @app.get("/api/product-definition/{product_code}")
 def api_get_product_definition(product_code: str, filing_id: str = Query(...)) -> Dict[str, Any]:
     """Return the v1 ProductDefinition artefact for a product+filing, if any.
