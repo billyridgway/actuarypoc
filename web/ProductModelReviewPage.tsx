@@ -413,6 +413,11 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
   const [requirementsLoading, setRequirementsLoading] = React.useState<boolean>(false);
   const [requirementsError, setRequirementsError] = React.useState<string | null>(null);
 
+  // ProductDefinition evidence.
+  const [pdEvidence, setPdEvidence] = React.useState<any | null>(null);
+  const [pdEvidenceError, setPdEvidenceError] = React.useState<string | null>(null);
+  const [pdEvidenceLoading, setPdEvidenceLoading] = React.useState<boolean>(false);
+
   React.useEffect(() => {
     const loadRequirements = async () => {
       setRequirementsLoading(true);
@@ -442,6 +447,34 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
 
     if (product && product.code) {
       void loadRequirements();
+    }
+  }, [product.code]);
+
+  React.useEffect(() => {
+    const loadPdEvidence = async () => {
+      setPdEvidenceLoading(true);
+      setPdEvidenceError(null);
+      try {
+        const res = await fetch(`/api/products/${encodeURIComponent(product.code)}/product-definition-evidence`);
+        if (!res.ok) {
+          if (res.status === 404 || res.status === 501) {
+            setPdEvidence(null);
+            return;
+          }
+          const text = await res.text();
+          throw new Error(text || `HTTP ${res.status}`);
+        }
+        const data = await res.json();
+        setPdEvidence(data || null);
+      } catch (err: any) {
+        setPdEvidenceError(err?.message || "Failed to load ProductDefinition evidence.");
+      } finally {
+        setPdEvidenceLoading(false);
+      }
+    };
+
+    if (product && product.code) {
+      void loadPdEvidence();
     }
   }, [product.code]);
 
@@ -823,6 +856,75 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                 })}
               </tbody>
             </table>
+          </>
+        )}
+      </section>
+
+      <section className="card">
+        <h2>ProductDefinition Evidence</h2>
+        <p className="muted">
+          Current ProductDefinition snapshot, build metadata, validation
+          status, and how key fields link back to filing requirements.
+        </p>
+        {pdEvidenceError && (
+          <p className="error">Error loading ProductDefinition evidence: {pdEvidenceError}</p>
+        )}
+        {!pdEvidenceError && pdEvidenceLoading && !pdEvidence && (
+          <p className="muted">Loading ProductDefinition evidence…</p>
+        )}
+        {!pdEvidenceError && !pdEvidence && !pdEvidenceLoading && (
+          <p className="muted">No ProductDefinition evidence surface is available for this product yet.</p>
+        )}
+        {pdEvidence && (
+          <>
+            {pdEvidence.summary && (
+              <table className="kv-table">
+                <tbody>
+                  <tr>
+                    <th>Validation status</th>
+                    <td>{String(pdEvidence.summary.validationStatus || "unknown").toUpperCase()}</td>
+                  </tr>
+                  <tr>
+                    <th>Fields linked to requirements</th>
+                    <td>
+                      {pdEvidence.summary.linkedFieldCount ?? 0} / {pdEvidence.summary.fieldCount ?? 0}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            )}
+            {Array.isArray(pdEvidence.fields) && pdEvidence.fields.length > 0 && (
+              <>
+                <h3>Key fields</h3>
+                <table className="kv-table">
+                  <thead>
+                    <tr>
+                      <th>Path</th>
+                      <th>Label</th>
+                      <th>Value</th>
+                      <th>Linked requirements</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {pdEvidence.fields.map((f: any, idx: number) => {
+                      const linked = Array.isArray(f.linkedRequirementIds) ? f.linkedRequirementIds : [];
+                      return (
+                        <tr key={f.path || idx}>
+                          <td><code>{f.path || "(n/a)"}</code></td>
+                          <td>{f.label || "(n/a)"}</td>
+                          <td>
+                            <pre className="inline-pre">{JSON.stringify(f.value)}</pre>
+                          </td>
+                          <td>
+                            {linked.length > 0 ? linked.join(", ") : <span className="muted">(none)</span>}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </>
+            )}
           </>
         )}
       </section>

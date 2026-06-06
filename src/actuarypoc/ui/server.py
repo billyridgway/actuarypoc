@@ -3168,6 +3168,7 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
 
 ProductModelReviewBuilder = Callable[[], Dict[str, Any]]
 ProductRequirementsProvider = Callable[[str], Dict[str, Any]]
+ProductDefinitionEvidenceProvider = Callable[[str], Dict[str, Any]]
 
 
 _PRODUCT_MODEL_REVIEW_BUILDERS: Dict[str, ProductModelReviewBuilder] = {
@@ -3175,6 +3176,7 @@ _PRODUCT_MODEL_REVIEW_BUILDERS: Dict[str, ProductModelReviewBuilder] = {
 }
 
 _PRODUCT_REQUIREMENTS_PROVIDERS: Dict[str, ProductRequirementsProvider] = {}
+_PRODUCT_DEFINITION_EVIDENCE_PROVIDERS: Dict[str, ProductDefinitionEvidenceProvider] = {}
 
 
 def _get_product_model_review_builder(product_code: str) -> Optional[ProductModelReviewBuilder]:
@@ -3194,6 +3196,13 @@ def _get_product_requirements_provider(product_code: str) -> Optional[ProductReq
 
     code_norm = (product_code or "").strip().upper()
     return _PRODUCT_REQUIREMENTS_PROVIDERS.get(code_norm)
+
+
+def _get_product_definition_evidence_provider(product_code: str) -> Optional[ProductDefinitionEvidenceProvider]:
+    """Resolve a ProductDefinition evidence provider for the given product code."""
+
+    code_norm = (product_code or "").strip().upper()
+    return _PRODUCT_DEFINITION_EVIDENCE_PROVIDERS.get(code_norm)
 
 
 @app.get("/api/product-model-review/{product_code}")
@@ -3267,6 +3276,33 @@ def api_product_requirements(product_code: str) -> Dict[str, Any]:
     """Backwards-compatible alias for the product requirements endpoint."""
 
     return api_product_requirements_product(product_code)
+
+
+@app.get("/api/products/{product_code}/product-definition-evidence")
+def api_product_definition_evidence_product(product_code: str) -> Dict[str, Any]:
+    """Product-aware ProductDefinition evidence entrypoint."""
+
+    cfg = _get_product_config(product_code)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail=f"Unknown product_code '{product_code}'.")
+
+    status = cfg.get("status") or "unknown"
+    code_norm = (cfg.get("productCode") or product_code or "").strip().upper()
+
+    if status != "implemented":
+        raise HTTPException(
+            status_code=501,
+            detail="ProductDefinition evidence surface is not implemented for this product yet.",
+        )
+
+    provider = _get_product_definition_evidence_provider(code_norm)
+    if provider is None:
+        raise HTTPException(
+            status_code=501,
+            detail="ProductDefinition evidence provider is not registered for this product yet.",
+        )
+
+    return provider(code_norm)
 
 
 def build_p12trf_requirements(product_code: str) -> Dict[str, Any]:
@@ -3503,6 +3539,100 @@ def build_p12trf_requirements(product_code: str) -> Dict[str, Any]:
 
 
 _PRODUCT_REQUIREMENTS_PROVIDERS["P12TRF"] = build_p12trf_requirements
+
+
+def build_p12trf_product_definition_evidence(product_code: str) -> Dict[str, Any]:
+    """P12TRF-specific ProductDefinition evidence provider.
+
+    Projects the existing ProductDefinition summary, build metadata, and
+    validation into a generic evidence payload, and links PD fields back
+    to filing requirements where possible.
+    """
+
+    pmr = api_product_model_review_p12trf()
+    product_block = pmr.get("product") or {}
+    review_meta = pmr.get("reviewMeta") or {}
+    filing_id = review_meta.get("filingId")
+    pd_summary = pmr.get("productDefinition") or {}
+    pd_build = pmr.get("productDefinitionBuild") or {}
+    pd_validation = pmr.get("productDefinitionValidation") or {}
+
+    # Pull requirements so we can invert ProductDefinition mappings into
+    # linkedRequirementIds for each PD field.
+    requirements_payload: Dict[str, Any] = {}
+    try:
+        provider = _get_product_requirements_provider(product_code)
+        if provider is not None:
+            requirements_payload = provider(product_code)
+    except Exception:
+        requirements_payload = {}
+
+    reqs = requirements_payload.get("requirements") or []
+    reqs_by_path: Dict[str, List[str]] = {}
+    if isinstance(reqs, list):
+        for r in reqs:
+            if not isinstance(r, dict):
+                continue
+            rid = r.get("requirementId") or r.get("id")
+            if not rid:
+                continue
+            mappings = r.get("productDefinitionMappings") or []
+            if isinstance(mappings, list):
+                for m in mappings:
+                    if not isinstance(m, dict):
+                        continue
+                    path = str(m.get("path") or "").strip()
+                    if not path:
+                        continue
+                    bucket = reqs_by_path.setdefault(path, [])
+                    if rid not in bucket:
+                        bucket.append(rid)
+
+    def _field(path: str, label: str) -> Dict[str, Any]:
+        # For this POC we only look at the top-level key in the summary
+        # object; more complex adapters can support dotted paths later.
+        key = path.split(".")[0]
+        value = pd_summary.get(key)
+        linked_ids = reqs_by_path.get(path, [])
+        return {
+            "path": path,
+            "label": label,
+            "value": value,
+            "linkedRequirementIds": linked_ids,
+        }
+
+    fields: List[Dict[str, Any]] = []
+    fields.append(_field("termPeriods", "Level term periods"))
+    fields.append(_field("issueAges", "Issue ages"))
+    fields.append(_field("underwritingClasses", "Underwriting classes"))
+    fields.append(_field("riskClasses", "Risk classes"))
+    fields.append(_field("smokerClasses", "Smoker classes"))
+    fields.append(_field("premiumModes", "Premium modes"))
+    fields.append(_field("faceAmounts", "Face amount range"))
+    fields.append(_field("coverages", "Coverages"))
+
+    field_count = len(fields)
+    linked_field_count = sum(1 for f in fields if f.get("linkedRequirementIds"))
+    validation_status = str((pd_validation or {}).get("status") or "unknown")
+
+    return {
+        "productCode": product_block.get("code") or product_code,
+        "productName": product_block.get("name"),
+        "filingId": filing_id,
+        "status": "available",
+        "productDefinition": pd_summary,
+        "build": pd_build,
+        "validation": pd_validation,
+        "fields": fields,
+        "summary": {
+            "fieldCount": field_count,
+            "linkedFieldCount": linked_field_count,
+            "validationStatus": validation_status,
+        },
+    }
+
+
+_PRODUCT_DEFINITION_EVIDENCE_PROVIDERS["P12TRF"] = build_p12trf_product_definition_evidence
 
 
 @app.post("/api/product-model-review/p12trf/evidence/seed")
