@@ -380,6 +380,130 @@ def _canonical_json_sha256(obj: Any) -> Optional[str]:
     return sha256(payload).hexdigest()
 
 
+def _parse_iso8601_timestamp(value: Any) -> Optional[datetime]:
+    """Best-effort parse of an ISO-8601-like timestamp.
+
+    Returns a timezone-aware ``datetime`` when possible. On any failure
+    (including non-string inputs), returns ``None`` instead of raising.
+    """
+
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+
+    try:
+        # Normalise ``Z`` suffix into an explicit UTC offset so that
+        # ``datetime.fromisoformat`` accepts it.
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        return datetime.fromisoformat(text)
+    except Exception:
+        return None
+
+
+def _build_review_freshness(
+    review_meta: Dict[str, Any],
+    documents: List[Dict[str, Any]],
+    product_definition_build: Optional[Dict[str, Any]],
+    last_decision: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Derive a lightweight "review freshness" status for the Trust Surface.
+
+    This compares the current Product Review generation against document
+    uploads, ProductDefinition builds, and the latest recorded decision
+    snapshot. It intentionally prefers robustness over precision: any
+    parsing failures result in ``None`` timestamps and are treated as
+    "unknown" rather than surfacing errors to the caller.
+    """
+
+    status: str = "fresh"
+    messages: List[str] = []
+
+    # Core generation timestamps from review metadata.
+    generated_at_raw = review_meta.get("generatedAt")
+    generation_ts = _parse_iso8601_timestamp(generated_at_raw)
+
+    # Latest document upload time (if any).
+    latest_doc_ts: Optional[datetime] = None
+    latest_doc_raw: Optional[str] = None
+    for d in documents or []:
+        raw = d.get("created_at") or d.get("createdAt")
+        ts = _parse_iso8601_timestamp(raw)
+        if ts is not None and (latest_doc_ts is None or ts > latest_doc_ts):
+            latest_doc_ts = ts
+            latest_doc_raw = raw
+
+    # ProductDefinition build timestamp (if a lineage-backed build exists).
+    pd_generated_raw: Optional[str] = None
+    pd_generated_ts: Optional[datetime] = None
+    if isinstance(product_definition_build, dict):
+        pd_generated_raw = product_definition_build.get("generatedAt")
+        pd_generated_ts = _parse_iso8601_timestamp(pd_generated_raw)
+
+    # Latest decision timestamps (when a decision snapshot exists).
+    decision_created_raw: Optional[str] = None
+    decision_created_ts: Optional[datetime] = None
+    decision_pd_generated_raw: Optional[str] = None
+    decision_pd_generated_ts: Optional[datetime] = None
+    if isinstance(last_decision, dict):
+        decision_created_raw = last_decision.get("created_at")
+        decision_created_ts = _parse_iso8601_timestamp(decision_created_raw)
+        decision_pd_generated_raw = last_decision.get("pd_generated_at")
+        decision_pd_generated_ts = _parse_iso8601_timestamp(decision_pd_generated_raw)
+
+    # If we have never generated a Product Review, we cannot be "fresh".
+    if generation_ts is None:
+        status = "warning"
+        messages.append(
+            "Product Review has not been generated yet; generate a Product Review before relying on the Trust Surface."
+        )
+    else:
+        # Documents uploaded after the current generation make the
+        # evidence set stale.
+        if latest_doc_ts is not None and latest_doc_ts > generation_ts:
+            status = "stale"
+            messages.append("A document was uploaded after the current Product Review generation.")
+
+        # A newer ProductDefinition build than the current generation also
+        # indicates that the Trust Surface may be stale.
+        if pd_generated_ts is not None and pd_generated_ts > generation_ts:
+            status = "stale"
+            messages.append("The ProductDefinition build is newer than the current Product Review generation.")
+
+    # Decisions made against an older generation/build are warnings: the
+    # Trust Surface may be up-to-date, but the *recorded* decision is
+    # lagging behind it.
+    if generation_ts is not None and decision_created_ts is not None and generation_ts > decision_created_ts:
+        if status == "fresh":
+            status = "warning"
+        messages.append(
+            "A newer Product Review generation exists after the latest decision; record a new decision if you rely on the updated evidence set."
+        )
+
+    if pd_generated_ts is not None and decision_pd_generated_ts is not None and pd_generated_ts > decision_pd_generated_ts:
+        if status == "fresh":
+            status = "warning"
+        messages.append(
+            "The ProductDefinition build is newer than the ProductDefinition build recorded with the latest decision."
+        )
+
+    # For a clean "fresh" state, avoid emitting noise messages.
+    if status == "fresh":
+        messages = []
+
+    return {
+        "status": status,
+        "messages": messages,
+        "latestDocumentUploadedAt": latest_doc_raw,
+        "currentGeneration": review_meta.get("currentGeneration"),
+        "generatedAt": generated_at_raw,
+        "productDefinitionGeneratedAt": pd_generated_raw,
+        "latestDecisionCreatedAt": decision_created_raw,
+    }
+
+
 def _load_p12trf_definition() -> Dict[str, Any]:
     import json
 
@@ -2317,6 +2441,16 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
         "totalSteps": total_steps,
     }
 
+    # Derive a lightweight freshness view so the UI can highlight when
+    # the current Trust Surface may be stale or when the latest decision
+    # was made against an older evidence set.
+    review_freshness = _build_review_freshness(
+        review_meta=review_meta,
+        documents=docs,
+        product_definition_build=product_definition_build,
+        last_decision=last_decision,
+    )
+
     return {
         "product": product_block,
         "scope": scope,
@@ -2326,6 +2460,7 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
         "assumptions": assumptions,
         "gaps": gaps,
         "reviewMeta": review_meta,
+        "reviewFreshness": review_freshness,
         "documents": documents_payload,
         "lastDecision": last_decision,
         "decisionHistory": decision_history,

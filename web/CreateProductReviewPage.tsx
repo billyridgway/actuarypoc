@@ -69,6 +69,7 @@ export const CreateProductReviewPage: React.FC = () => {
   const [generatedAt, setGeneratedAt] = useState<string | undefined>(undefined);
   const [documents, setDocuments] = useState<DocumentSummary[]>([]);
   const [scenarios, setScenarios] = useState<ScenarioRow[]>([]);
+  const [reviewFreshness, setReviewFreshness] = useState<{ status: string; messages?: string[] } | null>(null);
 
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
@@ -78,6 +79,24 @@ export const CreateProductReviewPage: React.FC = () => {
   const [generateBusy, setGenerateBusy] = useState<boolean>(false);
 
   const initialCode = "P12TRF";
+
+  const refreshReviewFreshness = async () => {
+    const code = (productCode || "").trim().toUpperCase();
+    // The Product Model Review endpoint is currently P12TRF-specific.
+    if (code !== "P12TRF") {
+      setReviewFreshness(null);
+      return;
+    }
+
+    try {
+      const res = await fetch("/api/product-model-review/p12trf");
+      if (!res.ok) return;
+      const data = (await res.json()) as { reviewFreshness?: { status: string; messages?: string[] } };
+      setReviewFreshness(data.reviewFreshness ?? null);
+    } catch {
+      // Best-effort only; freshness is advisory and should not block the flow.
+    }
+  };
 
   const loadProductReview = async (code: string) => {
     const normalized = (code || "").trim().toUpperCase();
@@ -101,6 +120,8 @@ export const CreateProductReviewPage: React.FC = () => {
       setGeneratedAt(payload.review?.generatedAt || undefined);
       setDocuments(payload.documents || []);
       setScenarios((payload.scenarios || []).length > 0 ? payload.scenarios : []);
+      // Refresh freshness based on the current Product Model Review, when available.
+      void refreshReviewFreshness();
     } catch (e: any) {
       setError(e?.message || "Failed to load Product Review draft.");
     } finally {
@@ -114,6 +135,7 @@ export const CreateProductReviewPage: React.FC = () => {
     loadProductReview(initialCode).catch(() => {
       // Errors are surfaced via state; nothing else to do here.
     });
+    void refreshReviewFreshness();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -193,6 +215,7 @@ export const CreateProductReviewPage: React.FC = () => {
         setCurrentGeneration(payload.review?.currentGeneration || currentGeneration);
         setGeneratedAt(payload.review?.generatedAt || generatedAt);
       }
+      void refreshReviewFreshness();
     } catch (e: any) {
       setError(e?.message || "Failed to upload document(s).");
     } finally {
@@ -257,6 +280,7 @@ export const CreateProductReviewPage: React.FC = () => {
       setCurrentGeneration(data.review?.currentGeneration || currentGeneration);
       setGeneratedAt(data.review?.generatedAt || generatedAt);
       setStep(4);
+      void refreshReviewFreshness();
     } catch (e: any) {
       setError(e?.message || "Failed to save scenarios.");
     } finally {
@@ -576,6 +600,11 @@ export const CreateProductReviewPage: React.FC = () => {
           scenarios, refresh the scenario artefacts in MinIO, and redirect you into the existing Product Model Review
           Trust Surface. You can revisit this page at any time to adjust inputs and regenerate.
         </p>
+        {reviewFreshness && reviewFreshness.status !== "fresh" && (
+          <p className="muted warning">
+            Regenerate Product Review to refresh the Trust Surface.
+          </p>
+        )}
         <table className="kv-table">
           <tbody>
             <tr>

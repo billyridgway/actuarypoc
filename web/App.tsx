@@ -117,6 +117,7 @@ const HomePage: React.FC<{ productReview: ProductModelReview | null }> = ({ prod
   const lastDecision = anyReview?.lastDecision;
   const reviewMeta = anyReview?.reviewMeta;
   const validation = anyReview?.productDefinitionValidation;
+  const reviewFreshness = anyReview?.reviewFreshness;
 
   const shortenHash = (hash?: string | null, length = 8): string | null => {
     if (!hash) return null;
@@ -193,6 +194,27 @@ const HomePage: React.FC<{ productReview: ProductModelReview | null }> = ({ prod
                       </>
                     ) : (
                       <span className="muted">No evidence bundle recorded for the latest decision.</span>
+                    )}
+                  </td>
+                </tr>
+                <tr>
+                  <th>Review Freshness</th>
+                  <td>
+                    {reviewFreshness ? (
+                      <>
+                        <span className={`tag tag--freshness-${reviewFreshness.status}`}>
+                          {String(reviewFreshness.status).toUpperCase()}
+                        </span>
+                        {Array.isArray(reviewFreshness.messages) && reviewFreshness.messages.length > 0 && (
+                          <ul className="muted">
+                            {reviewFreshness.messages.map((m: string, idx: number) => (
+                              <li key={idx}>{m}</li>
+                            ))}
+                          </ul>
+                        )}
+                      </>
+                    ) : (
+                      <span className="muted">(no freshness data)</span>
                     )}
                   </td>
                 </tr>

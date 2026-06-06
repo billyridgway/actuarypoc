@@ -122,6 +122,15 @@ export interface ProductModelReview {
     coverageGapCount?: number;
     coverageNotApplicableCount?: number;
   };
+  reviewFreshness?: {
+    status: "fresh" | "stale" | "warning" | string;
+    messages: string[];
+    latestDocumentUploadedAt?: string | null;
+    currentGeneration?: string | null;
+    generatedAt?: string | null;
+    productDefinitionGeneratedAt?: string | null;
+    latestDecisionCreatedAt?: string | null;
+  };
   productDefinition?: {
     productCode?: string;
     filingId?: string;
@@ -276,6 +285,7 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
     coverageMatrix,
     productDefinitionBuild,
     productDefinitionValidation,
+    reviewFreshness,
   } = review;
 
   const totalScenarios = scenarios.length;
@@ -443,6 +453,21 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
           This summary is derived from the current Product Model Review data for P12TRF.
           Use it as your navigation: confirm scope, scenarios, and evidence below, then capture your decision.
         </p>
+        {reviewFreshness && reviewFreshness.status !== "fresh" && (
+          <div className={`alert alert--${reviewFreshness.status}`}>
+            <p>
+              <strong>This review may be {reviewFreshness.status}.</strong>{" "}
+              Inputs changed after the current generated evidence set. Regenerate before recording a new decision.
+            </p>
+            {Array.isArray(reviewFreshness.messages) && reviewFreshness.messages.length > 0 && (
+              <ul>
+                {reviewFreshness.messages.map((m, idx) => (
+                  <li key={idx}>{m}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
         <table className="kv-table">
           <tbody>
             <tr>
