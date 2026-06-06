@@ -42,9 +42,16 @@ export const App: React.FC = () => {
         // load the current Product Model Review snapshot. The product
         // detail page will then call its own product-level endpoint.
         if (view === "product-model" || view === "home" || view === "product") {
-          const res = await fetch("/api/product-model-review/p12trf");
+          const pmrProductCode = view === "product-model" ? productCodeParam || "P12TRF" : "P12TRF";
+
+          const res = await fetch(`/api/product-model-review/${encodeURIComponent(pmrProductCode)}`);
           if (!res.ok) {
-            throw new Error(`HTTP ${res.status}`);
+            const text = await res.text();
+            if (view === "product-model" && (res.status === 404 || res.status === 501)) {
+              const msg = `Product Model Review is not implemented for ${pmrProductCode} yet.`;
+              throw new Error(msg);
+            }
+            throw new Error(text || `HTTP ${res.status}`);
           }
           const data: ProductModelReview = await res.json();
           setProductReview(data);
@@ -83,7 +90,7 @@ export const App: React.FC = () => {
     };
 
     void fetchData();
-  }, [objectKey, view]);
+  }, [objectKey, view, productCodeParam]);
 
   if (loading && !runDetail && !productReview && view !== "create-review" && view !== "home") {
     return <div className="loading">Loading…</div>;

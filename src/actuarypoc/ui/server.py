@@ -3143,6 +3143,35 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
     }
 
 
+@app.get("/api/product-model-review/{product_code}")
+def api_product_model_review_product(product_code: str) -> Dict[str, Any]:
+    """Product-aware Product Model Review entrypoint.
+
+    For now this delegates to the P12TRF-specific PMR builder when the
+    product is implemented, and returns a friendly not-implemented
+    response for known-but-unimplemented products. Unknown products
+    return 404.
+    """
+
+    cfg = _get_product_config(product_code)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail=f"Unknown product_code '{product_code}'.")
+
+    status = cfg.get("status") or "unknown"
+    code_norm = (cfg.get("productCode") or product_code or "").strip().upper()
+
+    if status == "implemented" and code_norm == "P12TRF":
+        # Reuse the existing P12TRF PMR builder so the payload remains
+        # byte-for-byte identical to /api/product-model-review/p12trf.
+        return api_product_model_review_p12trf()
+
+    # Known but not implemented product.
+    raise HTTPException(
+        status_code=501,
+        detail="Product Model Review is not implemented for this product yet.",
+    )
+
+
 @app.post("/api/product-model-review/p12trf/evidence/seed")
 def api_product_model_review_p12trf_seed_evidence() -> Dict[str, Any]:
     """Seed a small set of filing rule evidence rows for P12TRF.
