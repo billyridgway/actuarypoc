@@ -407,6 +407,44 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
   const [bundleManifestLoading, setBundleManifestLoading] = React.useState(false);
   const [bundleManifestError, setBundleManifestError] = React.useState<string | null>(null);
 
+  // Filing requirements (P12TRF-only for now).
+  const [requirements, setRequirements] = React.useState<any[] | null>(null);
+  const [requirementsSummary, setRequirementsSummary] = React.useState<any | null>(null);
+  const [requirementsLoading, setRequirementsLoading] = React.useState<boolean>(false);
+  const [requirementsError, setRequirementsError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    const loadRequirements = async () => {
+      setRequirementsLoading(true);
+      setRequirementsError(null);
+      try {
+        const res = await fetch(`/api/product-requirements/${encodeURIComponent(product.code)}`);
+        if (!res.ok) {
+          // For non-P12TRF or unimplemented products this may legitimately
+          // return 404/501; treat that as "no requirements surface".
+          if (res.status === 404 || res.status === 501) {
+            setRequirements([]);
+            setRequirementsSummary(null);
+            return;
+          }
+          const text = await res.text();
+          throw new Error(text || `HTTP ${res.status}`);
+        }
+        const data = await res.json();
+        setRequirements(Array.isArray(data?.requirements) ? data.requirements : []);
+        setRequirementsSummary(data?.summary ?? null);
+      } catch (err: any) {
+        setRequirementsError(err?.message || "Failed to load filing requirements.");
+      } finally {
+        setRequirementsLoading(false);
+      }
+    };
+
+    if (product && product.code) {
+      void loadRequirements();
+    }
+  }, [product.code]);
+
   const onSubmitDecision = async (e: React.FormEvent) => {
     e.preventDefault();
     setSaveMessage(null);
@@ -708,6 +746,85 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
             )}
           </tbody>
         </table>
+      </section>
+
+      <section id="filing-requirements" className="card">
+        <h2>Filing Requirements</h2>
+        <p className="muted">
+          Curated view of key filing requirements for P12TRF and where they
+          are represented in the current ProductDefinition and coverage
+          matrix.
+        </p>
+        {requirementsError && (
+          <p className="error">Error loading filing requirements: {requirementsError}</p>
+        )}
+        {!requirementsError && requirementsLoading && !requirements && (
+          <p className="muted">Loading filing requirements…</p>
+        )}
+        {!requirementsError && Array.isArray(requirements) && requirements.length === 0 && !requirementsLoading && (
+          <p className="muted">No filing requirements surface is available for this product yet.</p>
+        )}
+        {requirementsSummary && (
+          <table className="kv-table">
+            <tbody>
+              <tr>
+                <th>Total requirements</th>
+                <td>{requirementsSummary.total ?? 0}</td>
+              </tr>
+              <tr>
+                <th>Status counts</th>
+                <td>
+                  implemented={requirementsSummary.implemented ?? 0}, partial={requirementsSummary.partial ?? 0},
+                  missing={requirementsSummary.missing ?? 0}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        )}
+        {Array.isArray(requirements) && requirements.length > 0 && (
+          <>
+            <h3>Requirements</h3>
+            <table className="kv-table">
+              <thead>
+                <tr>
+                  <th>Requirement ID</th>
+                  <th>Requirement</th>
+                  <th>Source</th>
+                  <th>ProductDefinition mapping</th>
+                  <th>Status</th>
+                  <th>Evidence / notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                {requirements.map((r) => {
+                  const statusRaw = (r && r.status) || "unknown";
+                  const status = String(statusRaw).toLowerCase();
+                  return (
+                    <tr key={r.requirementId || r.requirementText}>
+                      <td>{r.requirementId || "(n/a)"}</td>
+                      <td>{r.requirementText || "(n/a)"}</td>
+                      <td>{r.source || r.filingLocation || "(unknown)"}</td>
+                      <td>{r.productDefinitionMapping || "(not mapped)"}</td>
+                      <td>
+                        <span className={`tag tag--req-status-${status}`}>
+                          {String(statusRaw).toUpperCase()}
+                        </span>
+                      </td>
+                      <td className="muted">
+                        {r.evidenceRuleId && (
+                          <span>
+                            Rule: {r.evidenceRuleId}.{" "}
+                          </span>
+                        )}
+                        {r.notes || ""}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </>
+        )}
       </section>
 
       {decisionTimeline && Array.isArray(decisionTimeline.points) && decisionTimeline.points.length > 0 && (

@@ -45,11 +45,20 @@ export const ProductDetailPage: React.FC<ProductDetailProps> = ({ productCode })
   const [detail, setDetail] = useState<ProductDetailPayload | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [requirementsSummary, setRequirementsSummary] = useState<{
+    total?: number;
+    implemented?: number;
+    partial?: number;
+    missing?: number;
+  } | null>(null);
+  const [requirementsError, setRequirementsError] = useState<string | null>(null);
 
   useEffect(() => {
     const fetchDetail = async () => {
       setLoading(true);
       setError(null);
+      setRequirementsSummary(null);
+      setRequirementsError(null);
       try {
         const res = await fetch(`/api/products/${encodeURIComponent(productCode)}`);
         if (!res.ok) {
@@ -61,6 +70,27 @@ export const ProductDetailPage: React.FC<ProductDetailProps> = ({ productCode })
         }
         const data = (await res.json()) as ProductDetailPayload;
         setDetail(data);
+
+        const prod = data.product;
+        const status = (prod as any)?.status || "implemented";
+        const codeNorm = ((prod && prod.productCode) || productCode || "").toString().toUpperCase();
+
+        if (status === "implemented" && codeNorm) {
+          try {
+            const reqRes = await fetch(`/api/product-requirements/${encodeURIComponent(codeNorm)}`);
+            if (reqRes.ok) {
+              const reqData = await reqRes.json();
+              if (reqData && reqData.summary) {
+                setRequirementsSummary(reqData.summary);
+              }
+            } else if (reqRes.status !== 404 && reqRes.status !== 501) {
+              const text = await reqRes.text();
+              setRequirementsError(text || `HTTP ${reqRes.status}`);
+            }
+          } catch (e: any) {
+            setRequirementsError(e?.message || "Failed to load filing requirements summary.");
+          }
+        }
       } catch (e: any) {
         setError(e?.message || "Failed to load product detail");
       } finally {
@@ -202,6 +232,34 @@ export const ProductDetailPage: React.FC<ProductDetailProps> = ({ productCode })
           <p className="muted">No versions are available yet for this product.</p>
         )}
       </section>
+
+      {productStatus === "implemented" && (
+        <section className="card">
+          <h2>Filing requirements</h2>
+          {requirementsError && (
+            <p className="error">Error loading requirements summary: {requirementsError}</p>
+          )}
+          {!requirementsError && requirementsSummary ? (
+            <>
+              <p className="muted">
+                Requirements: total={requirementsSummary.total ?? 0}, implemented=
+                {requirementsSummary.implemented ?? 0}, partial={requirementsSummary.partial ?? 0},
+                missing={requirementsSummary.missing ?? 0}.
+              </p>
+              <p>
+                <a
+                  href={`/web?view=product-model&productCode=${encodeURIComponent(productCodeDisplay)}#filing-requirements`}
+                  className="button"
+                >
+                  Open Filing Requirements
+                </a>
+              </p>
+            </>
+          ) : !requirementsError ? (
+            <p className="muted">Filing requirements summary is not available for this product.</p>
+          ) : null}
+        </section>
+      )}
 
       <section className="card">
         <h2>Versions</h2>

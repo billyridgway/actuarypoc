@@ -3219,6 +3219,213 @@ def api_product_model_review_product(product_code: str) -> Dict[str, Any]:
     return builder()
 
 
+@app.get("/api/product-requirements/{product_code}")
+def api_product_requirements(product_code: str) -> Dict[str, Any]:
+    """Return a curated view of filing requirements for a product.
+
+    For v0 this is implemented for P12TRF only and derives requirement
+    status from the existing ProductDefinition summary and coverage
+    matrix used by the Trust Surface.
+    """
+
+    cfg = _get_product_config(product_code)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail=f"Unknown product_code '{product_code}'.")
+
+    code_norm = (cfg.get("productCode") or product_code or "").strip().upper()
+
+    # Known but not yet wired product.
+    if code_norm != "P12TRF":
+        raise HTTPException(
+            status_code=501,
+            detail="Product requirements surface is not implemented for this product yet.",
+        )
+
+    # Reuse the P12TRF PMR builder so that ProductDefinition, coverage
+    # matrix, and traceability are derived in one place.
+    pmr = api_product_model_review_p12trf()
+    product_block = pmr.get("product") or {}
+    review_meta = pmr.get("reviewMeta") or {}
+    filing_id = review_meta.get("filingId")
+    product_definition = pmr.get("productDefinition") or {}
+    coverage_matrix = pmr.get("coverageMatrix") or []
+
+    def _cm_row(feature: str) -> Optional[Dict[str, Any]]:
+        for row in coverage_matrix or []:
+            if isinstance(row, dict) and str(row.get("feature")) == feature:
+                return row
+        return None
+
+    def _status_from_cm(feature: str) -> str:
+        row = _cm_row(feature)
+        cm_status = str((row or {}).get("status") or "").lower()
+        if cm_status == "covered":
+            return "implemented"
+        if cm_status == "partial":
+            return "partial"
+        if cm_status in {"gap", "not_applicable"}:
+            return "missing"
+        return "missing"
+
+    def _notes_from_pd(key: str) -> str:
+        pd = product_definition or {}
+        try:
+            value = pd.get(key)
+        except Exception:
+            value = None
+        return f"ProductDefinition {key}={value!r}"
+
+    # Core curated requirements for the P12TRF POC.
+    requirements: List[Dict[str, Any]] = []
+
+    # Level term periods
+    requirements.append(
+        {
+            "requirementId": "req_term_periods",
+            "requirementText": "Level term periods for this product.",
+            "source": f"{filing_id or 'P12TRF filing (POC)'} – Term periods section",
+            "productDefinitionMapping": "termPeriods",
+            "status": _status_from_cm("Term periods"),
+            "evidenceRuleId": None,
+            "notes": _notes_from_pd("termPeriods"),
+        }
+    )
+
+    # Issue age range
+    requirements.append(
+        {
+            "requirementId": "req_issue_ages",
+            "requirementText": "Issue age range for base coverage.",
+            "source": f"{filing_id or 'P12TRF filing (POC)'} – Issue ages table",
+            "productDefinitionMapping": "issueAges.min / issueAges.max",
+            "status": _status_from_cm("Issue ages"),
+            "evidenceRuleId": None,
+            "notes": _notes_from_pd("issueAges"),
+        }
+    )
+
+    # Risk / underwriting classes
+    requirements.append(
+        {
+            "requirementId": "req_risk_classes",
+            "requirementText": "Underwriting and risk classes supported by the product.",
+            "source": f"{filing_id or 'P12TRF filing (POC)'} – Risk class definitions",
+            "productDefinitionMapping": "underwritingClasses, riskClasses",
+            "status": _status_from_cm("Underwriting / risk classes"),
+            "evidenceRuleId": None,
+            "notes": _notes_from_pd("underwritingClasses"),
+        }
+    )
+
+    # Smoker classes
+    requirements.append(
+        {
+            "requirementId": "req_smoker_classes",
+            "requirementText": "Smoker / non-smoker classes.",
+            "source": f"{filing_id or 'P12TRF filing (POC)'} – Smoker class definitions",
+            "productDefinitionMapping": "smokerClasses",
+            "status": _status_from_cm("Smoker classes"),
+            "evidenceRuleId": None,
+            "notes": _notes_from_pd("smokerClasses"),
+        }
+    )
+
+    # Premium modes
+    requirements.append(
+        {
+            "requirementId": "req_premium_modes",
+            "requirementText": "Premium payment modes (e.g. annual).",
+            "source": f"{filing_id or 'P12TRF filing (POC)'} – Premium mode definitions",
+            "productDefinitionMapping": "premiumModes",
+            "status": _status_from_cm("Premium modes"),
+            "evidenceRuleId": None,
+            "notes": _notes_from_pd("premiumModes"),
+        }
+    )
+
+    # Face amount range
+    requirements.append(
+        {
+            "requirementId": "req_face_amount_range",
+            "requirementText": "Minimum and maximum face amounts.",
+            "source": f"{filing_id or 'P12TRF filing (POC)'} – Face amount limits",
+            "productDefinitionMapping": "faceAmounts.min / faceAmounts.max",
+            "status": _status_from_cm("Face amount range"),
+            "evidenceRuleId": None,
+            "notes": _notes_from_pd("faceAmounts"),
+        }
+    )
+
+    # Base term death benefit
+    requirements.append(
+        {
+            "requirementId": "req_base_term_death_benefit",
+            "requirementText": "Base term death benefit payable during the level term.",
+            "source": f"{filing_id or 'P12TRF filing (POC)'} – Death benefit during term",
+            "productDefinitionMapping": "coverages[id=base_term]",
+            "status": _status_from_cm("Base term coverage"),
+            "evidenceRuleId": "rule_death_benefit_term",
+            "notes": _notes_from_pd("coverages"),
+        }
+    )
+
+    # Level premiums
+    requirements.append(
+        {
+            "requirementId": "req_level_premiums",
+            "requirementText": "Premiums remain level during the term.",
+            "source": f"{filing_id or 'P12TRF filing (POC)'} – Level premium table",
+            "productDefinitionMapping": "premium table / premiumModes",
+            "status": _status_from_cm("Level premiums"),
+            "evidenceRuleId": "rule_level_premiums",
+            "notes": "Derived from premium lookup table and rate reconciliation checks.",
+        }
+    )
+
+    # Riders / unmodeled coverages
+    requirements.append(
+        {
+            "requirementId": "req_riders_unmodeled",
+            "requirementText": "Riders and unmodeled coverages recorded in the filing.",
+            "source": f"{filing_id or 'P12TRF filing (POC)'} – Rider and supplemental benefit sections",
+            "productDefinitionMapping": "extra.unmodeled_coverages",
+            "status": _status_from_cm("Riders / unmodeled coverages"),
+            "evidenceRuleId": None,
+            "notes": "Unmodeled coverages are tracked but not projected in this POC.",
+        }
+    )
+
+    # Convertibility – currently a documented placeholder only.
+    requirements.append(
+        {
+            "requirementId": "req_convertibility",
+            "requirementText": "Convertibility privilege during the level term.",
+            "source": f"{filing_id or 'P12TRF filing (POC)'} – Convertibility provisions",
+            "productDefinitionMapping": "(not modeled in current ProductDefinition)",
+            "status": "missing",
+            "evidenceRuleId": None,
+            "notes": "Convertibility is acknowledged conceptually but not modeled in the current P12TRF POC.",
+        }
+    )
+
+    total = len(requirements)
+    implemented = sum(1 for r in requirements if str(r.get("status")) == "implemented")
+    partial = sum(1 for r in requirements if str(r.get("status")) == "partial")
+    missing = sum(1 for r in requirements if str(r.get("status")) == "missing")
+
+    return {
+        "productCode": product_block.get("code") or code_norm,
+        "filingId": filing_id,
+        "requirements": requirements,
+        "summary": {
+            "total": total,
+            "implemented": implemented,
+            "partial": partial,
+            "missing": missing,
+        },
+    }
+
+
 @app.post("/api/product-model-review/p12trf/evidence/seed")
 def api_product_model_review_p12trf_seed_evidence() -> Dict[str, Any]:
     """Seed a small set of filing rule evidence rows for P12TRF.
