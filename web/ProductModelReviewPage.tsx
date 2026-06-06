@@ -225,6 +225,10 @@ interface ProductModelReviewPageProps {
       scenario_validation_pass_count?: number | null;
       scenario_validation_warning_count?: number | null;
       scenario_validation_fail_count?: number | null;
+      decisionRisk?: {
+        status?: string;
+        reasons?: string[];
+      } | null;
       product_definition_path?: string | null;
       product_definition_hash?: string | null;
       build_report_path?: string | null;
@@ -261,6 +265,10 @@ interface ProductModelReviewPageProps {
       scenario_validation_pass_count?: number | null;
       scenario_validation_warning_count?: number | null;
       scenario_validation_fail_count?: number | null;
+      decisionRisk?: {
+        status?: string;
+        reasons?: string[];
+      } | null;
       product_definition_path?: string | null;
       product_definition_hash?: string | null;
       build_report_path?: string | null;
@@ -649,6 +657,26 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                 </td>
               </tr>
             )}
+            {lastDecision && lastDecision.decisionRisk && (
+              <tr>
+                <th>Decision risk</th>
+                <td>
+                  <span
+                    className={`tag tag--decision-risk-${(lastDecision.decisionRisk.status || "unknown").toLowerCase()}`}
+                  >
+                    {String(lastDecision.decisionRisk.status || "unknown").toUpperCase()}
+                  </span>
+                  {Array.isArray(lastDecision.decisionRisk.reasons)
+                    && lastDecision.decisionRisk.reasons.length > 0 && (
+                      <ul className="muted">
+                        {lastDecision.decisionRisk.reasons.map((r, idx) => (
+                          <li key={idx}>{r}</li>
+                        ))}
+                      </ul>
+                  )}
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </section>
@@ -671,6 +699,7 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                 <th>Generation</th>
                 <th>Validation</th>
                 <th>Scenario validation</th>
+                <th>Decision risk</th>
                 <th>Coverage (C/P/G/N)</th>
                 <th>Bundle path</th>
                 <th>Bundle hash</th>
@@ -694,14 +723,22 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                 const cGap = d.coverage_gap_count ?? 0;
                 const cNA = d.coverage_not_applicable_count ?? 0;
 
+                const riskStatusRaw = (d.decisionRisk && d.decisionRisk.status) || "";
+                const riskStatus = typeof riskStatusRaw === "string" ? riskStatusRaw.toLowerCase() : "";
+                const riskReasons = Array.isArray(d.decisionRisk?.reasons) ? d.decisionRisk?.reasons : [];
+                const shortRiskReasons = riskReasons.slice(0, 2).join(" | ");
+
                 const scenarioNonPass =
                   typeof d.scenario_validation_status === "string"
                   && d.scenario_validation_status.toLowerCase() !== "pass";
+
+                const riskRowHighlight = riskStatus === "fail" || riskStatus === "incomplete";
 
                 const rowClassNames = [
                   "decision-row",
                   isLatest ? "decision-row--latest" : "",
                   scenarioNonPass ? "decision-row--scenario-nonpass" : "",
+                  riskRowHighlight ? "decision-row--risk" : "",
                 ]
                   .filter(Boolean)
                   .join(" ");
@@ -726,6 +763,16 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                       {sStatus}
                       {" "}
                       <span className="muted">[pass={sPass}, warn={sWarn}, fail={sFail}]</span>
+                    </td>
+                    <td>
+                      <span
+                        className={`tag tag--decision-risk-${riskStatus || "unknown"}`}
+                      >
+                        {(riskStatus || "unknown").toUpperCase()}
+                      </span>
+                      {shortRiskReasons && (
+                        <span className="muted"> — {shortRiskReasons}</span>
+                      )}
                     </td>
                     <td>
                       {cCov}/{cPart}/{cGap}/{cNA}

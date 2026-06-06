@@ -119,6 +119,7 @@ const HomePage: React.FC<{ productReview: ProductModelReview | null }> = ({ prod
   const validation = anyReview?.productDefinitionValidation;
   const reviewFreshness = anyReview?.reviewFreshness;
   const scenarioValidation = anyReview?.scenarioValidation;
+  const decisionRisk = lastDecision?.decisionRisk;
 
   const shortenHash = (hash?: string | null, length = 8): string | null => {
     if (!hash) return null;
@@ -177,6 +178,32 @@ const HomePage: React.FC<{ productReview: ProductModelReview | null }> = ({ prod
                       </>
                     ) : (
                       <span className="muted">No decisions recorded yet.</span>
+                    )}
+                  </td>
+                </tr>
+                <tr>
+                  <th>Decision risk</th>
+                  <td>
+                    {decisionRisk ? (
+                      <>
+                        <span
+                          className={`tag tag--decision-risk-${String(decisionRisk.status || "unknown").toLowerCase()}`}
+                        >
+                          {String(decisionRisk.status || "unknown").toUpperCase()}
+                        </span>
+                        {Array.isArray(decisionRisk.reasons)
+                          && decisionRisk.reasons.length > 0
+                          && decisionRisk.status
+                          && String(decisionRisk.status).toLowerCase() !== "clean" && (
+                            <ul className="muted">
+                              {decisionRisk.reasons.map((r: string, idx: number) => (
+                                <li key={idx}>{r}</li>
+                              ))}
+                            </ul>
+                        )}
+                      </>
+                    ) : (
+                      <span className="muted">(no decision risk summary)</span>
                     )}
                   </td>
                 </tr>

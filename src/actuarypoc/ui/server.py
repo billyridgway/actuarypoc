@@ -1862,6 +1862,135 @@ def _build_p12trf_scenario_validation(scenarios: List[Dict[str, Any]]) -> Dict[s
     }
 
 
+def _build_decision_risk(decision: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Derive a compact risk summary for a PMR decision.
+
+    This is intentionally deterministic and based only on the immutable
+    snapshot fields stored with each decision row. It does not perform
+    any additional I/O or re-validation work.
+
+    Status precedence:
+    - ``fail`` when any failing condition is present
+    - ``warning`` when no failures but at least one warning condition
+    - ``incomplete`` when required bundle/snapshot fields are missing
+    - ``clean`` only when none of the above apply
+    """
+
+    if not isinstance(decision, dict):
+        return None
+
+    reasons: List[str] = []
+
+    # Core snapshot fields.
+    sv_status = str((decision.get("scenario_validation_status") or "")).strip().lower()
+    validation_status = str((decision.get("validation_status") or "")).strip().lower()
+
+    try:
+        validation_fail_count = int(decision.get("validation_fail_count") or 0)
+    except Exception:
+        validation_fail_count = 0
+    try:
+        validation_warning_count = int(decision.get("validation_warning_count") or 0)
+    except Exception:
+        validation_warning_count = 0
+    try:
+        coverage_gap_count = int(decision.get("coverage_gap_count") or 0)
+    except Exception:
+        coverage_gap_count = 0
+
+    bundle_path = decision.get("bundle_path")
+    bundle_hash = decision.get("bundle_hash")
+    pd_hash = decision.get("product_definition_hash")
+    build_hash = decision.get("build_report_hash")
+    coverage_hash = decision.get("coverage_matrix_hash")
+    validation_hash = decision.get("validation_snapshot_hash")
+
+    has_bundle_meta = bool(bundle_path and bundle_hash)
+    has_pd = bool(pd_hash)
+    has_build = bool(build_hash)
+    has_coverage = bool(coverage_hash)
+    has_validation = bool(validation_hash)
+
+    missing_fields: List[str] = []
+    if not has_bundle_meta:
+        if not bundle_path:
+            missing_fields.append("evidence bundle path")
+        if not bundle_hash:
+            missing_fields.append("evidence bundle hash")
+    if not has_pd:
+        missing_fields.append("product-definition.json hash")
+    if not has_build:
+        missing_fields.append("build-report.json hash")
+    if not has_coverage:
+        missing_fields.append("coverage-matrix.json hash")
+    if not has_validation:
+        missing_fields.append("validation-report.json hash")
+
+    # Fail-level conditions.
+    fail_flags: List[str] = []
+    if sv_status == "fail":
+        fail_flags.append("scenario_validation_fail")
+        reasons.append("Scenario validation status was fail at decision time.")
+    if validation_fail_count > 0:
+        fail_flags.append("validation_failures")
+        if validation_fail_count == 1:
+            reasons.append("ProductDefinition validation had 1 failing check at decision time.")
+        else:
+            reasons.append(
+                f"ProductDefinition validation had {validation_fail_count} failing checks at decision time."
+            )
+
+    # Warning-level conditions.
+    warning_flags: List[str] = []
+    if sv_status == "warning":
+        warning_flags.append("scenario_validation_warning")
+        reasons.append("Scenario validation status was warning at decision time.")
+    if validation_status == "warning":
+        warning_flags.append("validation_status_warning")
+        reasons.append("ProductDefinition validation status was warning at decision time.")
+    if validation_warning_count > 0:
+        warning_flags.append("validation_warnings")
+        if validation_warning_count == 1:
+            reasons.append("ProductDefinition validation had 1 warning at decision time.")
+        else:
+            reasons.append(
+                f"ProductDefinition validation had {validation_warning_count} warnings at decision time."
+            )
+    if coverage_gap_count > 0:
+        warning_flags.append("coverage_gaps")
+        if coverage_gap_count == 1:
+            reasons.append("Coverage matrix had 1 gap at decision time.")
+        else:
+            reasons.append(f"Coverage matrix had {coverage_gap_count} gaps at decision time.")
+
+    # Incomplete semantics are based on missing bundle/snapshot metadata.
+    incomplete = bool(missing_fields)
+    if incomplete:
+        missing_desc = ", ".join(sorted(missing_fields))
+        reasons.append(f"Evidence bundle or snapshot metadata is incomplete: missing {missing_desc}.")
+
+    # Positive signal when everything we expect is present.
+    if has_bundle_meta and has_pd and has_build and has_coverage and has_validation:
+        reasons.append("Evidence bundle exists and is hash-verifiable.")
+
+    # Pick overall status with clear precedence.
+    if fail_flags:
+        status = "fail"
+    elif warning_flags:
+        status = "warning"
+    elif incomplete:
+        status = "incomplete"
+    else:
+        status = "clean"
+        if not reasons:
+            reasons.append("No validation, coverage, or scenario issues detected at decision time.")
+
+    return {
+        "status": status,
+        "reasons": reasons,
+    }
+
+
 @app.get("/api/product-definition/{product_code}")
 def api_get_product_definition(product_code: str, filing_id: str = Query(...)) -> Dict[str, Any]:
     """Return the v1 ProductDefinition artefact for a product+filing, if any.
@@ -2627,6 +2756,15 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
     except Exception:
         last_decision = None
         decision_history = []
+
+    # Derived decision risk summary (clean / warning / fail / incomplete)
+    # based on immutable snapshot fields stored with each decision.
+    if isinstance(last_decision, dict):
+        last_decision["decisionRisk"] = _build_decision_risk(last_decision)
+    if isinstance(decision_history, list):
+        for row in decision_history:
+            if isinstance(row, dict):
+                row["decisionRisk"] = _build_decision_risk(row)
 
     completed_steps = 0
     total_steps = 6
