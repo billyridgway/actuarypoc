@@ -314,6 +314,18 @@ class ProductModelReviewDecisionResponse(BaseModel):  # type: ignore[misc]
     validation_warning_count: Optional[int] = None
     validation_fail_count: Optional[int] = None
 
+    # Scenario validation snapshot at decision time.
+    scenario_validation_status: Optional[str] = None
+    scenario_validation_pass_count: Optional[int] = None
+    scenario_validation_warning_count: Optional[int] = None
+    scenario_validation_fail_count: Optional[int] = None
+
+    # Scenario validation snapshot at decision time
+    scenario_validation_status: Optional[str] = None
+    scenario_validation_pass_count: Optional[int] = None
+    scenario_validation_warning_count: Optional[int] = None
+    scenario_validation_fail_count: Optional[int] = None
+
     # Immutable evidence snapshot fields
     product_definition_path: Optional[str] = None
     product_definition_hash: Optional[str] = None
@@ -2834,6 +2846,7 @@ def api_product_model_review_decision(product_code: str, payload: ProductModelRe
     # decision record. Decisions are always stored using an
     # upper-cased product_code so that last-decision lookups remain
     # consistent regardless of the casing used at the API boundary.
+    scenario_validation_snapshot: Optional[Dict[str, Any]] = None
     code_norm = product_code.strip().upper()
     if code_norm == "P12TRF":
         try:
@@ -2861,6 +2874,19 @@ def api_product_model_review_decision(product_code: str, payload: ProductModelRe
                     validation_pass_count = summary.get("pass")
                     validation_warning_count = summary.get("warning")
                     validation_fail_count = summary.get("fail")
+
+            # Scenario validation snapshot: capture overall status and
+            # summary counts so that decisions reflect model-behaviour
+            # health at approval time.
+            sv = pmr.get("scenarioValidation") or None
+            if isinstance(sv, dict):
+                scenario_validation_snapshot = sv
+                scenario_validation_status = sv.get("status")
+                sv_summary = sv.get("summary") or {}
+                if isinstance(sv_summary, dict):
+                    scenario_validation_pass_count = sv_summary.get("pass")
+                    scenario_validation_warning_count = sv_summary.get("warning")
+                    scenario_validation_fail_count = sv_summary.get("fail")
 
             # Immutable evidence snapshot fields: capture the exact
             # ProductDefinition/build artefacts and stable snapshots for
@@ -3071,6 +3097,10 @@ def api_product_model_review_decision(product_code: str, payload: ProductModelRe
         validation_pass_count=validation_pass_count,
         validation_warning_count=validation_warning_count,
         validation_fail_count=validation_fail_count,
+        scenario_validation_status=scenario_validation_status,
+        scenario_validation_pass_count=scenario_validation_pass_count,
+        scenario_validation_warning_count=scenario_validation_warning_count,
+        scenario_validation_fail_count=scenario_validation_fail_count,
         product_definition_path=product_definition_path,
         product_definition_hash=product_definition_hash,
         build_report_path=build_report_path,
@@ -3106,6 +3136,10 @@ def api_product_model_review_decision(product_code: str, payload: ProductModelRe
             validation_pass_count=validation_pass_count,
             validation_warning_count=validation_warning_count,
             validation_fail_count=validation_fail_count,
+            scenario_validation_status=scenario_validation_status,
+            scenario_validation_pass_count=scenario_validation_pass_count,
+            scenario_validation_warning_count=scenario_validation_warning_count,
+            scenario_validation_fail_count=scenario_validation_fail_count,
             product_definition_path=product_definition_path,
             product_definition_hash=product_definition_hash,
             build_report_path=build_report_path,
@@ -3183,6 +3217,25 @@ def api_product_model_review_decision(product_code: str, payload: ProductModelRe
                     ensure_ascii=False,
                 ).encode("utf-8")
 
+                # scenario-validation.json – deterministic snapshot of
+                # scenarioValidation at decision time. This is built
+                # from the same PMR snapshot that fed the decision
+                # context so that the bundle reflects model-behaviour
+                # health "as approved".
+                if scenario_validation_snapshot is not None:
+                    try:
+                        artefacts["scenario-validation.json"] = json.dumps(
+                            scenario_validation_snapshot,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            ensure_ascii=False,
+                        ).encode("utf-8")
+                    except Exception:
+                        # Best-effort only: failure to serialise the
+                        # scenario validation snapshot should not
+                        # block bundle creation.
+                        pass
+
                 # hashes.json – SHA256 for every file in the bundle.
                 hashes: Dict[str, str] = {}
                 for name, data in artefacts.items():
@@ -3245,6 +3298,10 @@ def api_product_model_review_decision(product_code: str, payload: ProductModelRe
         validation_pass_count=rec.get("validation_pass_count"),
         validation_warning_count=rec.get("validation_warning_count"),
         validation_fail_count=rec.get("validation_fail_count"),
+        scenario_validation_status=rec.get("scenario_validation_status"),
+        scenario_validation_pass_count=rec.get("scenario_validation_pass_count"),
+        scenario_validation_warning_count=rec.get("scenario_validation_warning_count"),
+        scenario_validation_fail_count=rec.get("scenario_validation_fail_count"),
         product_definition_path=rec.get("product_definition_path"),
         product_definition_hash=rec.get("product_definition_hash"),
         build_report_path=rec.get("build_report_path"),

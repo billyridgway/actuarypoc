@@ -221,6 +221,10 @@ interface ProductModelReviewPageProps {
       validation_pass_count?: number | null;
       validation_warning_count?: number | null;
       validation_fail_count?: number | null;
+      scenario_validation_status?: string | null;
+      scenario_validation_pass_count?: number | null;
+      scenario_validation_warning_count?: number | null;
+      scenario_validation_fail_count?: number | null;
       product_definition_path?: string | null;
       product_definition_hash?: string | null;
       build_report_path?: string | null;
@@ -253,6 +257,10 @@ interface ProductModelReviewPageProps {
       validation_pass_count?: number | null;
       validation_warning_count?: number | null;
       validation_fail_count?: number | null;
+      scenario_validation_status?: string | null;
+      scenario_validation_pass_count?: number | null;
+      scenario_validation_warning_count?: number | null;
+      scenario_validation_fail_count?: number | null;
       product_definition_path?: string | null;
       product_definition_hash?: string | null;
       build_report_path?: string | null;
@@ -632,6 +640,12 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                     : productDefinitionValidation && productDefinitionValidation.summary
                       ? ` [pass=${productDefinitionValidation.summary.pass}, warning=${productDefinitionValidation.summary.warning}, fail=${productDefinitionValidation.summary.fail}]`
                       : ""}
+                  {" "}Scenario validation: {lastDecision.scenario_validation_status || scenarioValidation?.status || "(n/a)"}
+                  {lastDecision.scenario_validation_pass_count != null
+                    ? ` [pass=${lastDecision.scenario_validation_pass_count}, warning=${lastDecision.scenario_validation_warning_count ?? 0}, fail=${lastDecision.scenario_validation_fail_count ?? 0}]`
+                    : scenarioValidation && scenarioValidation.summary
+                      ? ` [pass=${scenarioValidation.summary.pass ?? 0}, warning=${scenarioValidation.summary.warning ?? 0}, fail=${scenarioValidation.summary.fail ?? 0}]`
+                      : ""}
                 </td>
               </tr>
             )}
@@ -656,6 +670,7 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                 <th>Filing</th>
                 <th>Generation</th>
                 <th>Validation</th>
+                <th>Scenario validation</th>
                 <th>Coverage (C/P/G/N)</th>
                 <th>Bundle path</th>
                 <th>Bundle hash</th>
@@ -670,13 +685,29 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                 const vPass = d.validation_pass_count ?? 0;
                 const vWarn = d.validation_warning_count ?? 0;
                 const vFail = d.validation_fail_count ?? 0;
+                const sStatus = d.scenario_validation_status || "(n/a)";
+                const sPass = d.scenario_validation_pass_count ?? 0;
+                const sWarn = d.scenario_validation_warning_count ?? 0;
+                const sFail = d.scenario_validation_fail_count ?? 0;
                 const cCov = d.coverage_covered_count ?? 0;
                 const cPart = d.coverage_partial_count ?? 0;
                 const cGap = d.coverage_gap_count ?? 0;
                 const cNA = d.coverage_not_applicable_count ?? 0;
 
+                const scenarioNonPass =
+                  typeof d.scenario_validation_status === "string"
+                  && d.scenario_validation_status.toLowerCase() !== "pass";
+
+                const rowClassNames = [
+                  "decision-row",
+                  isLatest ? "decision-row--latest" : "",
+                  scenarioNonPass ? "decision-row--scenario-nonpass" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ");
+
                 return (
-                  <tr key={d.id ?? Math.random()} className={isLatest ? "decision-row decision-row--latest" : "decision-row"}>
+                  <tr key={d.id ?? Math.random()} className={rowClassNames}>
                     <td>
                       {d.id}
                       {isLatest && <span className="tag">latest</span>}
@@ -690,6 +721,11 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                       {validationLabel}
                       {" "}
                       <span className="muted">[pass={vPass}, warn={vWarn}, fail={vFail}]</span>
+                    </td>
+                    <td>
+                      {sStatus}
+                      {" "}
+                      <span className="muted">[pass={sPass}, warn={sWarn}, fail={sFail}]</span>
                     </td>
                     <td>
                       {cCov}/{cPart}/{cGap}/{cNA}
@@ -803,7 +839,7 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                             <th>Full hash</th>
                           </tr>
                         </thead>
-                        <tbody>
+                          <tbody>
                           {[
                             "product-definition.json",
                             "build-report.json",
@@ -811,6 +847,8 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                             "validation-report.json",
                             "decision.json",
                             "manifest.json",
+                            "scenario-validation.json",
+                            "hashes.json",
                           ].map((name) => {
                             const full = bundleManifest.hashes[name];
                             return (

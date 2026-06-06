@@ -181,6 +181,27 @@ const HomePage: React.FC<{ productReview: ProductModelReview | null }> = ({ prod
                   </td>
                 </tr>
                 <tr>
+                  <th>Decision scenario validation</th>
+                  <td>
+                    {lastDecision?.scenario_validation_status ? (
+                      <>
+                        <span
+                          className={`tag tag--scenario-validation-${lastDecision.scenario_validation_status}`}
+                        >
+                          {String(lastDecision.scenario_validation_status).toUpperCase()}
+                        </span>
+                        <span className="muted">
+                          {" "}[pass={lastDecision.scenario_validation_pass_count ?? 0}, warning=
+                          {lastDecision.scenario_validation_warning_count ?? 0}, fail=
+                          {lastDecision.scenario_validation_fail_count ?? 0}]
+                        </span>
+                      </>
+                    ) : (
+                      <span className="muted">(no decision scenario validation snapshot)</span>
+                    )}
+                  </td>
+                </tr>
+                <tr>
                   <th>Latest bundle</th>
                   <td>
                     {lastDecision?.bundle_path ? (
