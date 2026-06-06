@@ -3170,6 +3170,7 @@ ProductModelReviewBuilder = Callable[[], Dict[str, Any]]
 ProductRequirementsProvider = Callable[[str], Dict[str, Any]]
 ProductDefinitionEvidenceProvider = Callable[[str], Dict[str, Any]]
 ProductProjectionEvidenceProvider = Callable[[str], Dict[str, Any]]
+ProductIllustrationEvidenceProvider = Callable[[str], Dict[str, Any]]
 
 
 _PRODUCT_MODEL_REVIEW_BUILDERS: Dict[str, ProductModelReviewBuilder] = {
@@ -3179,6 +3180,7 @@ _PRODUCT_MODEL_REVIEW_BUILDERS: Dict[str, ProductModelReviewBuilder] = {
 _PRODUCT_REQUIREMENTS_PROVIDERS: Dict[str, ProductRequirementsProvider] = {}
 _PRODUCT_DEFINITION_EVIDENCE_PROVIDERS: Dict[str, ProductDefinitionEvidenceProvider] = {}
 _PRODUCT_PROJECTION_EVIDENCE_PROVIDERS: Dict[str, ProductProjectionEvidenceProvider] = {}
+_PRODUCT_ILLUSTRATION_EVIDENCE_PROVIDERS: Dict[str, ProductIllustrationEvidenceProvider] = {}
 
 
 def _get_product_model_review_builder(product_code: str) -> Optional[ProductModelReviewBuilder]:
@@ -3212,6 +3214,13 @@ def _get_product_projection_evidence_provider(product_code: str) -> Optional[Pro
 
     code_norm = (product_code or "").strip().upper()
     return _PRODUCT_PROJECTION_EVIDENCE_PROVIDERS.get(code_norm)
+
+
+def _get_product_illustration_evidence_provider(product_code: str) -> Optional[ProductIllustrationEvidenceProvider]:
+    """Resolve an illustration comparison evidence provider for the given product code."""
+
+    code_norm = (product_code or "").strip().upper()
+    return _PRODUCT_ILLUSTRATION_EVIDENCE_PROVIDERS.get(code_norm)
 
 
 @app.get("/api/product-model-review/{product_code}")
@@ -3336,6 +3345,33 @@ def api_product_projection_evidence_product(product_code: str) -> Dict[str, Any]
         raise HTTPException(
             status_code=501,
             detail="Projection logic evidence provider is not registered for this product yet.",
+        )
+
+    return provider(code_norm)
+
+
+@app.get("/api/products/{product_code}/illustration-evidence")
+def api_product_illustration_evidence_product(product_code: str) -> Dict[str, Any]:
+    """Product-aware illustration comparison evidence entrypoint."""
+
+    cfg = _get_product_config(product_code)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail=f"Unknown product_code '{product_code}'.")
+
+    status = cfg.get("status") or "unknown"
+    code_norm = (cfg.get("productCode") or product_code or "").strip().upper()
+
+    if status != "implemented":
+        raise HTTPException(
+            status_code=501,
+            detail="Illustration comparison evidence surface is not implemented for this product yet.",
+        )
+
+    provider = _get_product_illustration_evidence_provider(code_norm)
+    if provider is None:
+        raise HTTPException(
+            status_code=501,
+            detail="Illustration comparison evidence provider is not registered for this product yet.",
         )
 
     return provider(code_norm)
@@ -3832,6 +3868,109 @@ def build_p12trf_projection_logic_evidence(product_code: str) -> Dict[str, Any]:
 
 
 _PRODUCT_PROJECTION_EVIDENCE_PROVIDERS["P12TRF"] = build_p12trf_projection_logic_evidence
+
+
+def build_p12trf_illustration_evidence(product_code: str) -> Dict[str, Any]:
+    """P12TRF-specific illustration comparison evidence provider.
+
+    Projects the existing rate spot checks into a generic comparison
+    payload so an actuary can see where modelled premiums align with
+    filed illustration points and where they diverge.
+    """
+
+    pmr = api_product_model_review_p12trf()
+    product_block = pmr.get("product") or {}
+    review_meta = pmr.get("reviewMeta") or {}
+    filing_id = review_meta.get("filingId")
+
+    rates = pmr.get("rates") or {}
+    spot_checks = rates.get("spotChecks") or []
+
+    cases: List[Dict[str, Any]] = []
+
+    if isinstance(spot_checks, list):
+        for idx, sc in enumerate(spot_checks):
+            if not isinstance(sc, dict):
+                continue
+
+            age = sc.get("age")
+            term_years = sc.get("termYears")
+            risk_class = sc.get("riskClass")
+            face_amount = sc.get("faceAmount")
+            filed_prem = sc.get("filedPremium")
+            model_prem = sc.get("modelPremium")
+            raw_status = str(sc.get("status") or "").lower() or "unknown"
+
+            abs_diff: Optional[float] = None
+            pct_diff: Optional[float] = None
+            if isinstance(filed_prem, (int, float)) and isinstance(model_prem, (int, float)):
+                try:
+                    abs_diff = float(model_prem) - float(filed_prem)
+                    pct_diff = (abs_diff / float(filed_prem)) if filed_prem not in (0, 0.0) else None
+                except Exception:
+                    abs_diff = None
+                    pct_diff = None
+
+            # Normalise to a coarse within_tolerance vs mismatch view.
+            if raw_status in {"ok", "match", "within_tolerance"}:
+                norm_status = "within_tolerance"
+            elif raw_status in {"mismatch", "fail", "error"}:
+                norm_status = "mismatch"
+            else:
+                norm_status = raw_status or "unknown"
+
+            case_id = sc.get("id") or f"case_{idx + 1}"
+
+            cases.append(
+                {
+                    "id": case_id,
+                    "label": sc.get("label")
+                    or f"Age {age}, term {term_years}y, {risk_class or 'risk'} {face_amount}",
+                    "inputs": {
+                        "age": age,
+                        "termYears": term_years,
+                        "riskClass": risk_class,
+                        "faceAmount": face_amount,
+                    },
+                    "trusted": {
+                        "annualPremium": filed_prem,
+                    },
+                    "model": {
+                        "annualPremium": model_prem,
+                    },
+                    "difference": {
+                        "absolute": abs_diff,
+                        "percent": pct_diff,
+                    },
+                    "status": norm_status,
+                    # For this POC, all comparison cases support the
+                    # same premium-related requirements.
+                    "linkedRequirementIds": [
+                        "req_level_premiums",
+                        "req_premium_modes",
+                    ],
+                }
+            )
+
+    case_count = len(cases)
+    within_tolerance = sum(1 for c in cases if str(c.get("status")) == "within_tolerance")
+    mismatch = sum(1 for c in cases if str(c.get("status")) == "mismatch")
+
+    return {
+        "productCode": product_block.get("code") or product_code,
+        "productName": product_block.get("name"),
+        "filingId": filing_id,
+        "status": "available" if case_count > 0 else "no_cases",
+        "cases": cases,
+        "summary": {
+            "caseCount": case_count,
+            "withinTolerance": within_tolerance,
+            "mismatch": mismatch,
+        },
+    }
+
+
+_PRODUCT_ILLUSTRATION_EVIDENCE_PROVIDERS["P12TRF"] = build_p12trf_illustration_evidence
 
 
 @app.post("/api/product-model-review/p12trf/evidence/seed")

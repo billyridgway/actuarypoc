@@ -423,6 +423,11 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
   const [projectionEvidenceError, setProjectionEvidenceError] = React.useState<string | null>(null);
   const [projectionEvidenceLoading, setProjectionEvidenceLoading] = React.useState<boolean>(false);
 
+  // Illustration comparison evidence.
+  const [illustrationEvidence, setIllustrationEvidence] = React.useState<any | null>(null);
+  const [illustrationEvidenceError, setIllustrationEvidenceError] = React.useState<string | null>(null);
+  const [illustrationEvidenceLoading, setIllustrationEvidenceLoading] = React.useState<boolean>(false);
+
   React.useEffect(() => {
     const loadRequirements = async () => {
       setRequirementsLoading(true);
@@ -508,6 +513,34 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
 
     if (product && product.code) {
       void loadPdEvidence();
+    }
+  }, [product.code]);
+
+  React.useEffect(() => {
+    const loadIllustrationEvidence = async () => {
+      setIllustrationEvidenceLoading(true);
+      setIllustrationEvidenceError(null);
+      try {
+        const res = await fetch(`/api/products/${encodeURIComponent(product.code)}/illustration-evidence`);
+        if (!res.ok) {
+          if (res.status === 404 || res.status === 501) {
+            setIllustrationEvidence(null);
+            return;
+          }
+          const text = await res.text();
+          throw new Error(text || `HTTP ${res.status}`);
+        }
+        const data = await res.json();
+        setIllustrationEvidence(data || null);
+      } catch (err: any) {
+        setIllustrationEvidenceError(err?.message || "Failed to load illustration comparison evidence.");
+      } finally {
+        setIllustrationEvidenceLoading(false);
+      }
+    };
+
+    if (product && product.code) {
+      void loadIllustrationEvidence();
     }
   }, [product.code]);
 
@@ -871,6 +904,102 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                               <pre className="inline-pre">{String(logic.pseudoCode)}</pre>
                             )}
                             {logic.notes && <div className="muted">{logic.notes}</div>}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </>
+            )}
+          </>
+        )}
+      </section>
+
+      <section className="card">
+        <h2>Illustration Comparison</h2>
+        <p className="muted">
+          Comparison of modelled premiums against trusted illustration
+          points for key age / term / risk / face combinations.
+        </p>
+        {illustrationEvidenceError && (
+          <p className="error">Error loading illustration comparison evidence: {illustrationEvidenceError}</p>
+        )}
+        {!illustrationEvidenceError && illustrationEvidenceLoading && !illustrationEvidence && (
+          <p className="muted">Loading illustration comparison evidence…</p>
+        )}
+        {!illustrationEvidenceError && !illustrationEvidence && !illustrationEvidenceLoading && (
+          <p className="muted">No illustration comparison evidence surface is available for this product yet.</p>
+        )}
+        {illustrationEvidence && (
+          <>
+            {illustrationEvidence.summary && (
+              <table className="kv-table">
+                <tbody>
+                  <tr>
+                    <th>Comparison cases</th>
+                    <td>{illustrationEvidence.summary.caseCount ?? 0}</td>
+                  </tr>
+                  <tr>
+                    <th>Within tolerance</th>
+                    <td>{illustrationEvidence.summary.withinTolerance ?? 0}</td>
+                  </tr>
+                  <tr>
+                    <th>Mismatches</th>
+                    <td>{illustrationEvidence.summary.mismatch ?? 0}</td>
+                  </tr>
+                </tbody>
+              </table>
+            )}
+            {Array.isArray(illustrationEvidence.cases) && illustrationEvidence.cases.length > 0 && (
+              <>
+                <h3>Comparison cases</h3>
+                <table className="kv-table">
+                  <thead>
+                    <tr>
+                      <th>Case</th>
+                      <th>Inputs</th>
+                      <th>Filed premium</th>
+                      <th>Model premium</th>
+                      <th>Difference</th>
+                      <th>Status</th>
+                      <th>Linked requirements</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {illustrationEvidence.cases.map((c: any) => {
+                      const inputs = c.inputs || {};
+                      const trusted = c.trusted || {};
+                      const model = c.model || {};
+                      const diff = c.difference || {};
+                      const linked = Array.isArray(c.linkedRequirementIds) ? c.linkedRequirementIds : [];
+                      const status = String(c.status || "unknown");
+                      return (
+                        <tr key={c.id || c.label}>
+                          <td>{c.label || c.id || "(n/a)"}</td>
+                          <td>
+                            <div className="muted">
+                              age={inputs.age}, term={inputs.termYears}y, risk={inputs.riskClass}, face={inputs.faceAmount}
+                            </div>
+                          </td>
+                          <td>{trusted.annualPremium != null ? trusted.annualPremium : <span className="muted">(n/a)</span>}</td>
+                          <td>{model.annualPremium != null ? model.annualPremium : <span className="muted">(n/a)</span>}</td>
+                          <td>
+                            {diff.absolute != null && (
+                              <div>
+                                abs={diff.absolute}
+                                {diff.percent != null && ` (${(diff.percent * 100).toFixed(2)}%)`}
+                              </div>
+                            )}
+                            {diff.absolute == null && <span className="muted">(n/a)</span>}
+                          </td>
+                          <td>
+                            <span className={`tag tag--illustration-${status.toLowerCase()}`}>
+                              {status.toUpperCase()}
+                            </span>
+                          </td>
+                          <td>
+                            {linked.length > 0 ? linked.join(", ") : <span className="muted">(none)</span>}
                           </td>
                         </tr>
                       );
