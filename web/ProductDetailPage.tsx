@@ -77,7 +77,7 @@ export const ProductDetailPage: React.FC<ProductDetailProps> = ({ productCode })
 
         if (status === "implemented" && codeNorm) {
           try {
-            const reqRes = await fetch(`/api/product-requirements/${encodeURIComponent(codeNorm)}`);
+            const reqRes = await fetch(`/api/products/${encodeURIComponent(codeNorm)}/requirements`);
             if (reqRes.ok) {
               const reqData = await reqRes.json();
               if (reqData && reqData.summary) {

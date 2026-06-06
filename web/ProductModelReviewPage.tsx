@@ -418,7 +418,7 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
       setRequirementsLoading(true);
       setRequirementsError(null);
       try {
-        const res = await fetch(`/api/product-requirements/${encodeURIComponent(product.code)}`);
+        const res = await fetch(`/api/products/${encodeURIComponent(product.code)}/requirements`);
         if (!res.ok) {
           // For non-P12TRF or unimplemented products this may legitimately
           // return 404/501; treat that as "no requirements surface".

@@ -3167,11 +3167,14 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
 
 
 ProductModelReviewBuilder = Callable[[], Dict[str, Any]]
+ProductRequirementsProvider = Callable[[str], Dict[str, Any]]
 
 
 _PRODUCT_MODEL_REVIEW_BUILDERS: Dict[str, ProductModelReviewBuilder] = {
     "P12TRF": api_product_model_review_p12trf,
 }
+
+_PRODUCT_REQUIREMENTS_PROVIDERS: Dict[str, ProductRequirementsProvider] = {}
 
 
 def _get_product_model_review_builder(product_code: str) -> Optional[ProductModelReviewBuilder]:
@@ -3184,6 +3187,13 @@ def _get_product_model_review_builder(product_code: str) -> Optional[ProductMode
 
     code_norm = (product_code or "").strip().upper()
     return _PRODUCT_MODEL_REVIEW_BUILDERS.get(code_norm)
+
+
+def _get_product_requirements_provider(product_code: str) -> Optional[ProductRequirementsProvider]:
+    """Resolve a Filing Requirements provider for the given product code."""
+
+    code_norm = (product_code or "").strip().upper()
+    return _PRODUCT_REQUIREMENTS_PROVIDERS.get(code_norm)
 
 
 @app.get("/api/product-model-review/{product_code}")
@@ -3219,30 +3229,54 @@ def api_product_model_review_product(product_code: str) -> Dict[str, Any]:
     return builder()
 
 
-@app.get("/api/product-requirements/{product_code}")
-def api_product_requirements(product_code: str) -> Dict[str, Any]:
-    """Return a curated view of filing requirements for a product.
+@app.get("/api/products/{product_code}/requirements")
+def api_product_requirements_product(product_code: str) -> Dict[str, Any]:
+    """Product-aware Filing Requirements entrypoint.
 
-    For v0 this is implemented for P12TRF only and derives requirement
-    status from the existing ProductDefinition summary and coverage
-    matrix used by the Trust Surface.
+    Uses the product registry and requirements provider registry to
+    distinguish implemented vs not-implemented products and to resolve a
+    product-specific requirements provider.
     """
 
     cfg = _get_product_config(product_code)
     if cfg is None:
         raise HTTPException(status_code=404, detail=f"Unknown product_code '{product_code}'.")
 
+    status = cfg.get("status") or "unknown"
     code_norm = (cfg.get("productCode") or product_code or "").strip().upper()
 
-    # Known but not yet wired product.
-    if code_norm != "P12TRF":
+    if status != "implemented":
+        # Known but not yet implemented product.
         raise HTTPException(
             status_code=501,
             detail="Product requirements surface is not implemented for this product yet.",
         )
 
-    # Reuse the P12TRF PMR builder so that ProductDefinition, coverage
-    # matrix, and traceability are derived in one place.
+    provider = _get_product_requirements_provider(code_norm)
+    if provider is None:
+        raise HTTPException(
+            status_code=501,
+            detail="Product requirements provider is not registered for this product yet.",
+        )
+
+    return provider(code_norm)
+
+
+@app.get("/api/product-requirements/{product_code}")
+def api_product_requirements(product_code: str) -> Dict[str, Any]:
+    """Backwards-compatible alias for the product requirements endpoint."""
+
+    return api_product_requirements_product(product_code)
+
+
+def build_p12trf_requirements(product_code: str) -> Dict[str, Any]:
+    """P12TRF-specific Filing Requirements provider.
+
+    This reuses the P12TRF PMR builder so that ProductDefinition,
+    coverage matrix, and traceability are derived in one place, then
+    projects that into a generic requirements payload.
+    """
+
     pmr = api_product_model_review_p12trf()
     product_block = pmr.get("product") or {}
     review_meta = pmr.get("reviewMeta") or {}
@@ -3256,7 +3290,7 @@ def api_product_requirements(product_code: str) -> Dict[str, Any]:
                 return row
         return None
 
-    def _status_from_cm(feature: str) -> str:
+    def _impl_status(feature: str) -> str:
         row = _cm_row(feature)
         cm_status = str((row or {}).get("status") or "").lower()
         if cm_status == "covered":
@@ -3267,15 +3301,15 @@ def api_product_requirements(product_code: str) -> Dict[str, Any]:
             return "missing"
         return "missing"
 
-    def _notes_from_pd(key: str) -> str:
-        pd = product_definition or {}
-        try:
-            value = pd.get(key)
-        except Exception:
-            value = None
-        return f"ProductDefinition {key}={value!r}"
+    def _pd_value(path: str) -> Any:
+        # Simple one-level lookup for now; future adapters can support
+        # dotted paths. For this POC, top-level keys are enough.
+        key = path.split(".")[0]
+        return (product_definition or {}).get(key)
 
-    # Core curated requirements for the P12TRF POC.
+    def _mapping(path: str) -> Dict[str, Any]:
+        return {"path": path, "value": _pd_value(path)}
+
     requirements: List[Dict[str, Any]] = []
 
     # Level term periods
@@ -3283,11 +3317,15 @@ def api_product_requirements(product_code: str) -> Dict[str, Any]:
         {
             "requirementId": "req_term_periods",
             "requirementText": "Level term periods for this product.",
-            "source": f"{filing_id or 'P12TRF filing (POC)'} – Term periods section",
-            "productDefinitionMapping": "termPeriods",
-            "status": _status_from_cm("Term periods"),
-            "evidenceRuleId": None,
-            "notes": _notes_from_pd("termPeriods"),
+            "category": "coverage",
+            "source": {
+                "documentPath": None,
+                "filingLocation": f"{filing_id or 'P12TRF filing (POC)'} – Term periods section",
+            },
+            "productDefinitionMappings": [_mapping("termPeriods")],
+            "evidenceRuleIds": [],
+            "implementationStatus": _impl_status("Term periods"),
+            "notes": f"ProductDefinition termPeriods={_pd_value('termPeriods')!r}",
         }
     )
 
@@ -3296,11 +3334,15 @@ def api_product_requirements(product_code: str) -> Dict[str, Any]:
         {
             "requirementId": "req_issue_ages",
             "requirementText": "Issue age range for base coverage.",
-            "source": f"{filing_id or 'P12TRF filing (POC)'} – Issue ages table",
-            "productDefinitionMapping": "issueAges.min / issueAges.max",
-            "status": _status_from_cm("Issue ages"),
-            "evidenceRuleId": None,
-            "notes": _notes_from_pd("issueAges"),
+            "category": "eligibility",
+            "source": {
+                "documentPath": None,
+                "filingLocation": f"{filing_id or 'P12TRF filing (POC)'} – Issue ages table",
+            },
+            "productDefinitionMappings": [_mapping("issueAges")],
+            "evidenceRuleIds": [],
+            "implementationStatus": _impl_status("Issue ages"),
+            "notes": f"ProductDefinition issueAges={_pd_value('issueAges')!r}",
         }
     )
 
@@ -3309,11 +3351,15 @@ def api_product_requirements(product_code: str) -> Dict[str, Any]:
         {
             "requirementId": "req_risk_classes",
             "requirementText": "Underwriting and risk classes supported by the product.",
-            "source": f"{filing_id or 'P12TRF filing (POC)'} – Risk class definitions",
-            "productDefinitionMapping": "underwritingClasses, riskClasses",
-            "status": _status_from_cm("Underwriting / risk classes"),
-            "evidenceRuleId": None,
-            "notes": _notes_from_pd("underwritingClasses"),
+            "category": "eligibility",
+            "source": {
+                "documentPath": None,
+                "filingLocation": f"{filing_id or 'P12TRF filing (POC)'} – Risk class definitions",
+            },
+            "productDefinitionMappings": [_mapping("underwritingClasses"), _mapping("riskClasses")],
+            "evidenceRuleIds": [],
+            "implementationStatus": _impl_status("Underwriting / risk classes"),
+            "notes": f"ProductDefinition underwritingClasses={_pd_value('underwritingClasses')!r}",
         }
     )
 
@@ -3322,11 +3368,15 @@ def api_product_requirements(product_code: str) -> Dict[str, Any]:
         {
             "requirementId": "req_smoker_classes",
             "requirementText": "Smoker / non-smoker classes.",
-            "source": f"{filing_id or 'P12TRF filing (POC)'} – Smoker class definitions",
-            "productDefinitionMapping": "smokerClasses",
-            "status": _status_from_cm("Smoker classes"),
-            "evidenceRuleId": None,
-            "notes": _notes_from_pd("smokerClasses"),
+            "category": "eligibility",
+            "source": {
+                "documentPath": None,
+                "filingLocation": f"{filing_id or 'P12TRF filing (POC)'} – Smoker class definitions",
+            },
+            "productDefinitionMappings": [_mapping("smokerClasses")],
+            "evidenceRuleIds": [],
+            "implementationStatus": _impl_status("Smoker classes"),
+            "notes": f"ProductDefinition smokerClasses={_pd_value('smokerClasses')!r}",
         }
     )
 
@@ -3335,11 +3385,15 @@ def api_product_requirements(product_code: str) -> Dict[str, Any]:
         {
             "requirementId": "req_premium_modes",
             "requirementText": "Premium payment modes (e.g. annual).",
-            "source": f"{filing_id or 'P12TRF filing (POC)'} – Premium mode definitions",
-            "productDefinitionMapping": "premiumModes",
-            "status": _status_from_cm("Premium modes"),
-            "evidenceRuleId": None,
-            "notes": _notes_from_pd("premiumModes"),
+            "category": "premium",
+            "source": {
+                "documentPath": None,
+                "filingLocation": f"{filing_id or 'P12TRF filing (POC)'} – Premium mode definitions",
+            },
+            "productDefinitionMappings": [_mapping("premiumModes")],
+            "evidenceRuleIds": [],
+            "implementationStatus": _impl_status("Premium modes"),
+            "notes": f"ProductDefinition premiumModes={_pd_value('premiumModes')!r}",
         }
     )
 
@@ -3348,11 +3402,15 @@ def api_product_requirements(product_code: str) -> Dict[str, Any]:
         {
             "requirementId": "req_face_amount_range",
             "requirementText": "Minimum and maximum face amounts.",
-            "source": f"{filing_id or 'P12TRF filing (POC)'} – Face amount limits",
-            "productDefinitionMapping": "faceAmounts.min / faceAmounts.max",
-            "status": _status_from_cm("Face amount range"),
-            "evidenceRuleId": None,
-            "notes": _notes_from_pd("faceAmounts"),
+            "category": "eligibility",
+            "source": {
+                "documentPath": None,
+                "filingLocation": f"{filing_id or 'P12TRF filing (POC)'} – Face amount limits",
+            },
+            "productDefinitionMappings": [_mapping("faceAmounts")],
+            "evidenceRuleIds": [],
+            "implementationStatus": _impl_status("Face amount range"),
+            "notes": f"ProductDefinition faceAmounts={_pd_value('faceAmounts')!r}",
         }
     )
 
@@ -3361,11 +3419,15 @@ def api_product_requirements(product_code: str) -> Dict[str, Any]:
         {
             "requirementId": "req_base_term_death_benefit",
             "requirementText": "Base term death benefit payable during the level term.",
-            "source": f"{filing_id or 'P12TRF filing (POC)'} – Death benefit during term",
-            "productDefinitionMapping": "coverages[id=base_term]",
-            "status": _status_from_cm("Base term coverage"),
-            "evidenceRuleId": "rule_death_benefit_term",
-            "notes": _notes_from_pd("coverages"),
+            "category": "coverage",
+            "source": {
+                "documentPath": None,
+                "filingLocation": f"{filing_id or 'P12TRF filing (POC)'} – Death benefit during term",
+            },
+            "productDefinitionMappings": [_mapping("coverages")],
+            "evidenceRuleIds": ["rule_death_benefit_term"],
+            "implementationStatus": _impl_status("Base term coverage"),
+            "notes": f"ProductDefinition coverages={_pd_value('coverages')!r}",
         }
     )
 
@@ -3374,10 +3436,14 @@ def api_product_requirements(product_code: str) -> Dict[str, Any]:
         {
             "requirementId": "req_level_premiums",
             "requirementText": "Premiums remain level during the term.",
-            "source": f"{filing_id or 'P12TRF filing (POC)'} – Level premium table",
-            "productDefinitionMapping": "premium table / premiumModes",
-            "status": _status_from_cm("Level premiums"),
-            "evidenceRuleId": "rule_level_premiums",
+            "category": "premium",
+            "source": {
+                "documentPath": None,
+                "filingLocation": f"{filing_id or 'P12TRF filing (POC)'} – Level premium table",
+            },
+            "productDefinitionMappings": [_mapping("premiumModes")],
+            "evidenceRuleIds": ["rule_level_premiums"],
+            "implementationStatus": _impl_status("Level premiums"),
             "notes": "Derived from premium lookup table and rate reconciliation checks.",
         }
     )
@@ -3387,10 +3453,14 @@ def api_product_requirements(product_code: str) -> Dict[str, Any]:
         {
             "requirementId": "req_riders_unmodeled",
             "requirementText": "Riders and unmodeled coverages recorded in the filing.",
-            "source": f"{filing_id or 'P12TRF filing (POC)'} – Rider and supplemental benefit sections",
-            "productDefinitionMapping": "extra.unmodeled_coverages",
-            "status": _status_from_cm("Riders / unmodeled coverages"),
-            "evidenceRuleId": None,
+            "category": "rider",
+            "source": {
+                "documentPath": None,
+                "filingLocation": f"{filing_id or 'P12TRF filing (POC)'} – Rider and supplemental benefit sections",
+            },
+            "productDefinitionMappings": [_mapping("extra")],
+            "evidenceRuleIds": [],
+            "implementationStatus": _impl_status("Riders / unmodeled coverages"),
             "notes": "Unmodeled coverages are tracked but not projected in this POC.",
         }
     )
@@ -3400,22 +3470,28 @@ def api_product_requirements(product_code: str) -> Dict[str, Any]:
         {
             "requirementId": "req_convertibility",
             "requirementText": "Convertibility privilege during the level term.",
-            "source": f"{filing_id or 'P12TRF filing (POC)'} – Convertibility provisions",
-            "productDefinitionMapping": "(not modeled in current ProductDefinition)",
-            "status": "missing",
-            "evidenceRuleId": None,
+            "category": "rider",
+            "source": {
+                "documentPath": None,
+                "filingLocation": f"{filing_id or 'P12TRF filing (POC)'} – Convertibility provisions",
+            },
+            "productDefinitionMappings": [],
+            "evidenceRuleIds": [],
+            "implementationStatus": "missing",
             "notes": "Convertibility is acknowledged conceptually but not modeled in the current P12TRF POC.",
         }
     )
 
     total = len(requirements)
-    implemented = sum(1 for r in requirements if str(r.get("status")) == "implemented")
-    partial = sum(1 for r in requirements if str(r.get("status")) == "partial")
-    missing = sum(1 for r in requirements if str(r.get("status")) == "missing")
+    implemented = sum(1 for r in requirements if str(r.get("implementationStatus")) == "implemented")
+    partial = sum(1 for r in requirements if str(r.get("implementationStatus")) == "partial")
+    missing = sum(1 for r in requirements if str(r.get("implementationStatus")) == "missing")
 
     return {
-        "productCode": product_block.get("code") or code_norm,
+        "productCode": product_block.get("code") or product_code,
+        "productName": product_block.get("name"),
         "filingId": filing_id,
+        "status": "available",
         "requirements": requirements,
         "summary": {
             "total": total,
@@ -3424,6 +3500,9 @@ def api_product_requirements(product_code: str) -> Dict[str, Any]:
             "missing": missing,
         },
     }
+
+
+_PRODUCT_REQUIREMENTS_PROVIDERS["P12TRF"] = build_p12trf_requirements
 
 
 @app.post("/api/product-model-review/p12trf/evidence/seed")
