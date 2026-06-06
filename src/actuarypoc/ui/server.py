@@ -384,8 +384,13 @@ def _parse_iso8601_timestamp(value: Any) -> Optional[datetime]:
     """Best-effort parse of an ISO-8601-like timestamp.
 
     Returns a timezone-aware ``datetime`` when possible. On any failure
-    (including non-string inputs), returns ``None`` instead of raising.
+    returns ``None`` instead of raising.
     """
+
+    # Allow callers to pass through native ``datetime`` instances
+    # without additional parsing.
+    if isinstance(value, datetime):
+        return value
 
     if not isinstance(value, str):
         return None
