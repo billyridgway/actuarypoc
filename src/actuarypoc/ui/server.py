@@ -1655,6 +1655,201 @@ def _validate_p12trf_product_definition(
     }
 
 
+def _build_p12trf_scenario_validation(scenarios: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Derive a deterministic scenario validation summary for P12TRF.
+
+    This inspects the existing Scenario Evidence block (projection,
+    checks, ruleIds, and projectionTable) and emits a flat list of
+    checks that can be rendered on the Trust Surface without additional
+    backend calls.
+
+    Overall status is derived from the most severe check status:
+
+    - ``fail`` if any check fails
+    - ``warning`` if no failures but at least one warning
+    - ``pass`` otherwise
+    """
+
+    checks: List[Dict[str, Any]] = []
+    summary = {"pass": 0, "warning": 0, "fail": 0}
+
+    def _add_check(
+        scenario_id: str,
+        suffix: str,
+        label: str,
+        status: str,
+        message: str,
+    ) -> None:
+        status_norm = (status or "").strip().lower() or "warning"
+        if status_norm not in {"pass", "warning", "fail"}:
+            status_norm = "warning"
+        checks.append(
+            {
+                "id": f"scenario_{scenario_id}_{suffix}",
+                "scenarioId": scenario_id,
+                "label": label,
+                "status": status_norm,
+                "message": message,
+            }
+        )
+        summary[status_norm] += 1
+
+    for scen in scenarios or []:
+        sid = str((scen.get("id") or "").strip() or "unknown")
+        inputs = scen.get("inputs") or {}
+        term_years = inputs.get("termYears")
+        try:
+            term_years_int = int(term_years) if term_years is not None else None
+        except (TypeError, ValueError):
+            term_years_int = None
+
+        proj = scen.get("projection") or {}
+        years = list(proj.get("years") or [])
+        proj_table = list(scen.get("projectionTable") or [])
+        rule_ids = list(scen.get("ruleIds") or [])
+
+        # Projection basics: data presence, non-negative premiums and
+        # death benefits, basic year continuity, and traceability rule IDs.
+        projection_issue: Optional[str] = None
+
+        if not years or not proj_table:
+            projection_issue = "Projection data is missing or incomplete for this scenario."
+            proj_status = "fail"
+        else:
+            # Non-negative premiums and death benefits.
+            neg_prem = False
+            neg_db = False
+            for row in proj_table:
+                p = row.get("premium")
+                if isinstance(p, (int, float)) and p < -1e-9:
+                    neg_prem = True
+                    break
+            for row in proj_table:
+                dbv = row.get("deathBenefit")
+                if isinstance(dbv, (int, float)) and dbv < -1e-9:
+                    neg_db = True
+                    break
+
+            missing_years = False
+            int_years: List[int] = []
+            for y in years:
+                try:
+                    int_years.append(int(y))
+                except (TypeError, ValueError):
+                    # Non-integer years are treated as a warning rather
+                    # than a hard failure.
+                    missing_years = True
+            if int_years:
+                int_years_sorted = sorted(set(int_years))
+                expected = list(range(int_years_sorted[0], int_years_sorted[-1] + 1))
+                if int_years_sorted != expected:
+                    missing_years = True
+
+            missing_rules = not rule_ids
+
+            if neg_db:
+                projection_issue = "Negative death benefit values detected in projection rows."
+                proj_status = "fail"
+            elif neg_prem:
+                projection_issue = "Negative premium values detected in projection rows."
+                proj_status = "fail"
+            elif missing_years:
+                projection_issue = "Projection years appear to have gaps or non-integer entries."
+                proj_status = "warning"
+            elif missing_rules:
+                projection_issue = "No traceability ruleIds recorded for this scenario."
+                proj_status = "warning"
+            else:
+                projection_issue = "Projection data, values, and years look structurally consistent for this scenario."
+                proj_status = "pass"
+
+        _add_check(
+            sid,
+            "projection_basics",
+            "Projection data and numeric sanity",
+            proj_status,
+            projection_issue or "Projection data could not be evaluated.",
+        )
+
+        # Level term death benefit behaviour – reuse the per-scenario
+        # objective checks that already compare the projection against
+        # the face amount and level term.
+        scen_checks = scen.get("checks") or {}
+        after_term_ok = bool(scen_checks.get("noDeathBenefitAfterTerm")) if scen_checks is not None else None
+        during_term_ok = bool(scen_checks.get("deathBenefitApproxFaceDuringTerm")) if scen_checks is not None else None
+
+        if after_term_ok and during_term_ok:
+            lt_status = "pass"
+            lt_message = (
+                "Death benefit remains positive during the level term and drops after term as expected."
+            )
+        elif not after_term_ok:
+            lt_status = "fail"
+            lt_message = (
+                "Non-zero death benefit persists after the level term; review scenario outputs before approving."
+            )
+        elif not during_term_ok:
+            lt_status = "warning"
+            lt_message = (
+                "Death benefit during the level term deviates materially from the face amount; review before approving."
+            )
+        else:
+            lt_status = "warning"
+            lt_message = (
+                "Unable to confirm level-term death benefit behaviour from stored checks; review projection shape manually."
+            )
+
+        _add_check(
+            sid,
+            "level_term_death_benefit",
+            "Death benefit behavior during/after level term",
+            lt_status,
+            lt_message,
+        )
+
+        # Cash value – for the P12TRF term product we do not expect a
+        # surrender value; any non-zero cash value is treated as a
+        # warning so the actuary can confirm that it is an internal
+        # metric rather than a contractual value.
+        has_nonzero_cash = False
+        for row in proj_table:
+            cv = row.get("cashValue")
+            if isinstance(cv, (int, float)) and abs(cv) > 1e-9:
+                has_nonzero_cash = True
+                break
+
+        if has_nonzero_cash:
+            cv_status = "warning"
+            cv_message = (
+                "Non-zero cash value is present for this P12TRF term scenario; treat as an internal metric and review before relying on it."
+            )
+        else:
+            cv_status = "pass"
+            cv_message = "No cash value present for this term scenario (expected for P12TRF)."
+
+        _add_check(
+            sid,
+            "cash_value_term_product",
+            "Cash value treatment for term product",
+            cv_status,
+            cv_message,
+        )
+
+    # Derive the overall status from the summary counts.
+    if summary["fail"] > 0:
+        overall_status = "fail"
+    elif summary["warning"] > 0:
+        overall_status = "warning"
+    else:
+        overall_status = "pass"
+
+    return {
+        "status": overall_status,
+        "summary": summary,
+        "checks": checks,
+    }
+
+
 @app.get("/api/product-definition/{product_code}")
 def api_get_product_definition(product_code: str, filing_id: str = Query(...)) -> Dict[str, Any]:
     """Return the v1 ProductDefinition artefact for a product+filing, if any.
@@ -2456,6 +2651,11 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
         last_decision=last_decision,
     )
 
+    # Deterministic scenario validation so the Trust Surface can expose a
+    # simple model-behaviour health signal alongside freshness and
+    # ProductDefinition validation.
+    scenario_validation = _build_p12trf_scenario_validation(scen_and_rates["scenarios"])
+
     return {
         "product": product_block,
         "scope": scope,
@@ -2466,6 +2666,7 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
         "gaps": gaps,
         "reviewMeta": review_meta,
         "reviewFreshness": review_freshness,
+        "scenarioValidation": scenario_validation,
         "documents": documents_payload,
         "lastDecision": last_decision,
         "decisionHistory": decision_history,

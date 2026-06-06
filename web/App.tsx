@@ -118,6 +118,7 @@ const HomePage: React.FC<{ productReview: ProductModelReview | null }> = ({ prod
   const reviewMeta = anyReview?.reviewMeta;
   const validation = anyReview?.productDefinitionValidation;
   const reviewFreshness = anyReview?.reviewFreshness;
+  const scenarioValidation = anyReview?.scenarioValidation;
 
   const shortenHash = (hash?: string | null, length = 8): string | null => {
     if (!hash) return null;
@@ -215,6 +216,26 @@ const HomePage: React.FC<{ productReview: ProductModelReview | null }> = ({ prod
                       </>
                     ) : (
                       <span className="muted">(no freshness data)</span>
+                    )}
+                  </td>
+                </tr>
+                <tr>
+                  <th>Scenario Validation</th>
+                  <td>
+                    {scenarioValidation ? (
+                      <>
+                        <span className={`tag tag--scenario-validation-${scenarioValidation.status}`}>
+                          {String(scenarioValidation.status).toUpperCase()}
+                        </span>
+                        {scenarioValidation.summary && (
+                          <span className="muted">
+                            {" "}[pass={scenarioValidation.summary.pass ?? 0}, warning={scenarioValidation.summary.warning ?? 0}, fail=
+                            {scenarioValidation.summary.fail ?? 0}]
+                          </span>
+                        )}
+                      </>
+                    ) : (
+                      <span className="muted">(no scenario validation data)</span>
                     )}
                   </td>
                 </tr>

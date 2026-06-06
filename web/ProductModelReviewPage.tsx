@@ -177,6 +177,17 @@ export interface ProductModelReview {
     }[];
     summary: { pass: number; warning: number; fail: number };
   } | null;
+  scenarioValidation?: {
+    status: "pass" | "warning" | "fail" | string;
+    summary: { pass: number; warning: number; fail: number };
+    checks: {
+      id: string;
+      scenarioId: string;
+      label: string;
+      status: "pass" | "warning" | "fail" | string;
+      message: string;
+    }[];
+  } | null;
 }
 
 interface ProductModelReviewPageProps {
@@ -286,6 +297,7 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
     productDefinitionBuild,
     productDefinitionValidation,
     reviewFreshness,
+    scenarioValidation,
   } = review;
 
   const totalScenarios = scenarios.length;
@@ -1031,6 +1043,59 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                   ))}
                 </tbody>
               </table>
+            )}
+          </>
+        )}
+        {scenarioValidation && (
+          <>
+            <h3>Scenario Validation</h3>
+            <p className="muted">
+              Deterministic checks on P12TRF scenarios to highlight model-behavior issues such as non-zero death
+              benefit after term, negative values, and structural gaps.
+            </p>
+            <table className="kv-table">
+              <tbody>
+                <tr>
+                  <th>Overall status</th>
+                  <td>
+                    <span className={`tag tag--scenario-validation-${scenarioValidation.status}`}>
+                      {String(scenarioValidation.status).toUpperCase()}
+                    </span>
+                  </td>
+                </tr>
+                <tr>
+                  <th>Checks</th>
+                  <td>
+                    {scenarioValidation.summary.pass} pass, {scenarioValidation.summary.warning} warning, {" "}
+                    {scenarioValidation.summary.fail} fail
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            {Array.isArray(scenarioValidation.checks) && scenarioValidation.checks.length > 0 && (
+              <table className="kv-table">
+                <thead>
+                  <tr>
+                    <th>Scenario</th>
+                    <th>Check</th>
+                    <th>Status</th>
+                    <th>Message</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {scenarioValidation.checks.map((c) => (
+                    <tr key={c.id}>
+                      <td>{c.scenarioId}</td>
+                      <td>{c.label}</td>
+                      <td>{c.status}</td>
+                      <td className="muted">{c.message}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            {scenarioValidation.status && scenarioValidation.status.toLowerCase() !== "pass" && (
+              <p className="warning">Review scenario validation issues before recording a new decision.</p>
             )}
           </>
         )}
