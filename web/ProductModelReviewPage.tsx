@@ -418,6 +418,11 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
   const [pdEvidenceError, setPdEvidenceError] = React.useState<string | null>(null);
   const [pdEvidenceLoading, setPdEvidenceLoading] = React.useState<boolean>(false);
 
+  // Projection logic evidence.
+  const [projectionEvidence, setProjectionEvidence] = React.useState<any | null>(null);
+  const [projectionEvidenceError, setProjectionEvidenceError] = React.useState<string | null>(null);
+  const [projectionEvidenceLoading, setProjectionEvidenceLoading] = React.useState<boolean>(false);
+
   React.useEffect(() => {
     const loadRequirements = async () => {
       setRequirementsLoading(true);
@@ -447,6 +452,34 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
 
     if (product && product.code) {
       void loadRequirements();
+    }
+  }, [product.code]);
+
+  React.useEffect(() => {
+    const loadProjectionEvidence = async () => {
+      setProjectionEvidenceLoading(true);
+      setProjectionEvidenceError(null);
+      try {
+        const res = await fetch(`/api/products/${encodeURIComponent(product.code)}/projection-logic-evidence`);
+        if (!res.ok) {
+          if (res.status === 404 || res.status === 501) {
+            setProjectionEvidence(null);
+            return;
+          }
+          const text = await res.text();
+          throw new Error(text || `HTTP ${res.status}`);
+        }
+        const data = await res.json();
+        setProjectionEvidence(data || null);
+      } catch (err: any) {
+        setProjectionEvidenceError(err?.message || "Failed to load projection logic evidence.");
+      } finally {
+        setProjectionEvidenceLoading(false);
+      }
+    };
+
+    if (product && product.code) {
+      void loadProjectionEvidence();
     }
   }, [product.code]);
 
@@ -779,6 +812,75 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
             )}
           </tbody>
         </table>
+      </section>
+
+      <section className="card">
+        <h2>Projection Logic Evidence</h2>
+        <p className="muted">
+          How the ProductDefinition and filing requirements are realised
+          as projection behaviour for key product features.
+        </p>
+        {projectionEvidenceError && (
+          <p className="error">Error loading projection logic evidence: {projectionEvidenceError}</p>
+        )}
+        {!projectionEvidenceError && projectionEvidenceLoading && !projectionEvidence && (
+          <p className="muted">Loading projection logic evidence…</p>
+        )}
+        {!projectionEvidenceError && !projectionEvidence && !projectionEvidenceLoading && (
+          <p className="muted">No projection logic evidence surface is available for this product yet.</p>
+        )}
+        {projectionEvidence && (
+          <>
+            {projectionEvidence.summary && (
+              <table className="kv-table">
+                <tbody>
+                  <tr>
+                    <th>Behaviours documented</th>
+                    <td>{projectionEvidence.summary.behaviorCount ?? 0}</td>
+                  </tr>
+                </tbody>
+              </table>
+            )}
+            {Array.isArray(projectionEvidence.behaviors) && projectionEvidence.behaviors.length > 0 && (
+              <>
+                <h3>Key behaviours</h3>
+                <table className="kv-table">
+                  <thead>
+                    <tr>
+                      <th>ID</th>
+                      <th>Label</th>
+                      <th>Requirements</th>
+                      <th>ProductDefinition paths</th>
+                      <th>Logic</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {projectionEvidence.behaviors.map((b: any) => {
+                      const reqIds = Array.isArray(b.requirementIds) ? b.requirementIds : [];
+                      const pdPaths = Array.isArray(b.productDefinitionPaths) ? b.productDefinitionPaths : [];
+                      const logic = b.projectionLogic || {};
+                      return (
+                        <tr key={b.id || b.label}>
+                          <td>{b.id || "(n/a)"}</td>
+                          <td>{b.label || "(n/a)"}</td>
+                          <td>{reqIds.length > 0 ? reqIds.join(", ") : <span className="muted">(none)</span>}</td>
+                          <td>{pdPaths.length > 0 ? pdPaths.join(", ") : <span className="muted">(none)</span>}</td>
+                          <td>
+                            {logic.description && <div>{logic.description}</div>}
+                            {logic.pseudoCode && (
+                              <pre className="inline-pre">{String(logic.pseudoCode)}</pre>
+                            )}
+                            {logic.notes && <div className="muted">{logic.notes}</div>}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </>
+            )}
+          </>
+        )}
       </section>
 
       <section id="filing-requirements" className="card">

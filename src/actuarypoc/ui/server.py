@@ -3169,6 +3169,7 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
 ProductModelReviewBuilder = Callable[[], Dict[str, Any]]
 ProductRequirementsProvider = Callable[[str], Dict[str, Any]]
 ProductDefinitionEvidenceProvider = Callable[[str], Dict[str, Any]]
+ProductProjectionEvidenceProvider = Callable[[str], Dict[str, Any]]
 
 
 _PRODUCT_MODEL_REVIEW_BUILDERS: Dict[str, ProductModelReviewBuilder] = {
@@ -3177,6 +3178,7 @@ _PRODUCT_MODEL_REVIEW_BUILDERS: Dict[str, ProductModelReviewBuilder] = {
 
 _PRODUCT_REQUIREMENTS_PROVIDERS: Dict[str, ProductRequirementsProvider] = {}
 _PRODUCT_DEFINITION_EVIDENCE_PROVIDERS: Dict[str, ProductDefinitionEvidenceProvider] = {}
+_PRODUCT_PROJECTION_EVIDENCE_PROVIDERS: Dict[str, ProductProjectionEvidenceProvider] = {}
 
 
 def _get_product_model_review_builder(product_code: str) -> Optional[ProductModelReviewBuilder]:
@@ -3203,6 +3205,13 @@ def _get_product_definition_evidence_provider(product_code: str) -> Optional[Pro
 
     code_norm = (product_code or "").strip().upper()
     return _PRODUCT_DEFINITION_EVIDENCE_PROVIDERS.get(code_norm)
+
+
+def _get_product_projection_evidence_provider(product_code: str) -> Optional[ProductProjectionEvidenceProvider]:
+    """Resolve a projection logic evidence provider for the given product code."""
+
+    code_norm = (product_code or "").strip().upper()
+    return _PRODUCT_PROJECTION_EVIDENCE_PROVIDERS.get(code_norm)
 
 
 @app.get("/api/product-model-review/{product_code}")
@@ -3300,6 +3309,33 @@ def api_product_definition_evidence_product(product_code: str) -> Dict[str, Any]
         raise HTTPException(
             status_code=501,
             detail="ProductDefinition evidence provider is not registered for this product yet.",
+        )
+
+    return provider(code_norm)
+
+
+@app.get("/api/products/{product_code}/projection-logic-evidence")
+def api_product_projection_evidence_product(product_code: str) -> Dict[str, Any]:
+    """Product-aware projection logic evidence entrypoint."""
+
+    cfg = _get_product_config(product_code)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail=f"Unknown product_code '{product_code}'.")
+
+    status = cfg.get("status") or "unknown"
+    code_norm = (cfg.get("productCode") or product_code or "").strip().upper()
+
+    if status != "implemented":
+        raise HTTPException(
+            status_code=501,
+            detail="Projection logic evidence surface is not implemented for this product yet.",
+        )
+
+    provider = _get_product_projection_evidence_provider(code_norm)
+    if provider is None:
+        raise HTTPException(
+            status_code=501,
+            detail="Projection logic evidence provider is not registered for this product yet.",
         )
 
     return provider(code_norm)
@@ -3633,6 +3669,169 @@ def build_p12trf_product_definition_evidence(product_code: str) -> Dict[str, Any
 
 
 _PRODUCT_DEFINITION_EVIDENCE_PROVIDERS["P12TRF"] = build_p12trf_product_definition_evidence
+
+
+def build_p12trf_projection_logic_evidence(product_code: str) -> Dict[str, Any]:
+    """P12TRF-specific projection logic evidence provider.
+
+    This is an explanatory layer that links filing requirements and
+    ProductDefinition fields to the high-level projection behaviour, so
+    an actuary can see how the model implements key contract features.
+    """
+
+    pmr = api_product_model_review_p12trf()
+    product_block = pmr.get("product") or {}
+    review_meta = pmr.get("reviewMeta") or {}
+    filing_id = review_meta.get("filingId")
+
+    behaviors: List[Dict[str, Any]] = []
+
+    # Base term death benefit logic.
+    behaviors.append(
+        {
+            "id": "behav_base_term_death_benefit",
+            "label": "Death benefit during level term",
+            "category": "coverage",
+            "requirementIds": ["req_base_term_death_benefit", "req_term_periods"],
+            "productDefinitionPaths": ["coverages", "termPeriods"],
+            "projectionLogic": {
+                "description": (
+                    "While duration is within a modeled term period, the death benefit equals the face "
+                    "amount from the ProductDefinition coverage; after term expiry the death benefit is zero."
+                ),
+                "pseudoCode": (
+                    "if duration_years <= level_term_years:\n"
+                    "    death_benefit = face_amount\n"
+                    "else:\n"
+                    "    death_benefit = 0"
+                ),
+                "notes": (
+                    "Implemented via the term coverage in ProductDefinition coverages and exercised by the "
+                    "scenario set used in the Trust Surface projections."
+                ),
+            },
+        }
+    )
+
+    # Level premium logic.
+    behaviors.append(
+        {
+            "id": "behav_level_premiums",
+            "label": "Level premiums during term",
+            "category": "premium",
+            "requirementIds": ["req_level_premiums", "req_premium_modes"],
+            "productDefinitionPaths": ["premiumModes"],
+            "projectionLogic": {
+                "description": (
+                    "Premiums are level over the modeled term, determined by a rate table by age, risk class, "
+                    "smoker class, and term period, and then applied at the configured premium mode."
+                ),
+                "pseudoCode": (
+                    "rate = lookup_rate(age, risk_class, smoker_class, term_years)\n"
+                    "annual_premium = rate * face_amount / 1000\n"
+                    "premium = apply_mode(annual_premium, premium_mode)"
+                ),
+                "notes": (
+                    "Implemented via the premium lookup table and premiumModes in the ProductDefinition, "
+                    "and validated by the rate reconciliation checks on the Trust Surface."
+                ),
+            },
+        }
+    )
+
+    # Eligibility / issue age logic (simplified).
+    behaviors.append(
+        {
+            "id": "behav_issue_age_eligibility",
+            "label": "Issue age eligibility",
+            "category": "eligibility",
+            "requirementIds": ["req_issue_ages"],
+            "productDefinitionPaths": ["issueAges"],
+            "projectionLogic": {
+                "description": (
+                    "Policies are only projected when the issue age falls within the ProductDefinition "
+                    "issueAges[min, max] range; scenarios outside this range are treated as invalid."
+                ),
+                "pseudoCode": (
+                    "if age < issueAgeMin or age > issueAgeMax:\n"
+                    "    reject_case('age out of bounds')\n"
+                    "else:\n"
+                    "    proceed_with_projection()"
+                ),
+                "notes": (
+                    "The POC scenarios all fall within 18–75, and the ProductDefinition validation "
+                    "explicitly checks that scenario ages respect these bounds."
+                ),
+            },
+        }
+    )
+
+    # Risk and smoker class handling (simplified mapping).
+    behaviors.append(
+        {
+            "id": "behav_risk_smoker_classes",
+            "label": "Risk and smoker class mapping",
+            "category": "eligibility",
+            "requirementIds": ["req_risk_classes", "req_smoker_classes"],
+            "productDefinitionPaths": ["underwritingClasses", "riskClasses", "smokerClasses"],
+            "projectionLogic": {
+                "description": (
+                    "Risk and smoker classes in scenarios are mapped into the ProductDefinition risk and "
+                    "smoker classes before rate lookup; unsupported combinations are treated as out of "
+                    "scope for this POC."
+                ),
+                "pseudoCode": (
+                    "uw_class = map_underwriting_class(input_uw)\n"
+                    "risk_class = map_risk_class(input_risk)\n"
+                    "smoker_class = map_smoker_class(input_smoker)\n"
+                    "# lookup_rate uses these mapped classes"
+                ),
+                "notes": (
+                    "The mapping is implicitly exercised by the P12TRF scenarios and validated via the "
+                    "ProductDefinition validation checks for risk and smoker classes."
+                ),
+            },
+        }
+    )
+
+    # Placeholder for riders / unmodeled coverage logic.
+    behaviors.append(
+        {
+            "id": "behav_unmodeled_riders",
+            "label": "Unmodeled riders and supplemental benefits",
+            "category": "rider",
+            "requirementIds": ["req_riders_unmodeled"],
+            "productDefinitionPaths": ["extra"],
+            "projectionLogic": {
+                "description": (
+                    "Riders and supplemental benefits recorded in the filing are not projected in this POC; "
+                    "the projection engine ignores them and only models the base term coverage."
+                ),
+                "pseudoCode": (
+                    "# riders listed in ProductDefinition.extra.unmodeled_coverages\n"
+                    "# are not included in projection cash flows in this POC"
+                ),
+                "notes": (
+                    "This behaviour is explicitly called out in the coverage matrix and requirements "
+                    "surface as missing/unmodeled."
+                ),
+            },
+        }
+    )
+
+    return {
+        "productCode": product_block.get("code") or product_code,
+        "productName": product_block.get("name"),
+        "filingId": filing_id,
+        "status": "available",
+        "behaviors": behaviors,
+        "summary": {
+            "behaviorCount": len(behaviors),
+        },
+    }
+
+
+_PRODUCT_PROJECTION_EVIDENCE_PROVIDERS["P12TRF"] = build_p12trf_projection_logic_evidence
 
 
 @app.post("/api/product-model-review/p12trf/evidence/seed")
