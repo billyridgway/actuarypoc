@@ -7,7 +7,7 @@ import json
 import zipfile
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Query, UploadFile, File, Form
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -80,7 +80,7 @@ _PRODUCT_REGISTRY: List[Dict[str, Any]] = [
         "productCode": "P12TRF",
         "productName": "Pacific Life ICC12 P12TRF Term (POC)",
         "status": "implemented",
-        "reviewEndpoint": "/api/product-model-review/p12trf",
+        "reviewEndpoint": "/api/product-model-review/P12TRF",
     },
     {
         "productCode": "DEMO-TERM",
@@ -2163,8 +2163,16 @@ def api_products() -> Dict[str, Any]:
         code = entry.get("productCode")
         name = entry.get("productName")
         status = entry.get("status") or "unknown"
+        code_norm = (code or "").strip().upper()
+        builder = _get_product_model_review_builder(code_norm)
+        builder_registered = builder is not None
+        review_endpoint: Optional[str]
+        if status == "implemented" and code_norm:
+            review_endpoint = f"/api/product-model-review/{code_norm}"
+        else:
+            review_endpoint = None
 
-        if code and code.upper() == "P12TRF" and status == "implemented" and pmr is not None:
+        if code_norm == "P12TRF" and status == "implemented" and pmr is not None:
             product_block = pmr.get("product") or {}
             review_meta = pmr.get("reviewMeta") or {}
             last_decision = pmr.get("lastDecision") or {}
@@ -2176,6 +2184,8 @@ def api_products() -> Dict[str, Any]:
                     "productCode": product_block.get("code"),
                     "productName": product_block.get("name"),
                     "status": "implemented",
+                    "reviewEndpoint": review_endpoint,
+                    "builderRegistered": builder_registered,
                     "filingId": review_meta.get("filingId"),
                     "latestGeneration": review_meta.get("currentGeneration"),
                     "latestDecisionId": last_decision.get("id"),
@@ -2191,6 +2201,8 @@ def api_products() -> Dict[str, Any]:
                     "productCode": code,
                     "productName": name,
                     "status": status,
+                    "reviewEndpoint": review_endpoint,
+                    "builderRegistered": builder_registered,
                     "filingId": None,
                     "latestGeneration": None,
                     "latestDecisionId": None,
@@ -2220,6 +2232,13 @@ def api_product_detail(product_code: str) -> Dict[str, Any]:
 
     status = cfg.get("status") or "unknown"
     code_norm = (cfg.get("productCode") or product_code or "").strip().upper()
+    builder = _get_product_model_review_builder(code_norm)
+    builder_registered = builder is not None
+    review_endpoint: Optional[str]
+    if status == "implemented" and code_norm:
+        review_endpoint = f"/api/product-model-review/{code_norm}"
+    else:
+        review_endpoint = None
 
     if status != "implemented" or code_norm != "P12TRF":
         # Known but not yet implemented product: return a friendly shell
@@ -2229,6 +2248,8 @@ def api_product_detail(product_code: str) -> Dict[str, Any]:
                 "productCode": cfg.get("productCode"),
                 "productName": cfg.get("productName"),
                 "status": status,
+                "reviewEndpoint": review_endpoint,
+                "builderRegistered": builder_registered,
             },
             "latestVersion": None,
             "versions": [],
@@ -2291,6 +2312,8 @@ def api_product_detail(product_code: str) -> Dict[str, Any]:
         "productName": product_block.get("name"),
         "filingId": review_meta.get("filingId"),
         "status": "implemented",
+        "reviewEndpoint": review_endpoint,
+        "builderRegistered": builder_registered,
     }
 
     return {
@@ -3143,14 +3166,33 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
     }
 
 
+ProductModelReviewBuilder = Callable[[], Dict[str, Any]]
+
+
+_PRODUCT_MODEL_REVIEW_BUILDERS: Dict[str, ProductModelReviewBuilder] = {
+    "P12TRF": api_product_model_review_p12trf,
+}
+
+
+def _get_product_model_review_builder(product_code: str) -> Optional[ProductModelReviewBuilder]:
+    """Resolve a Product Model Review builder for the given product code.
+
+    This is intentionally minimal for now: only P12TRF is wired up, but the
+    registry shape allows additional products to plug in cleanly once they
+    have a PMR implementation.
+    """
+
+    code_norm = (product_code or "").strip().upper()
+    return _PRODUCT_MODEL_REVIEW_BUILDERS.get(code_norm)
+
+
 @app.get("/api/product-model-review/{product_code}")
 def api_product_model_review_product(product_code: str) -> Dict[str, Any]:
     """Product-aware Product Model Review entrypoint.
 
-    For now this delegates to the P12TRF-specific PMR builder when the
-    product is implemented, and returns a friendly not-implemented
-    response for known-but-unimplemented products. Unknown products
-    return 404.
+    Uses the static product registry to distinguish between implemented
+    products, known-but-unimplemented products, and unknown codes, and
+    then resolves a PMR builder from the builder registry.
     """
 
     cfg = _get_product_config(product_code)
@@ -3160,16 +3202,21 @@ def api_product_model_review_product(product_code: str) -> Dict[str, Any]:
     status = cfg.get("status") or "unknown"
     code_norm = (cfg.get("productCode") or product_code or "").strip().upper()
 
-    if status == "implemented" and code_norm == "P12TRF":
-        # Reuse the existing P12TRF PMR builder so the payload remains
-        # byte-for-byte identical to /api/product-model-review/p12trf.
-        return api_product_model_review_p12trf()
+    if status != "implemented":
+        # Known but not yet implemented product.
+        raise HTTPException(
+            status_code=501,
+            detail="Product Model Review is not implemented for this product yet.",
+        )
 
-    # Known but not implemented product.
-    raise HTTPException(
-        status_code=501,
-        detail="Product Model Review is not implemented for this product yet.",
-    )
+    builder = _get_product_model_review_builder(code_norm)
+    if builder is None:
+        raise HTTPException(
+            status_code=501,
+            detail="Product Model Review builder is not registered for this product yet.",
+        )
+
+    return builder()
 
 
 @app.post("/api/product-model-review/p12trf/evidence/seed")

@@ -392,6 +392,7 @@ const HomePage: React.FC<{ productReview: ProductModelReview | null; products: a
               <tr>
                 <th>Product</th>
                 <th>Status</th>
+                <th>Builder</th>
                 <th>Filing</th>
                 <th>Latest generation</th>
                 <th>Latest decision</th>
@@ -400,11 +401,13 @@ const HomePage: React.FC<{ productReview: ProductModelReview | null; products: a
               </tr>
             </thead>
             <tbody>
-              {products.map((p: any) => {
-                const code = p.productCode || "(unknown)";
-                const name = p.productName || code;
-                const status = p.status || "unknown";
-                const latestDecisionId = p.latestDecisionId;
+        {products.map((p: any) => {
+          const code = p.productCode || "(unknown)";
+          const name = p.productName || code;
+          const status = p.status || "unknown";
+          const builderRegistered = Boolean(p.builderRegistered);
+          const builderLabel = status === "implemented" ? (builderRegistered ? "registered" : "missing") : "n/a";
+          const latestDecisionId = p.latestDecisionId;
                 const latestDecisionLabel = p.latestDecision;
                 const freshness = p.reviewFreshnessStatus;
                 const risk = p.latestRiskStatus;
@@ -415,9 +418,12 @@ const HomePage: React.FC<{ productReview: ProductModelReview | null; products: a
                         {name} ({code})
                       </a>
                     </td>
-                    <td>
-                      <span className="muted">{status}</span>
-                    </td>
+              <td>
+                <span className="muted">{status}</span>
+              </td>
+              <td>
+                <span className="muted">{builderLabel}</span>
+              </td>
                     <td>{p.filingId || "(not set)"}</td>
                     <td>{p.latestGeneration || "(not set)"}</td>
                     <td>

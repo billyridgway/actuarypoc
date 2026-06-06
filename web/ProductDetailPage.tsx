@@ -33,6 +33,8 @@ interface ProductDetailPayload {
     productName?: string | null;
     filingId?: string | null;
     status?: string | null;
+    reviewEndpoint?: string | null;
+    builderRegistered?: boolean | null;
   } | null;
   latestVersion?: ProductVersion | null;
   versions?: ProductVersion[];
@@ -88,6 +90,7 @@ export const ProductDetailPage: React.FC<ProductDetailProps> = ({ productCode })
 
   const productCodeDisplay = product.productCode || productCode;
   const productStatus = (product as any).status || "implemented";
+  const builderRegistered = Boolean((product as any).builderRegistered);
 
   return (
     <div className="product-detail-page">
@@ -101,13 +104,19 @@ export const ProductDetailPage: React.FC<ProductDetailProps> = ({ productCode })
         <p>
           <strong>Current filing:</strong> {product.filingId || "(not set)"}
         </p>
+        <p>
+          <strong>Builder registered:</strong>{" "}
+          {productStatus === "implemented" ? (builderRegistered ? "yes" : "no") : "n/a"}
+        </p>
         <p className="muted">
-          {productStatus === "implemented"
+          {productStatus === "implemented" && builderRegistered
             ? "This view summarises Product Model Review generations, decisions, and evidence bundles for this product."
-            : "Product review is not implemented for this product yet."}
+            : productStatus === "implemented" && !builderRegistered
+              ? "Product is marked implemented but no PMR builder is registered yet."
+              : "Product review is not implemented for this product yet."}
         </p>
         <p>
-          {productStatus === "implemented" && (
+          {productStatus === "implemented" && builderRegistered && (
             <>
               <a
                 href={`/web?view=product-model&productCode=${encodeURIComponent(productCodeDisplay)}`}
