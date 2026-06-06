@@ -1991,6 +1991,132 @@ def _build_decision_risk(decision: Optional[Dict[str, Any]]) -> Optional[Dict[st
     }
 
 
+def _build_decision_timeline(decision_history: Optional[List[Dict[str, Any]]]) -> Optional[Dict[str, Any]]:
+    """Build a simple chronological decision timeline for the PMR Trust Surface.
+
+    The severity ordering for decisionRisk.status is:
+
+        clean < warning < incomplete < fail
+
+    where *fail* is treated as strictly worse than *incomplete* to
+    reflect an explicit model or validation failure.
+    """
+
+    if not isinstance(decision_history, list) or not decision_history:
+        return None
+
+    # Normalise decisions into a working list and sort oldest -> newest
+    # using created_at when available, otherwise by id.
+    def _sort_key(row: Dict[str, Any]) -> Any:
+        ts = row.get("created_at") or ""
+        if isinstance(ts, str) and ts:
+            try:
+                return _parse_iso8601_timestamp(ts) or ts
+            except Exception:
+                return ts
+        return row.get("id") or 0
+
+    rows = [r for r in decision_history if isinstance(r, dict)]
+    if not rows:
+        return None
+    rows.sort(key=_sort_key)
+
+    def _risk_status(row: Dict[str, Any]) -> str:
+        dr = row.get("decisionRisk") or {}
+        status = dr.get("status") if isinstance(dr, dict) else None
+        if not isinstance(status, str) or not status:
+            return "unknown"
+        return status.lower()
+
+    severity_order = {
+        "clean": 0,
+        "warning": 1,
+        "incomplete": 2,
+        "fail": 3,
+    }
+
+    def _severity(status: str) -> int:
+        return severity_order.get(status.lower(), 1)
+
+    points: List[Dict[str, Any]] = []
+    clean_count = 0
+    warning_count = 0
+    incomplete_count = 0
+    fail_count = 0
+
+    for row in rows:
+        status = _risk_status(row)
+        if status == "clean":
+            clean_count += 1
+        elif status == "warning":
+            warning_count += 1
+        elif status == "incomplete":
+            incomplete_count += 1
+        elif status == "fail":
+            fail_count += 1
+
+        bundle_present = bool(row.get("bundle_path") and row.get("bundle_hash"))
+
+        points.append(
+            {
+                "id": row.get("id"),
+                "createdAt": row.get("created_at"),
+                "decision": row.get("decision"),
+                "reviewer": row.get("reviewer"),
+                "riskStatus": status,
+                "scenarioValidationStatus": row.get("scenario_validation_status"),
+                "productDefinitionValidationStatus": row.get("validation_status"),
+                "coverageGapCount": row.get("coverage_gap_count") or 0,
+                "bundlePresent": bundle_present,
+                "comments": row.get("comments"),
+            }
+        )
+
+    latest_point = points[-1]
+    latest_risk_status = latest_point.get("riskStatus") or "unknown"
+
+    summary = {
+        "latestRiskStatus": latest_risk_status,
+        "decisionCount": len(points),
+        "cleanCount": clean_count,
+        "warningCount": warning_count,
+        "failCount": fail_count,
+        "incompleteCount": incomplete_count,
+    }
+
+    transitions: List[Dict[str, Any]] = []
+    for prev, curr in zip(points, points[1:]):
+        prev_status = str(prev.get("riskStatus") or "unknown").lower()
+        curr_status = str(curr.get("riskStatus") or "unknown").lower()
+        prev_sev = _severity(prev_status)
+        curr_sev = _severity(curr_status)
+
+        if curr_sev < prev_sev:
+            change = "improved"
+            reason = f"Decision risk changed from {prev_status} to {curr_status}."
+        elif curr_sev > prev_sev:
+            change = "regressed"
+            reason = f"Decision risk changed from {prev_status} to {curr_status}."
+        else:
+            change = "unchanged"
+            reason = f"Decision risk stayed {prev_status}."
+
+        transitions.append(
+            {
+                "fromDecisionId": prev.get("id"),
+                "toDecisionId": curr.get("id"),
+                "change": change,
+                "reason": reason,
+            }
+        )
+
+    return {
+        "points": points,
+        "summary": summary,
+        "transitions": transitions,
+    }
+
+
 @app.get("/api/product-definition/{product_code}")
 def api_get_product_definition(product_code: str, filing_id: str = Query(...)) -> Dict[str, Any]:
     """Return the v1 ProductDefinition artefact for a product+filing, if any.
@@ -2766,6 +2892,9 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
             if isinstance(row, dict):
                 row["decisionRisk"] = _build_decision_risk(row)
 
+    # Chronological decision timeline derived from decisionHistory.
+    decision_timeline = _build_decision_timeline(decision_history)
+
     completed_steps = 0
     total_steps = 6
 
@@ -2820,6 +2949,7 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
         "documents": documents_payload,
         "lastDecision": last_decision,
         "decisionHistory": decision_history,
+        "decisionTimeline": decision_timeline,
         "reviewProgress": review_progress,
         "productDefinition": product_definition_summary,
         "productDefinitionBuild": product_definition_build,

@@ -120,6 +120,7 @@ const HomePage: React.FC<{ productReview: ProductModelReview | null }> = ({ prod
   const reviewFreshness = anyReview?.reviewFreshness;
   const scenarioValidation = anyReview?.scenarioValidation;
   const decisionRisk = lastDecision?.decisionRisk;
+  const decisionTimeline = anyReview?.decisionTimeline as any;
 
   const shortenHash = (hash?: string | null, length = 8): string | null => {
     if (!hash) return null;
@@ -284,6 +285,46 @@ const HomePage: React.FC<{ productReview: ProductModelReview | null }> = ({ prod
                       </>
                     ) : (
                       <span className="muted">(no scenario validation data)</span>
+                    )}
+                  </td>
+                </tr>
+                <tr>
+                  <th>Decision Timeline</th>
+                  <td>
+                    {decisionTimeline && decisionTimeline.summary ? (
+                      <>
+                        <span
+                          className={`tag tag--decision-risk-${String(
+                            decisionTimeline.summary.latestRiskStatus || "unknown",
+                          ).toLowerCase()}`}
+                        >
+                          {String(decisionTimeline.summary.latestRiskStatus || "unknown").toUpperCase()}
+                        </span>
+                        <span className="muted">
+                          {" "}(decisions={decisionTimeline.summary.decisionCount ?? 0},
+                          {" "}clean={decisionTimeline.summary.cleanCount ?? 0},
+                          {" "}warning={decisionTimeline.summary.warningCount ?? 0},
+                          {" "}incomplete={decisionTimeline.summary.incompleteCount ?? 0},
+                          {" "}fail={decisionTimeline.summary.failCount ?? 0})
+                        </span>
+                        {Array.isArray(decisionTimeline.transitions)
+                          && decisionTimeline.transitions.length > 0 && (
+                            <div className="muted">
+                              {(() => {
+                                const t = decisionTimeline.transitions[decisionTimeline.transitions.length - 1];
+                                if (!t) return null;
+                                return (
+                                  <>
+                                    Most recent change: {t.change || "(unknown)"}
+                                    {t.reason ? ` — ${t.reason}` : ""}
+                                  </>
+                                );
+                              })()}
+                            </div>
+                        )}
+                      </>
+                    ) : (
+                      <span className="muted">(no decision timeline data)</span>
                     )}
                   </td>
                 </tr>

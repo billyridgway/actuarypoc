@@ -188,6 +188,34 @@ export interface ProductModelReview {
       message: string;
     }[];
   } | null;
+  decisionTimeline?: {
+    points: {
+      id?: number | string;
+      createdAt?: string | null;
+      decision?: string | null;
+      reviewer?: string | null;
+      riskStatus?: string | null;
+      scenarioValidationStatus?: string | null;
+      productDefinitionValidationStatus?: string | null;
+      coverageGapCount?: number | null;
+      bundlePresent?: boolean;
+      comments?: string | null;
+    }[];
+    summary?: {
+      latestRiskStatus?: string | null;
+      decisionCount?: number | null;
+      cleanCount?: number | null;
+      warningCount?: number | null;
+      failCount?: number | null;
+      incompleteCount?: number | null;
+    } | null;
+    transitions?: {
+      fromDecisionId?: number | string | null;
+      toDecisionId?: number | string | null;
+      change?: string | null;
+      reason?: string | null;
+    }[];
+  } | null;
 }
 
 interface ProductModelReviewPageProps {
@@ -314,6 +342,7 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
     productDefinitionValidation,
     reviewFreshness,
     scenarioValidation,
+    decisionTimeline,
   } = review;
 
   const totalScenarios = scenarios.length;
@@ -680,6 +709,111 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
           </tbody>
         </table>
       </section>
+
+      {decisionTimeline && Array.isArray(decisionTimeline.points) && decisionTimeline.points.length > 0 && (
+        <section className="card">
+          <h2>Decision Timeline</h2>
+          <p className="muted">
+            Chronological view of Product Model Review decisions and their risk levels
+            (oldest first). Uses decisionRisk.status with severity ordering
+            clean &lt; warning &lt; incomplete &lt; fail.
+          </p>
+
+          {decisionTimeline.summary && (
+            <table className="kv-table">
+              <tbody>
+                <tr>
+                  <th>Latest risk status</th>
+                  <td>
+                    {decisionTimeline.summary.latestRiskStatus ? (
+                      <span
+                        className={`tag tag--decision-risk-${String(
+                          decisionTimeline.summary.latestRiskStatus || "unknown",
+                        ).toLowerCase()}`}
+                      >
+                        {String(decisionTimeline.summary.latestRiskStatus || "unknown").toUpperCase()}
+                      </span>
+                    ) : (
+                      <span className="muted">(unknown)</span>
+                    )}
+                  </td>
+                </tr>
+                <tr>
+                  <th>Decision counts</th>
+                  <td>
+                    total={decisionTimeline.summary.decisionCount ?? 0},
+                    {" "}clean={decisionTimeline.summary.cleanCount ?? 0},
+                    {" "}warning={decisionTimeline.summary.warningCount ?? 0},
+                    {" "}incomplete={decisionTimeline.summary.incompleteCount ?? 0},
+                    {" "}fail={decisionTimeline.summary.failCount ?? 0}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          )}
+
+          <h3>Timeline points</h3>
+          <table className="kv-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Created at</th>
+                <th>Decision / reviewer</th>
+                <th>Risk status</th>
+                <th>Scenario validation</th>
+                <th>Bundle</th>
+              </tr>
+            </thead>
+            <tbody>
+              {decisionTimeline.points.map((p) => {
+                const riskStatus = (p.riskStatus || "unknown").toString().toLowerCase();
+                const scenStatus = (p.scenarioValidationStatus || "(n/a)").toString();
+                const bundleLabel = p.bundlePresent ? "yes" : "no";
+                return (
+                  <tr key={p.id ?? String(p.createdAt ?? Math.random())}>
+                    <td>#{p.id}</td>
+                    <td>{p.createdAt || "(unknown)"}</td>
+                    <td>
+                      {p.decision || "(no decision)"}
+                      {" "}
+                      <span className="muted">by {p.reviewer || "(unknown)"}</span>
+                    </td>
+                    <td>
+                      <span className={`tag tag--decision-risk-${riskStatus}`}>
+                        {riskStatus.toUpperCase()}
+                      </span>
+                    </td>
+                    <td>
+                      {scenStatus !== "(n/a)" ? (
+                        <span className={`tag tag--scenario-validation-${scenStatus}`}>
+                          {scenStatus.toUpperCase()}
+                        </span>
+                      ) : (
+                        <span className="muted">(n/a)</span>
+                      )}
+                    </td>
+                    <td>{bundleLabel}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+
+          {Array.isArray(decisionTimeline.transitions) && decisionTimeline.transitions.length > 0 && (
+            <>
+              <h3>Transitions</h3>
+              <ul className="muted">
+                {decisionTimeline.transitions.map((t, idx) => (
+                  <li key={idx}>
+                    Decision {t.fromDecisionId} → {t.toDecisionId}: {t.change || "(unknown)"}
+                    {t.reason ? ` — ${t.reason}` : ""}
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+        </section>
+      )}
 
       {Array.isArray(decisionHistory) && decisionHistory.length > 0 && (
         <section className="card">
