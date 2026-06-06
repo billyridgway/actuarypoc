@@ -11,6 +11,7 @@ export const App: React.FC = () => {
   const [loading, setLoading] = useState<boolean>(false);
 
   const [productReview, setProductReview] = useState<ProductModelReview | null>(null);
+  const [products, setProducts] = useState<any[] | null>(null);
 
   // Object key comes from the URL query (?key=...), falling back to a
   // placeholder. This keeps the frontend dumb: it just calls the backend
@@ -47,6 +48,23 @@ export const App: React.FC = () => {
           }
           const data: ProductModelReview = await res.json();
           setProductReview(data);
+          // When on the Home view, also load the product catalog so the
+          // Products section can show all known products, not just P12TRF.
+          if (view === "home") {
+            try {
+              const prodRes = await fetch("/api/products");
+              if (prodRes.ok) {
+                const prodData = await prodRes.json();
+                setProducts(Array.isArray(prodData?.products) ? prodData.products : []);
+              } else {
+                setProducts([]);
+              }
+            } catch {
+              setProducts([]);
+            }
+          } else {
+            setProducts(null);
+          }
           setRunDetail(null);
         } else {
           const res = await fetch(`/api/run-detail?key=${encodeURIComponent(objectKey)}`);
@@ -77,7 +95,7 @@ export const App: React.FC = () => {
     }
 
     if (view === "home") {
-      return <HomePage productReview={productReview} />;
+      return <HomePage productReview={productReview} products={products} />;
     }
 
     if (view === "create-review") {
@@ -121,7 +139,10 @@ export const App: React.FC = () => {
 };
 
 
-const HomePage: React.FC<{ productReview: ProductModelReview | null }> = ({ productReview }) => {
+const HomePage: React.FC<{ productReview: ProductModelReview | null; products: any[] | null }> = ({
+  productReview,
+  products,
+}) => {
   const anyReview: any = productReview;
   const productBlock = anyReview?.product;
   const lastDecision = anyReview?.lastDecision;
@@ -356,67 +377,81 @@ const HomePage: React.FC<{ productReview: ProductModelReview | null }> = ({ prod
       </section>
 
       <div className="home-grid">
-        <section className="card home-card">
-          <h2>Products</h2>
-          {productReview ? (
-            <table className="kv-table">
-              <thead>
-                <tr>
-                  <th>Product</th>
-                  <th>Filing</th>
-                  <th>Latest generation</th>
-                  <th>Latest decision</th>
-                  <th>Freshness</th>
-                  <th>Risk</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td>
-                    <a href={`/web?view=product&productCode=${encodeURIComponent(productCode)}`}>
-                      {productName} ({productCode})
-                    </a>
-                  </td>
-                  <td>{reviewMeta?.filingId || "(not set)"}</td>
-                  <td>{reviewMeta?.currentGeneration || "(not set)"}</td>
-                  <td>
-                    {lastDecision?.id != null ? (
-                      <>
-                        #{lastDecision.id} – {lastDecision.decision || "(no label)"}
-                      </>
-                    ) : (
-                      <span className="muted">(none)</span>
-                    )}
-                  </td>
-                  <td>
-                    {reviewFreshness ? (
-                      <span className={`tag tag--freshness-${reviewFreshness.status}`}>
-                        {String(reviewFreshness.status).toUpperCase()}
-                      </span>
-                    ) : (
-                      <span className="muted">(unknown)</span>
-                    )}
-                  </td>
-                  <td>
-                    {decisionRisk ? (
-                      <span
-                        className={`tag tag--decision-risk-${String(
-                          decisionRisk.status || "unknown",
-                        ).toLowerCase()}`}
-                      >
-                        {String(decisionRisk.status || "unknown").toUpperCase()}
-                      </span>
-                    ) : (
-                      <span className="muted">(unknown)</span>
-                    )}
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          ) : (
-            <p className="muted">No products available yet. Generate a Product Review to populate the catalog.</p>
-          )}
-        </section>
+      <section className="card home-card">
+        <h2>Products</h2>
+        {Array.isArray(products) && products.length > 0 ? (
+          <table className="kv-table">
+            <thead>
+              <tr>
+                <th>Product</th>
+                <th>Status</th>
+                <th>Filing</th>
+                <th>Latest generation</th>
+                <th>Latest decision</th>
+                <th>Freshness</th>
+                <th>Risk</th>
+              </tr>
+            </thead>
+            <tbody>
+              {products.map((p: any) => {
+                const code = p.productCode || "(unknown)";
+                const name = p.productName || code;
+                const status = p.status || "unknown";
+                const latestDecisionId = p.latestDecisionId;
+                const latestDecisionLabel = p.latestDecision;
+                const freshness = p.reviewFreshnessStatus;
+                const risk = p.latestRiskStatus;
+                return (
+                  <tr key={code}>
+                    <td>
+                      <a href={`/web?view=product&productCode=${encodeURIComponent(code)}`}>
+                        {name} ({code})
+                      </a>
+                    </td>
+                    <td>
+                      <span className="muted">{status}</span>
+                    </td>
+                    <td>{p.filingId || "(not set)"}</td>
+                    <td>{p.latestGeneration || "(not set)"}</td>
+                    <td>
+                      {latestDecisionId != null ? (
+                        <>
+                          #{latestDecisionId}
+                          {latestDecisionLabel ? ` – ${latestDecisionLabel}` : ""}
+                        </>
+                      ) : (
+                        <span className="muted">(none)</span>
+                      )}
+                    </td>
+                    <td>
+                      {freshness ? (
+                        <span className={`tag tag--freshness-${freshness}`}>
+                          {String(freshness).toUpperCase()}
+                        </span>
+                      ) : (
+                        <span className="muted">(unknown)</span>
+                      )}
+                    </td>
+                    <td>
+                      {risk ? (
+                        <span
+                          className={`tag tag--decision-risk-${String(risk || "unknown").toLowerCase()}`}
+                        >
+                          {String(risk || "unknown").toUpperCase()}
+                        </span>
+                      ) : (
+                        <span className="muted">(unknown)</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        ) : (
+          <p className="muted">No products available yet. Generate a Product Review to populate the catalog.</p>
+        )}
+      </section>
 
         <section className="card home-card">
           <h2>Create Product Review</h2>

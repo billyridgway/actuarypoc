@@ -75,6 +75,30 @@ if _DIST_DIR.exists():  # pragma: no cover - environment dependent
 _P12TRF_DEFINITION_PATH = _PROJECT_ROOT / "examples" / "product-definitions" / "p12trf-product-definition.json"
 
 
+_PRODUCT_REGISTRY: List[Dict[str, Any]] = [
+    {
+        "productCode": "P12TRF",
+        "productName": "Pacific Life ICC12 P12TRF Term (POC)",
+        "status": "implemented",
+        "reviewEndpoint": "/api/product-model-review/p12trf",
+    },
+    {
+        "productCode": "DEMO-TERM",
+        "productName": "Demo Term Product",
+        "status": "not_implemented",
+        "reviewEndpoint": None,
+    },
+]
+
+
+def _get_product_config(product_code: str) -> Optional[Dict[str, Any]]:
+    code_norm = (product_code or "").strip().upper()
+    for entry in _PRODUCT_REGISTRY:
+        if (entry.get("productCode") or "").upper() == code_norm:
+            return entry
+    return None
+
+
 def _product_definition_object_key(product_code: str, filing_id: str) -> str:
     return f"product-definitions/{product_code.upper()}/{filing_id}/product-definition.json"
 
@@ -2121,38 +2145,61 @@ def _build_decision_timeline(decision_history: Optional[List[Dict[str, Any]]]) -
 def api_products() -> Dict[str, Any]:
     """Return a simple product catalog for the dashboard.
 
-    For now this is POC-only and returns a single P12TRF entry, but the
-    shape is generic so additional products can be added later.
+    Uses the static product registry as the source of truth and enriches
+    implemented products (currently P12TRF only) with PMR state.
     """
 
     products: List[Dict[str, Any]] = []
 
-    # P12TRF Product Model Review snapshot as the canonical source.
+    pmr: Optional[Dict[str, Any]] = None
     try:
+        # Only load the P12TRF PMR snapshot once; other products either do
+        # not have a review yet or will be wired up in future items.
         pmr = api_product_model_review_p12trf()
-        product_block = pmr.get("product") or {}
-        review_meta = pmr.get("reviewMeta") or {}
-        last_decision = pmr.get("lastDecision") or {}
-        review_freshness = pmr.get("reviewFreshness") or {}
-        decision_risk = (last_decision.get("decisionRisk") or {}) if isinstance(last_decision, dict) else {}
-
-        products.append(
-            {
-                "productCode": product_block.get("code"),
-                "productName": product_block.get("name"),
-                "filingId": review_meta.get("filingId"),
-                "latestGeneration": review_meta.get("currentGeneration"),
-                "latestDecisionId": last_decision.get("id"),
-                "latestDecision": last_decision.get("decision"),
-                "latestRiskStatus": decision_risk.get("status"),
-                "reviewFreshnessStatus": review_freshness.get("status"),
-                "bundlePath": last_decision.get("bundle_path"),
-            }
-        )
     except Exception:
-        # Best-effort only; if the PMR endpoint fails we still return an
-        # empty catalog so the frontend remains responsive.
-        pass
+        pmr = None
+
+    for entry in _PRODUCT_REGISTRY:
+        code = entry.get("productCode")
+        name = entry.get("productName")
+        status = entry.get("status") or "unknown"
+
+        if code and code.upper() == "P12TRF" and status == "implemented" and pmr is not None:
+            product_block = pmr.get("product") or {}
+            review_meta = pmr.get("reviewMeta") or {}
+            last_decision = pmr.get("lastDecision") or {}
+            review_freshness = pmr.get("reviewFreshness") or {}
+            decision_risk = (last_decision.get("decisionRisk") or {}) if isinstance(last_decision, dict) else {}
+
+            products.append(
+                {
+                    "productCode": product_block.get("code"),
+                    "productName": product_block.get("name"),
+                    "status": "implemented",
+                    "filingId": review_meta.get("filingId"),
+                    "latestGeneration": review_meta.get("currentGeneration"),
+                    "latestDecisionId": last_decision.get("id"),
+                    "latestDecision": last_decision.get("decision"),
+                    "latestRiskStatus": decision_risk.get("status"),
+                    "reviewFreshnessStatus": review_freshness.get("status"),
+                    "bundlePath": last_decision.get("bundle_path"),
+                }
+            )
+        else:
+            products.append(
+                {
+                    "productCode": code,
+                    "productName": name,
+                    "status": status,
+                    "filingId": None,
+                    "latestGeneration": None,
+                    "latestDecisionId": None,
+                    "latestDecision": None,
+                    "latestRiskStatus": None,
+                    "reviewFreshnessStatus": None,
+                    "bundlePath": None,
+                }
+            )
 
     return {"products": products}
 
@@ -2166,10 +2213,31 @@ def api_product_detail(product_code: str) -> Dict[str, Any]:
     later without breaking consumers.
     """
 
-    code_norm = (product_code or "").strip().upper()
-    if code_norm != "P12TRF":
+    cfg = _get_product_config(product_code)
+    if cfg is None:
+        # Unknown product entirely.
         raise HTTPException(status_code=404, detail=f"Unknown product_code '{product_code}'.")
 
+    status = cfg.get("status") or "unknown"
+    code_norm = (cfg.get("productCode") or product_code or "").strip().upper()
+
+    if status != "implemented" or code_norm != "P12TRF":
+        # Known but not yet implemented product: return a friendly shell
+        # with no versions/decisions instead of a 404.
+        return {
+            "product": {
+                "productCode": cfg.get("productCode"),
+                "productName": cfg.get("productName"),
+                "status": status,
+            },
+            "latestVersion": None,
+            "versions": [],
+            "decisions": [],
+            "timeline": None,
+            "message": "Product review is not implemented for this product yet.",
+        }
+
+    # Implemented P12TRF Product Model Review detail.
     pmr = api_product_model_review_p12trf()
     product_block = pmr.get("product") or {}
     review_meta = pmr.get("reviewMeta") or {}
@@ -2183,8 +2251,6 @@ def api_product_detail(product_code: str) -> Dict[str, Any]:
     latest_version: Optional[Dict[str, Any]] = None
     versions: List[Dict[str, Any]] = []
 
-    # For now we only expose a single "latest" version derived from the
-    # current reviewMeta + decision snapshot.
     version = {
         "generationId": review_meta.get("currentGeneration"),
         "generatedAt": review_meta.get("generatedAt"),
@@ -2224,6 +2290,7 @@ def api_product_detail(product_code: str) -> Dict[str, Any]:
         "productCode": product_block.get("code"),
         "productName": product_block.get("name"),
         "filingId": review_meta.get("filingId"),
+        "status": "implemented",
     }
 
     return {

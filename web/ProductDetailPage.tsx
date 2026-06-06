@@ -32,6 +32,7 @@ interface ProductDetailPayload {
     productCode?: string | null;
     productName?: string | null;
     filingId?: string | null;
+    status?: string | null;
   } | null;
   latestVersion?: ProductVersion | null;
   versions?: ProductVersion[];
@@ -86,6 +87,7 @@ export const ProductDetailPage: React.FC<ProductDetailProps> = ({ productCode })
   const decisions = detail.decisions || [];
 
   const productCodeDisplay = product.productCode || productCode;
+  const productStatus = (product as any).status || "implemented";
 
   return (
     <div className="product-detail-page">
@@ -100,29 +102,35 @@ export const ProductDetailPage: React.FC<ProductDetailProps> = ({ productCode })
           <strong>Current filing:</strong> {product.filingId || "(not set)"}
         </p>
         <p className="muted">
-          This view summarises Product Model Review generations, decisions, and evidence bundles for this product.
+          {productStatus === "implemented"
+            ? "This view summarises Product Model Review generations, decisions, and evidence bundles for this product."
+            : "Product review is not implemented for this product yet."}
         </p>
         <p>
-          <a
-            href={`/web?view=product-model&productCode=${encodeURIComponent(productCodeDisplay)}`}
-            className="button"
-          >
-            Open Trust Surface
-          </a>{" "}
-          <a href="/web?view=create-review" className="button">
-            Edit / Create Review
-          </a>
-          {latestVersion && latestVersion.latestDecisionId != null && latestVersion.bundlePath && (
+          {productStatus === "implemented" && (
             <>
-              {" "}
               <a
-                href={`/api/product-model-review/${encodeURIComponent(productCodeDisplay)}/decisions/${encodeURIComponent(String(
-                  latestVersion.latestDecisionId,
-                ))}/bundle`}
+                href={`/web?view=product-model&productCode=${encodeURIComponent(productCodeDisplay)}`}
                 className="button"
               >
-                Download latest bundle
+                Open Trust Surface
+              </a>{" "}
+              <a href="/web?view=create-review" className="button">
+                Edit / Create Review
               </a>
+              {latestVersion && latestVersion.latestDecisionId != null && latestVersion.bundlePath && (
+                <>
+                  {" "}
+                  <a
+                    href={`/api/product-model-review/${encodeURIComponent(productCodeDisplay)}/decisions/${encodeURIComponent(String(
+                      latestVersion.latestDecisionId,
+                    ))}/bundle`}
+                    className="button"
+                  >
+                    Download latest bundle
+                  </a>
+                </>
+              )}
             </>
           )}
         </p>
