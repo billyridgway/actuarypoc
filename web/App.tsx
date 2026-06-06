@@ -438,8 +438,8 @@ const HomePage: React.FC<{ productReview: ProductModelReview | null }> = ({ prod
             decisions and bundles for P12TRF.
           </p>
           <p>
-            <a href="/web?view=product-model" className="button">
-              Open Trust Surface
+            <a href={`/web?view=product&productCode=${encodeURIComponent(productCode)}`} className="button">
+              Open Product Review
             </a>
           </p>
         </section>
@@ -450,8 +450,8 @@ const HomePage: React.FC<{ productReview: ProductModelReview | null }> = ({ prod
             View the latest Product Model Review decision history and download or inspect immutable evidence bundles.
           </p>
           <p>
-            <a href="/web?view=product-model" className="button">
-              View Decisions &amp; Bundles
+            <a href={`/web?view=product&productCode=${encodeURIComponent(productCode)}`} className="button">
+              View Product Decisions &amp; Bundles
             </a>
           </p>
         </section>

@@ -51,6 +51,9 @@ export const ProductDetailPage: React.FC<ProductDetailProps> = ({ productCode })
         const res = await fetch(`/api/products/${encodeURIComponent(productCode)}`);
         if (!res.ok) {
           const text = await res.text();
+          if (res.status === 404) {
+            throw new Error("Product review is not implemented yet for this product.");
+          }
           throw new Error(text || `HTTP ${res.status}`);
         }
         const data = (await res.json()) as ProductDetailPayload;
@@ -100,7 +103,10 @@ export const ProductDetailPage: React.FC<ProductDetailProps> = ({ productCode })
           This view summarises Product Model Review generations, decisions, and evidence bundles for this product.
         </p>
         <p>
-          <a href="/web?view=product-model" className="button">
+          <a
+            href={`/web?view=product-model&productCode=${encodeURIComponent(productCodeDisplay)}`}
+            className="button"
+          >
             Open Trust Surface
           </a>{" "}
           <a href="/web?view=create-review" className="button">
