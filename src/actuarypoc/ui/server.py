@@ -4172,9 +4172,12 @@ def build_p12trf_illustration(product_code: str, request: Dict[str, Any]) -> Dic
 
     scale = face_amount / template_face if template_face not in (0.0, None) else 1.0
 
-    # Build scaled projection rows.
+    # Build scaled projection rows, enriching them with illustration-friendly
+    # columns such as cumulative premium, surrender value, and net amount at
+    # risk so the output table looks and feels like a real illustration grid.
     projection_table = best.get("projectionTable") or []
     rows: List[Dict[str, Any]] = []
+    cumulative_premium: Optional[float] = 0.0
     for row in projection_table:
         if not isinstance(row, dict):
             continue
@@ -4199,13 +4202,48 @@ def build_p12trf_illustration(product_code: str, request: Dict[str, Any]) -> Dic
             except Exception:
                 return x
 
+        scaled_premium = _scaled(premium)
+        scaled_death_benefit = _scaled(death_benefit)
+        scaled_cash_value = _scaled(cash_value)
+
+        # Track cumulative premium using numeric premiums only; when a row
+        # has a non-numeric premium we keep the last cumulative value.
+        cumulative_premium_value: Optional[float]
+        if isinstance(scaled_premium, (int, float)):
+            if cumulative_premium is None:
+                cumulative_premium = float(scaled_premium)
+            else:
+                cumulative_premium += float(scaled_premium)
+            cumulative_premium_value = cumulative_premium
+        else:
+            cumulative_premium_value = cumulative_premium
+
+        # For this POC term product we do not yet have explicit surrender
+        # charge modelling, so we expose a surrenderValue column that equals
+        # the cash value when it is present. This keeps the grid shape close
+        # to a real illustration without fabricating extra behaviour.
+        surrender_value: Optional[float]
+        if isinstance(scaled_cash_value, (int, float)):
+            surrender_value = float(scaled_cash_value)
+        else:
+            surrender_value = None
+
+        net_amount_at_risk: Optional[float]
+        if isinstance(scaled_death_benefit, (int, float)) and isinstance(scaled_cash_value, (int, float)):
+            net_amount_at_risk = float(scaled_death_benefit) - float(scaled_cash_value)
+        else:
+            net_amount_at_risk = None
+
         rows.append(
             {
                 "year": year,
                 "attainedAge": attained_age,
-                "premium": _scaled(premium),
-                "deathBenefit": _scaled(death_benefit),
-                "cashValue": _scaled(cash_value),
+                "premium": scaled_premium,
+                "cumulativePremium": cumulative_premium_value,
+                "deathBenefit": scaled_death_benefit,
+                "cashValue": scaled_cash_value,
+                "surrenderValue": surrender_value,
+                "netAmountAtRisk": net_amount_at_risk,
                 "status": row.get("status"),
             }
         )
@@ -4215,6 +4253,144 @@ def build_p12trf_illustration(product_code: str, request: Dict[str, Any]) -> Dic
         y = r.get("year")
         if y is not None:
             years.append(y)
+
+    # Lightweight decision hooks so a single projection is more actionable
+    # for an actuary or product partner.
+
+    def _first_break_even_year() -> Optional[int]:
+        """Return the first policy year where cash value >= cumulative premium.
+
+        This is intentionally simple and only considers rows with numeric
+        cumulativePremium and cashValue.
+        """
+
+        for r in rows:
+            year_val = r.get("year")
+            cv = r.get("cashValue")
+            cp = r.get("cumulativePremium")
+            if not isinstance(year_val, int):
+                continue
+            if not isinstance(cv, (int, float)) or not isinstance(cp, (int, float)):
+                continue
+            try:
+                if float(cv) >= float(cp):
+                    return year_val
+            except Exception:
+                continue
+        return None
+
+    def _compute_irr_for_horizon(horizon_year: int) -> Optional[float]:
+        """Approximate an IRR on premiums to cash value at a given horizon.
+
+        Cash flows are modelled as level outflows (premiums) each policy
+        year, with a single inflow equal to cash value at the horizon year.
+        The result is an annual effective rate when a sign change exists.
+        """
+
+        if horizon_year <= 0:
+            return None
+
+        # Index rows by year for quick lookup.
+        by_year: Dict[int, Dict[str, Any]] = {}
+        for r in rows:
+            y_val = r.get("year")
+            if isinstance(y_val, int):
+                by_year[y_val] = r
+
+        if horizon_year not in by_year:
+            return None
+
+        cashflows: List[float] = []
+        has_positive = False
+        has_negative = False
+
+        for y in range(1, horizon_year + 1):
+            row = by_year.get(y) or {}
+            prem = row.get("premium")
+            try:
+                prem_val = float(prem) if isinstance(prem, (int, float)) else 0.0
+            except Exception:
+                prem_val = 0.0
+            cf = -prem_val
+            if cf > 0:
+                has_positive = True
+            if cf < 0:
+                has_negative = True
+            cashflows.append(cf)
+
+        # Add terminal cash value at the same time as the last premium.
+        terminal = by_year.get(horizon_year) or {}
+        cv_term = terminal.get("cashValue")
+        try:
+            term_val = float(cv_term) if isinstance(cv_term, (int, float)) else 0.0
+        except Exception:
+            term_val = 0.0
+
+        if cashflows:
+            cashflows[-1] += term_val
+            if term_val > 0:
+                has_positive = True
+
+        if not (has_positive and has_negative):
+            return None
+
+        def _npv(rate: float) -> float:
+            total = 0.0
+            for t, cf in enumerate(cashflows):
+                try:
+                    total += cf / ((1.0 + rate) ** t)
+                except Exception:
+                    # Extremely unlikely (e.g. rate ~= -1); treat as large
+                    # magnitude to steer bisection away.
+                    total += float("inf") if cf > 0 else float("-inf")
+            return total
+
+        # Simple bisection between -99.9% and +100% annual effective rate.
+        low = -0.999
+        high = 1.0
+        npv_low = _npv(low)
+        npv_high = _npv(high)
+
+        if npv_low == 0.0:
+            return low
+        if npv_high == 0.0:
+            return high
+        if npv_low * npv_high > 0:
+            # No sign change → no guaranteed root in this range.
+            return None
+
+        mid = 0.0
+        for _ in range(60):
+            mid = (low + high) / 2.0
+            npv_mid = _npv(mid)
+            if abs(npv_mid) < 1e-6:
+                break
+            if npv_low * npv_mid < 0:
+                high = mid
+                npv_high = npv_mid
+            else:
+                low = mid
+                npv_low = npv_mid
+        return mid
+
+    max_year: Optional[int] = None
+    for r in rows:
+        y_val = r.get("year")
+        if isinstance(y_val, int):
+            if max_year is None or y_val > max_year:
+                max_year = y_val
+
+    break_even_year = _first_break_even_year()
+
+    irr_to_10: Optional[float] = None
+    irr_to_20: Optional[float] = None
+    irr_to_final: Optional[float] = None
+    if max_year is not None:
+        if max_year >= 10:
+            irr_to_10 = _compute_irr_for_horizon(10)
+        if max_year >= 20:
+            irr_to_20 = _compute_irr_for_horizon(20)
+        irr_to_final = _compute_irr_for_horizon(max_year)
 
     return {
         "productCode": product_block.get("code") or product_code,
@@ -4231,6 +4407,15 @@ def build_p12trf_illustration(product_code: str, request: Dict[str, Any]) -> Dic
         "projection": {
             "years": years,
             "rows": rows,
+            "metrics": {
+                "breakEvenYear": break_even_year,
+                "maximumYear": max_year,
+                "irr": {
+                    "toYear10": irr_to_10,
+                    "toYear20": irr_to_20,
+                    "toFinalYear": irr_to_final,
+                },
+            },
         },
     }
 

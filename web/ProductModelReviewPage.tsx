@@ -971,14 +971,51 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
         {illustrationResult && (
           <>
             <h3>Illustration projection</h3>
+            {illustrationResult.projection?.metrics && (
+              <table className="kv-table">
+                <tbody>
+                  <tr>
+                    <th>Break-even year</th>
+                    <td>{illustrationResult.projection.metrics.breakEvenYear ?? "(none)"}</td>
+                  </tr>
+                  <tr>
+                    <th>IRR (to year 10)</th>
+                    <td>
+                      {typeof illustrationResult.projection.metrics.irr?.toYear10 === "number"
+                        ? `${(illustrationResult.projection.metrics.irr.toYear10 * 100).toFixed(2)}%`
+                        : "(n/a)"}
+                    </td>
+                  </tr>
+                  <tr>
+                    <th>IRR (to year 20)</th>
+                    <td>
+                      {typeof illustrationResult.projection.metrics.irr?.toYear20 === "number"
+                        ? `${(illustrationResult.projection.metrics.irr.toYear20 * 100).toFixed(2)}%`
+                        : "(n/a)"}
+                    </td>
+                  </tr>
+                  <tr>
+                    <th>IRR (to final year)</th>
+                    <td>
+                      {typeof illustrationResult.projection.metrics.irr?.toFinalYear === "number"
+                        ? `${(illustrationResult.projection.metrics.irr.toFinalYear * 100).toFixed(2)}%`
+                        : "(n/a)"}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            )}
             <table className="kv-table">
               <thead>
                 <tr>
                   <th>Year</th>
                   <th>Attained age</th>
                   <th>Premium</th>
+                  <th>Cumulative premium</th>
                   <th>Death benefit</th>
                   <th>Cash value</th>
+                  <th>Surrender value</th>
+                  <th>Net amount at risk</th>
                   <th>Status</th>
                 </tr>
               </thead>
@@ -989,8 +1026,11 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                       <td>{r.year}</td>
                       <td>{r.attainedAge ?? ""}</td>
                       <td>{r.premium ?? ""}</td>
+                      <td>{r.cumulativePremium ?? ""}</td>
                       <td>{r.deathBenefit ?? ""}</td>
                       <td>{r.cashValue ?? ""}</td>
+                      <td>{r.surrenderValue ?? ""}</td>
+                      <td>{r.netAmountAtRisk ?? ""}</td>
                       <td>{r.status ?? ""}</td>
                     </tr>
                   ))}
