@@ -4,12 +4,13 @@ from dataclasses import asdict
 from datetime import datetime
 import io
 import json
+import logging
 import zipfile
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, Query, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, Query, UploadFile, File, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -3971,6 +3972,28 @@ def build_p12trf_illustration_evidence(product_code: str) -> Dict[str, Any]:
 
 
 _PRODUCT_ILLUSTRATION_EVIDENCE_PROVIDERS["P12TRF"] = build_p12trf_illustration_evidence
+
+
+@app.post("/api/client-error")
+async def api_client_error(request: Request) -> Dict[str, Any]:
+    """Receive client-side errors and log them to the server logs.
+
+    This lets us diagnose "blank screen" issues from pod logs without
+    needing direct access to the browser console.
+    """
+
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {"raw": await request.body()}  # type: ignore[assignment]
+
+    logger = logging.getLogger("client-errors")
+    try:
+        logger.error("Client error: %s", json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    except Exception:
+        logger.error("Client error (unserializable payload): %r", payload)
+
+    return {"status": "ok"}
 
 
 @app.post("/api/product-model-review/p12trf/evidence/seed")

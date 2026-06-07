@@ -22,6 +22,54 @@ export const App: React.FC = () => {
   const objectKey = searchParams.get("key") || "projections/projection-1779276320.json";
   const productCodeParam = searchParams.get("productCode") || "P12TRF";
 
+  // Minimal client-side error reporter so SPA crashes are visible in
+  // pod logs via /api/client-error.
+  React.useEffect(() => {
+    const reportClientError = (payload: any) => {
+      try {
+        fetch("/api/client-error", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+          keepalive: true,
+        }).catch(() => {
+          // Best-effort only.
+        });
+      } catch {
+        // Ignore reporting failures.
+      }
+    };
+
+    const handleError = (event: ErrorEvent) => {
+      reportClientError({
+        type: "error",
+        message: event.message,
+        source: event.filename,
+        lineno: event.lineno,
+        colno: event.colno,
+        stack: event.error && (event.error as any).stack,
+        userAgent: navigator.userAgent,
+      });
+    };
+
+    const handleRejection = (event: PromiseRejectionEvent) => {
+      reportClientError({
+        type: "unhandledrejection",
+        reason: String(event.reason),
+        stack: (event.reason && (event.reason as any).stack) || null,
+        userAgent: navigator.userAgent,
+      });
+    };
+
+    window.addEventListener("error", handleError);
+    window.addEventListener("unhandledrejection", handleRejection);
+
+    return () => {
+      window.removeEventListener("error", handleError);
+      window.removeEventListener("unhandledrejection", handleRejection);
+    };
+  }, []);
+
   useEffect(() => {
     const fetchData = async () => {
       // The onboarding flow has its own data fetching; keep the shared
