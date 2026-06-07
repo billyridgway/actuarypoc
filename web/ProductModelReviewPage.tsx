@@ -2157,24 +2157,33 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
 
       <section className="card">
         <h2>Gap and Exception Report (POC)</h2>
-        {gaps.missingFeatures.length === 0 && gaps.ambiguousLanguage.length === 0 ? (
-          <p>No gaps recorded.</p>
-        ) : (
-          <>
-            {gaps.missingFeatures.length > 0 && (
-              <>
-                <h3>Missing / unmodeled features</h3>
-                <ul>
-                  {gaps.missingFeatures.map((g) => (
-                    <li key={g.id}>
-                      {g.description} <span className="muted">(severity: {g.severity})</span>
-                    </li>
-                  ))}
-                </ul>
-              </>
-            )}
-          </>
-        )}
+        {(() => {
+          const missing = Array.isArray(gaps?.missingFeatures) ? gaps.missingFeatures : [];
+          const ambiguous = Array.isArray(gaps?.ambiguousLanguage) ? gaps.ambiguousLanguage : [];
+
+          if (missing.length === 0 && ambiguous.length === 0) {
+            return <p>No gaps recorded.</p>;
+          }
+
+          return (
+            <>
+              {missing.length > 0 && (
+                <>
+                  <h3>Missing / unmodeled features</h3>
+                  <ul>
+                    {missing.map((g: any) => (
+                      <li key={g.id}>
+                        {g.description} <span className="muted">(severity: {g.severity})</span>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+              {/* Ambiguous language bucket is kept for future use; for now we
+                  only render missing/unmodeled features when present. */}
+            </>
+          );
+        })()}
       </section>
 
       <section className="card">
