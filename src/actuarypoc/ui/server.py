@@ -392,6 +392,15 @@ class ScenarioConfigPayload(BaseModel):  # type: ignore[misc]
     scenarios: List[ScenarioConfig]
 
 
+class IllustrationRequest(BaseModel):  # type: ignore[misc]
+    age: Optional[int] = None
+    termYears: Optional[int] = None
+    riskClass: Optional[str] = None
+    smokerClass: Optional[str] = None
+    faceAmount: Optional[float] = None
+    premiumMode: Optional[str] = None
+
+
 _ALLOWED_PMR_DECISIONS = {
     "approve_for_poc",
     "approve_with_exclusions",
@@ -3172,6 +3181,7 @@ ProductRequirementsProvider = Callable[[str], Dict[str, Any]]
 ProductDefinitionEvidenceProvider = Callable[[str], Dict[str, Any]]
 ProductProjectionEvidenceProvider = Callable[[str], Dict[str, Any]]
 ProductIllustrationEvidenceProvider = Callable[[str], Dict[str, Any]]
+ProductIllustrationProvider = Callable[[str, Dict[str, Any]], Dict[str, Any]]
 
 
 _PRODUCT_MODEL_REVIEW_BUILDERS: Dict[str, ProductModelReviewBuilder] = {
@@ -3182,6 +3192,7 @@ _PRODUCT_REQUIREMENTS_PROVIDERS: Dict[str, ProductRequirementsProvider] = {}
 _PRODUCT_DEFINITION_EVIDENCE_PROVIDERS: Dict[str, ProductDefinitionEvidenceProvider] = {}
 _PRODUCT_PROJECTION_EVIDENCE_PROVIDERS: Dict[str, ProductProjectionEvidenceProvider] = {}
 _PRODUCT_ILLUSTRATION_EVIDENCE_PROVIDERS: Dict[str, ProductIllustrationEvidenceProvider] = {}
+_ILLUSTRATION_PROVIDERS: Dict[str, ProductIllustrationProvider] = {}
 
 
 def _get_product_model_review_builder(product_code: str) -> Optional[ProductModelReviewBuilder]:
@@ -3222,6 +3233,13 @@ def _get_product_illustration_evidence_provider(product_code: str) -> Optional[P
 
     code_norm = (product_code or "").strip().upper()
     return _PRODUCT_ILLUSTRATION_EVIDENCE_PROVIDERS.get(code_norm)
+
+
+def _get_illustration_provider(product_code: str) -> Optional[ProductIllustrationProvider]:
+    """Resolve an on-demand illustration provider for the given product code."""
+
+    code_norm = (product_code or "").strip().upper()
+    return _ILLUSTRATION_PROVIDERS.get(code_norm)
 
 
 @app.get("/api/product-model-review/{product_code}")
@@ -3376,6 +3394,51 @@ def api_product_illustration_evidence_product(product_code: str) -> Dict[str, An
         )
 
     return provider(code_norm)
+
+
+@app.post("/api/illustrations/{product_code}")
+def api_product_illustration(product_code: str, payload: IllustrationRequest) -> Dict[str, Any]:
+    """Generic on-demand illustration endpoint.
+
+    This is product-aware and delegates to a per-product illustration
+    provider registered in the illustration provider registry. Products
+    that are known but do not yet support on-demand illustration return
+    a 501; unknown products return 404.
+    """
+
+    cfg = _get_product_config(product_code)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail=f"Unknown product_code '{product_code}'.")
+
+    status = cfg.get("status") or "unknown"
+    code_norm = (cfg.get("productCode") or product_code or "").strip().upper()
+
+    if status != "implemented":
+        raise HTTPException(
+            status_code=501,
+            detail="On-demand illustration is not implemented for this product yet.",
+        )
+
+    provider = _get_illustration_provider(code_norm)
+    if provider is None:
+        raise HTTPException(
+            status_code=501,
+            detail="On-demand illustration provider is not registered for this product yet.",
+        )
+
+    try:
+        request_dict = payload.dict()  # type: ignore[call-arg]
+    except Exception:
+        request_dict = {
+            "age": payload.age,
+            "termYears": payload.termYears,
+            "riskClass": payload.riskClass,
+            "smokerClass": payload.smokerClass,
+            "faceAmount": payload.faceAmount,
+            "premiumMode": payload.premiumMode,
+        }
+
+    return provider(code_norm, request_dict)
 
 
 def build_p12trf_requirements(product_code: str) -> Dict[str, Any]:
@@ -4020,6 +4083,159 @@ async def api_client_error(request: Request) -> Dict[str, Any]:
         logger.error("Client error (unserializable payload): %r", payload)
 
     return {"status": "ok"}
+
+
+def build_p12trf_illustration(product_code: str, request: Dict[str, Any]) -> Dict[str, Any]:
+    """P12TRF-specific on-demand illustration provider.
+
+    This reuses the existing scenario projections as templates and
+    scales face-dependent fields to the requested face amount. It is a
+    POC-only approximation but uses the generic illustration shape so
+    other products can plug in richer behaviour later.
+    """
+
+    pmr = api_product_model_review_p12trf()
+    product_block = pmr.get("product") or {}
+
+    # Normalise request inputs with conservative defaults.
+    age_req = request.get("age")
+    try:
+        age_norm = int(age_req) if age_req is not None else None
+    except (TypeError, ValueError):
+        age_norm = None
+
+    term_req = request.get("termYears")
+    try:
+        term_years = int(term_req) if term_req is not None else None
+    except (TypeError, ValueError):
+        term_years = None
+
+    risk_class = (request.get("riskClass") or "").strip() or None
+    smoker_class = (request.get("smokerClass") or "").strip() or None
+    premium_mode_raw = (request.get("premiumMode") or "").strip()
+    premium_mode = premium_mode_raw.upper() or "ANNUAL"
+
+    face_req = request.get("faceAmount")
+    try:
+        face_amount = float(face_req) if face_req is not None else None
+    except (TypeError, ValueError):
+        face_amount = None
+
+    if term_years is None or term_years <= 0:
+        raise HTTPException(status_code=400, detail="termYears must be a positive integer.")
+    if face_amount is None or face_amount <= 0:
+        raise HTTPException(status_code=400, detail="faceAmount must be a positive number.")
+
+    # Reuse existing scenarios & projections as templates.
+    scen_and_rates = _build_p12trf_scenarios_and_rates()
+    scenarios = scen_and_rates.get("scenarios") or []
+    if not isinstance(scenarios, list) or not scenarios:
+        raise HTTPException(status_code=500, detail="No P12TRF scenarios available for illustration.")
+
+    # Find a template scenario with matching term and, when possible,
+    # matching premium mode.
+    def _score_template(s: Dict[str, Any]) -> int:
+        score = 0
+        inputs = s.get("inputs") or {}
+        s_term = inputs.get("termYears")
+        s_mode = (inputs.get("premiumMode") or "").upper()
+        if isinstance(s_term, int) and s_term == term_years:
+            score += 10
+        if s_mode == premium_mode:
+            score += 3
+        return score
+
+    best: Optional[Dict[str, Any]] = None
+    best_score = -1
+    for s in scenarios:
+        if not isinstance(s, dict):
+            continue
+        score = _score_template(s)
+        if score > best_score:
+            best_score = score
+            best = s
+
+    if not best or best_score <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="No compatible P12TRF scenario template found for requested termYears/premiumMode.",
+        )
+
+    inputs = best.get("inputs") or {}
+    try:
+        template_face = float(inputs.get("faceAmount") or 0.0)
+    except (TypeError, ValueError):
+        template_face = 0.0
+
+    if template_face <= 0.0:
+        template_face = face_amount
+
+    scale = face_amount / template_face if template_face not in (0.0, None) else 1.0
+
+    # Build scaled projection rows.
+    projection_table = best.get("projectionTable") or []
+    rows: List[Dict[str, Any]] = []
+    for row in projection_table:
+        if not isinstance(row, dict):
+            continue
+        year = row.get("year")
+        attained_age = row.get("attainedAge")
+        premium = row.get("premium")
+        death_benefit = row.get("deathBenefit")
+        cash_value = row.get("cashValue")
+
+        # Adjust attained age if a numeric age was provided.
+        if age_norm is not None and isinstance(inputs.get("age"), int) and isinstance(attained_age, int):
+            base_issue_age = inputs.get("age")
+            try:
+                delta = age_norm - int(base_issue_age)
+                attained_age = attained_age + delta
+            except Exception:
+                pass
+
+        def _scaled(x: Any) -> Any:
+            try:
+                return float(x) * scale if x is not None else None
+            except Exception:
+                return x
+
+        rows.append(
+            {
+                "year": year,
+                "attainedAge": attained_age,
+                "premium": _scaled(premium),
+                "deathBenefit": _scaled(death_benefit),
+                "cashValue": _scaled(cash_value),
+                "status": row.get("status"),
+            }
+        )
+
+    years: List[Any] = []
+    for r in rows:
+        y = r.get("year")
+        if y is not None:
+            years.append(y)
+
+    return {
+        "productCode": product_block.get("code") or product_code,
+        "productName": product_block.get("name"),
+        "request": {
+            "age": age_norm,
+            "termYears": term_years,
+            "riskClass": risk_class,
+            "smokerClass": smoker_class,
+            "faceAmount": face_amount,
+            "premiumMode": premium_mode,
+        },
+        "templateScenarioId": best.get("id"),
+        "projection": {
+            "years": years,
+            "rows": rows,
+        },
+    }
+
+
+_ILLUSTRATION_PROVIDERS["P12TRF"] = build_p12trf_illustration
 
 
 @app.post("/api/product-model-review/p12trf/evidence/seed")

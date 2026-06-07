@@ -428,6 +428,19 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
   const [illustrationEvidenceError, setIllustrationEvidenceError] = React.useState<string | null>(null);
   const [illustrationEvidenceLoading, setIllustrationEvidenceLoading] = React.useState<boolean>(false);
 
+  // On-demand illustration API (generic, product-aware).
+  const [illustrationForm, setIllustrationForm] = React.useState({
+    age: "",
+    termYears: "",
+    riskClass: "",
+    smokerClass: "",
+    faceAmount: "",
+    premiumMode: "ANNUAL",
+  });
+  const [illustrationResult, setIllustrationResult] = React.useState<any | null>(null);
+  const [illustrationError, setIllustrationError] = React.useState<string | null>(null);
+  const [illustrationLoading, setIllustrationLoading] = React.useState<boolean>(false);
+
   React.useEffect(() => {
     const loadRequirements = async () => {
       setRequirementsLoading(true);
@@ -845,6 +858,146 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
             )}
           </tbody>
         </table>
+      </section>
+
+      <section className="card">
+        <h2>Quick Illustration (POC)</h2>
+        <p className="muted">
+          Enter a simple P12TRF case to generate a fresh illustration projection using
+          the current product configuration. This endpoint is product-aware and will
+          be extended for additional products over time.
+        </p>
+        <form
+          className="form-grid"
+          onSubmit={async (e) => {
+            e.preventDefault();
+            setIllustrationError(null);
+            setIllustrationResult(null);
+            setIllustrationLoading(true);
+            try {
+              const payload: any = {
+                age: illustrationForm.age ? Number(illustrationForm.age) : undefined,
+                termYears: illustrationForm.termYears ? Number(illustrationForm.termYears) : undefined,
+                riskClass: illustrationForm.riskClass || undefined,
+                smokerClass: illustrationForm.smokerClass || undefined,
+                faceAmount: illustrationForm.faceAmount ? Number(illustrationForm.faceAmount) : undefined,
+                premiumMode: illustrationForm.premiumMode || undefined,
+              };
+              const res = await fetch(`/api/illustrations/${encodeURIComponent(product.code)}`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+              });
+              if (!res.ok) {
+                const text = await res.text();
+                throw new Error(text || `HTTP ${res.status}`);
+              }
+              const data = await res.json();
+              setIllustrationResult(data || null);
+            } catch (err: any) {
+              setIllustrationError(err?.message || "Failed to generate illustration.");
+            } finally {
+              setIllustrationLoading(false);
+            }
+          }}
+        >
+          <div className="form-row">
+            <label htmlFor="illustration-age">Issue age</label>
+            <input
+              id="illustration-age"
+              type="number"
+              value={illustrationForm.age}
+              onChange={(e) => setIllustrationForm({ ...illustrationForm, age: e.target.value })}
+              placeholder="e.g. 45"
+            />
+          </div>
+          <div className="form-row">
+            <label htmlFor="illustration-term">Term years</label>
+            <input
+              id="illustration-term"
+              type="number"
+              value={illustrationForm.termYears}
+              onChange={(e) => setIllustrationForm({ ...illustrationForm, termYears: e.target.value })}
+              placeholder="e.g. 10 or 20"
+            />
+          </div>
+          <div className="form-row">
+            <label htmlFor="illustration-risk">Risk class</label>
+            <input
+              id="illustration-risk"
+              type="text"
+              value={illustrationForm.riskClass}
+              onChange={(e) => setIllustrationForm({ ...illustrationForm, riskClass: e.target.value })}
+              placeholder="e.g. STANDARD_NON_TOBACCO"
+            />
+          </div>
+          <div className="form-row">
+            <label htmlFor="illustration-smoker">Smoker class</label>
+            <input
+              id="illustration-smoker"
+              type="text"
+              value={illustrationForm.smokerClass}
+              onChange={(e) => setIllustrationForm({ ...illustrationForm, smokerClass: e.target.value })}
+              placeholder="e.g. NS or S"
+            />
+          </div>
+          <div className="form-row">
+            <label htmlFor="illustration-face">Face amount</label>
+            <input
+              id="illustration-face"
+              type="number"
+              value={illustrationForm.faceAmount}
+              onChange={(e) => setIllustrationForm({ ...illustrationForm, faceAmount: e.target.value })}
+              placeholder="e.g. 250000"
+            />
+          </div>
+          <div className="form-row">
+            <label htmlFor="illustration-mode">Premium mode</label>
+            <input
+              id="illustration-mode"
+              type="text"
+              value={illustrationForm.premiumMode}
+              onChange={(e) => setIllustrationForm({ ...illustrationForm, premiumMode: e.target.value })}
+              placeholder="e.g. ANNUAL"
+            />
+          </div>
+          <div className="form-row">
+            <button type="submit" disabled={illustrationLoading}>
+              {illustrationLoading ? "Generating…" : "Generate illustration"}
+            </button>
+          </div>
+        </form>
+        {illustrationError && <p className="error">{illustrationError}</p>}
+        {illustrationResult && (
+          <>
+            <h3>Illustration projection</h3>
+            <table className="kv-table">
+              <thead>
+                <tr>
+                  <th>Year</th>
+                  <th>Attained age</th>
+                  <th>Premium</th>
+                  <th>Death benefit</th>
+                  <th>Cash value</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Array.isArray(illustrationResult.projection?.rows)
+                  && illustrationResult.projection.rows.map((r: any, idx: number) => (
+                    <tr key={idx}>
+                      <td>{r.year}</td>
+                      <td>{r.attainedAge ?? ""}</td>
+                      <td>{r.premium ?? ""}</td>
+                      <td>{r.deathBenefit ?? ""}</td>
+                      <td>{r.cashValue ?? ""}</td>
+                      <td>{r.status ?? ""}</td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </>
+        )}
       </section>
 
       <section className="card">
