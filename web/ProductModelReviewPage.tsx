@@ -1061,23 +1061,55 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
               </thead>
               <tbody>
                 {requirements.map((r) => {
-                  const statusRaw = (r && r.status) || "unknown";
-                  const status = String(statusRaw).toLowerCase();
+                  const implStatusRaw =
+                    (r && (r.implementationStatus ?? r.status)) || "unknown";
+                  const status = String(implStatusRaw).toLowerCase();
+
+                  // Source: handle the new generic {documentPath, filingLocation}
+                  // shape as well as older string-based shapes.
+                  let sourceText: string;
+                  const src = r && r.source;
+                  if (src && typeof src === "object") {
+                    const loc = (src.filingLocation as string | undefined) ||
+                      (src.documentPath as string | undefined);
+                    sourceText = loc || "(unknown)";
+                  } else {
+                    sourceText = (src as string) || r.filingLocation || "(unknown)";
+                  }
+
+                  // ProductDefinition mappings: show mapped paths when present.
+                  const mappings = Array.isArray(r.productDefinitionMappings)
+                    ? r.productDefinitionMappings
+                    : [];
+                  const mappingText =
+                    mappings.length > 0
+                      ? mappings
+                          .map((m: any) => (m && m.path ? String(m.path) : ""))
+                          .filter(Boolean)
+                          .join(", ") || "(mapped)"
+                      : r.productDefinitionMapping || "(not mapped)";
+
+                  const evidenceRuleIds = Array.isArray(r.evidenceRuleIds)
+                    ? r.evidenceRuleIds
+                    : r.evidenceRuleId
+                      ? [r.evidenceRuleId]
+                      : [];
+
                   return (
                     <tr key={r.requirementId || r.requirementText}>
                       <td>{r.requirementId || "(n/a)"}</td>
                       <td>{r.requirementText || "(n/a)"}</td>
-                      <td>{r.source || r.filingLocation || "(unknown)"}</td>
-                      <td>{r.productDefinitionMapping || "(not mapped)"}</td>
+                      <td>{sourceText}</td>
+                      <td>{mappingText}</td>
                       <td>
                         <span className={`tag tag--req-status-${status}`}>
-                          {String(statusRaw).toUpperCase()}
+                          {String(implStatusRaw).toUpperCase()}
                         </span>
                       </td>
                       <td className="muted">
-                        {r.evidenceRuleId && (
+                        {evidenceRuleIds.length > 0 && (
                           <span>
-                            Rule: {r.evidenceRuleId}.{" "}
+                            Rules: {evidenceRuleIds.join(", ")}.{" "}
                           </span>
                         )}
                         {r.notes || ""}
