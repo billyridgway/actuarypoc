@@ -3584,7 +3584,7 @@ def build_p12trf_requirements(product_code: str) -> Dict[str, Any]:
                 "documentPath": None,
                 "filingLocation": f"{filing_id or 'P12TRF filing (POC)'} – Convertibility provisions",
             },
-            "productDefinitionMappings": [],
+            "productDefinitionMappings": [_mapping("extra")],
             "evidenceRuleIds": [],
             "implementationStatus": "missing",
             "notes": "Convertibility is acknowledged conceptually but not modeled in the current P12TRF POC.",
@@ -3683,6 +3683,7 @@ def build_p12trf_product_definition_evidence(product_code: str) -> Dict[str, Any
     fields.append(_field("premiumModes", "Premium modes"))
     fields.append(_field("faceAmounts", "Face amount range"))
     fields.append(_field("coverages", "Coverages"))
+    fields.append(_field("extra", "Additional product details / riders / convertibility"))
 
     field_count = len(fields)
     linked_field_count = sum(1 for f in fields if f.get("linkedRequirementIds"))
@@ -3851,6 +3852,31 @@ def build_p12trf_projection_logic_evidence(product_code: str) -> Dict[str, Any]:
                 "notes": (
                     "This behaviour is explicitly called out in the coverage matrix and requirements "
                     "surface as missing/unmodeled."
+                ),
+            },
+        }
+    )
+
+    # Convertibility logic (currently unmodeled in projections).
+    behaviors.append(
+        {
+            "id": "behav_convertibility",
+            "label": "Convertibility during level term",
+            "category": "rider",
+            "requirementIds": ["req_convertibility"],
+            "productDefinitionPaths": ["extra"],
+            "projectionLogic": {
+                "description": (
+                    "Convertibility provisions are documented in the filing but are not "
+                    "projected in this POC; only the base term coverage cash flows are modeled."
+                ),
+                "pseudoCode": (
+                    "# convertibility terms recorded in ProductDefinition.extra.convertibility\n"
+                    "# are not exercised in the projection engine in this POC"
+                ),
+                "notes": (
+                    "This behaviour is tied to req_convertibility and will be updated once "
+                    "convertibility cash flows are explicitly modeled."
                 ),
             },
         }
