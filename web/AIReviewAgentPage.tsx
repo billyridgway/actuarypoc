@@ -13,10 +13,15 @@ export const AIReviewAgentPage: React.FC = () => {
   const [assumptionSetJson, setAssumptionSetJson] = useState<string | null>(null);
   const [assumptionsApproved, setAssumptionsApproved] = useState<boolean>(false);
   const [assumptionsFeedback, setAssumptionsFeedback] = useState<string>("");
+  const [scenarios, setScenarios] = useState<any[] | null>(null);
+  const [scenariosApproved, setScenariosApproved] = useState<boolean>(false);
+  const [scenariosFeedback, setScenariosFeedback] = useState<string>("");
   const [pmrSummary, setPmrSummary] = useState<any | null>(null);
   const [pmrDecision, setPmrDecision] = useState<any | null>(null);
   const [pmrApproved, setPmrApproved] = useState<boolean>(false);
   const [pmrFeedback, setPmrFeedback] = useState<string>("");
+  const [illustrationResult, setIllustrationResult] = useState<any | null>(null);
+  const [selectedScenarioIndex, setSelectedScenarioIndex] = useState<number>(0);
 
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
@@ -140,6 +145,88 @@ export const AIReviewAgentPage: React.FC = () => {
     }
   };
 
+  const handleGenerateScenarios = async () => {
+    if (!normalisedCode) {
+      setError("Enter a product code before generating scenarios.");
+      return;
+    }
+    if (!assumptionsApproved) {
+      setError("Approve assumptions first, then generate scenarios.");
+      return;
+    }
+
+    setError(null);
+    setLoading(true);
+    try {
+      const res = await fetch("/api/product-scenarios/ai-generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          productCode: normalisedCode,
+          filingId: normalisedFiling || undefined,
+          productType: productType || undefined,
+        }),
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      const scenList = Array.isArray(data.scenarios) ? data.scenarios : [];
+      setScenarios(scenList);
+      setScenariosApproved(false);
+      setSelectedScenarioIndex(0);
+    } catch (e: any) {
+      setError(e?.message || "Failed to generate scenarios from filings.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleRetryScenariosWithFeedback = async () => {
+    if (!normalisedCode) {
+      setError("Enter a product code before retrying scenarios.");
+      return;
+    }
+    if (!scenarios || scenarios.length === 0) {
+      setError("Generate scenarios once before retrying.");
+      return;
+    }
+    if (!scenariosFeedback.trim()) {
+      setError("Provide feedback explaining what needs to change in the scenarios.");
+      return;
+    }
+
+    setError(null);
+    setLoading(true);
+    try {
+      const res = await fetch("/api/product-scenarios/ai-generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          productCode: normalisedCode,
+          filingId: normalisedFiling || undefined,
+          productType: productType || undefined,
+          feedback: scenariosFeedback,
+          previous: scenarios,
+        }),
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      const scenList = Array.isArray(data.scenarios) ? data.scenarios : [];
+      setScenarios(scenList);
+      setScenariosApproved(false);
+      setSelectedScenarioIndex(0);
+    } catch (e: any) {
+      setError(e?.message || "Failed to retry scenarios with feedback.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleRetryAssumptionsWithFeedback = async () => {
     if (!normalisedCode) {
       setError("Enter a product code before retrying assumptions.");
@@ -197,6 +284,10 @@ export const AIReviewAgentPage: React.FC = () => {
       setError("Approve assumptions first, then run PMR agents.");
       return;
     }
+    if (!scenariosApproved) {
+      setError("Approve scenarios first, then run PMR agents.");
+      return;
+    }
     setError(null);
     setLoading(true);
     try {
@@ -215,6 +306,55 @@ export const AIReviewAgentPage: React.FC = () => {
       setPmrApproved(false);
     } catch (e: any) {
       setError(e?.message || "Failed to run PMR AI agents.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleGenerateIllustration = async () => {
+    const code = normalisedCode.trim();
+    if (!code) {
+      setError("Enter a product code before generating an illustration.");
+      return;
+    }
+    if (!assumptionsApproved || !scenariosApproved) {
+      setError("Approve assumptions and scenarios before generating an illustration.");
+      return;
+    }
+    if (!scenarios || scenarios.length === 0) {
+      setError("Generate and approve at least one scenario first.");
+      return;
+    }
+
+    const idx = selectedScenarioIndex >= 0 && selectedScenarioIndex < scenarios.length ? selectedScenarioIndex : 0;
+    const scen = scenarios[idx] || {};
+    const inputs = scen.inputs || scen;
+
+    const payload: any = {
+      age: inputs.age ?? null,
+      termYears: inputs.termYears ?? inputs.levelPeriod ?? null,
+      riskClass: inputs.riskClass || null,
+      smokerClass: inputs.smokerClass || null,
+      faceAmount: inputs.faceAmount ?? null,
+      premiumMode: inputs.premiumMode || null,
+    };
+
+    setError(null);
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/illustrations/${encodeURIComponent(code)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      setIllustrationResult(data || null);
+    } catch (e: any) {
+      setError(e?.message || "Failed to generate illustration.");
     } finally {
       setLoading(false);
     }
@@ -410,7 +550,85 @@ export const AIReviewAgentPage: React.FC = () => {
       </section>
 
       <section className="card">
-        <h2>4. PMR Summary & Decision (Stages 4–5)</h2>
+        <h2>4. Scenarios (Stage 3)</h2>
+        <p className="muted">
+          Generate a small set of representative scenarios for this product. These are used as inputs to the Product
+          Model Review and illustration stages.
+        </p>
+        <div className="form-grid">
+          <div className="form-row">
+            <button type="button" onClick={handleGenerateScenarios} disabled={loading}>
+              {loading ? "Working…" : "Generate scenarios from filings"}
+            </button>
+            <button
+              type="button"
+              onClick={handleRetryScenariosWithFeedback}
+              disabled={loading}
+              style={{ marginLeft: "0.5rem" }}
+            >
+              {loading ? "Working…" : "Reject & retry with feedback"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setScenariosApproved(true)}
+              disabled={loading}
+              style={{ marginLeft: "0.5rem" }}
+            >
+              Mark scenarios as approved
+            </button>
+          </div>
+        </div>
+        {scenarios && scenarios.length > 0 && (
+          <table className="kv-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Name</th>
+                <th>Age</th>
+                <th>Sex</th>
+                <th>Smoker</th>
+                <th>Risk class</th>
+                <th>Face</th>
+                <th>Term</th>
+                <th>Premium mode</th>
+              </tr>
+            </thead>
+            <tbody>
+              {scenarios.map((s, idx) => {
+                const inputs = s.inputs || s;
+                return (
+                  <tr key={s.id || idx}>
+                    <td>{s.id || idx}</td>
+                    <td>{s.name || ""}</td>
+                    <td>{inputs.age ?? ""}</td>
+                    <td>{inputs.sex || ""}</td>
+                    <td>{inputs.smokerClass || ""}</td>
+                    <td>{inputs.riskClass || ""}</td>
+                    <td>{inputs.faceAmount ?? ""}</td>
+                    <td>{inputs.levelPeriod ?? inputs.termYears ?? ""}</td>
+                    <td>{inputs.premiumMode || ""}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+        <div className="form-grid">
+          <div className="form-row">
+            <label htmlFor="scenarios-feedback">Feedback (for retries)</label>
+            <textarea
+              id="scenarios-feedback"
+              value={scenariosFeedback}
+              onChange={(e) => setScenariosFeedback(e.target.value)}
+              placeholder="Explain what is wrong or missing in the scenario set."
+              rows={3}
+            />
+          </div>
+        </div>
+      </section>
+
+      <section className="card">
+        <h2>5. PMR Summary & Decision (Stages 4–5)</h2>
         <p className="muted">
           Run the Product Model Review AI agents on the current PMR snapshot for this product. This uses the standard
           PMR builder, then applies an AI summary stage and a draft decision stage.
@@ -499,6 +717,106 @@ export const AIReviewAgentPage: React.FC = () => {
             />
           </div>
         </div>
+      </section>
+
+      <section className="card">
+        <h2>6. Illustration Projection (Final)</h2>
+        <p className="muted">
+          Generate an illustration-like projection for one of the approved scenarios, using the current product
+          configuration and assumptions.
+        </p>
+        <div className="form-grid">
+          <div className="form-row">
+            <label htmlFor="scenario-select">Scenario</label>
+            <select
+              id="scenario-select"
+              value={selectedScenarioIndex}
+              onChange={(e) => setSelectedScenarioIndex(Number(e.target.value))}
+              disabled={!scenarios || scenarios.length === 0}
+            >
+              {scenarios &&
+                scenarios.map((s, idx) => (
+                  <option key={s.id || idx} value={idx}>
+                    {s.id || idx} – {s.name || "Scenario"}
+                  </option>
+                ))}
+            </select>
+          </div>
+          <div className="form-row">
+            <button type="button" onClick={handleGenerateIllustration} disabled={loading}>
+              {loading ? "Working…" : "Generate illustration for selected scenario"}
+            </button>
+          </div>
+        </div>
+        {illustrationResult && (
+          <>
+            {illustrationResult.projection?.metrics && (
+              <table className="kv-table">
+                <tbody>
+                  <tr>
+                    <th>Break-even year</th>
+                    <td>{illustrationResult.projection.metrics.breakEvenYear ?? "(none)"}</td>
+                  </tr>
+                  <tr>
+                    <th>IRR (to year 10)</th>
+                    <td>
+                      {typeof illustrationResult.projection.metrics.irr?.toYear10 === "number"
+                        ? `${(illustrationResult.projection.metrics.irr.toYear10 * 100).toFixed(2)}%`
+                        : "(n/a)"}
+                    </td>
+                  </tr>
+                  <tr>
+                    <th>IRR (to year 20)</th>
+                    <td>
+                      {typeof illustrationResult.projection.metrics.irr?.toYear20 === "number"
+                        ? `${(illustrationResult.projection.metrics.irr.toYear20 * 100).toFixed(2)}%`
+                        : "(n/a)"}
+                    </td>
+                  </tr>
+                  <tr>
+                    <th>IRR (to final year)</th>
+                    <td>
+                      {typeof illustrationResult.projection.metrics.irr?.toFinalYear === "number"
+                        ? `${(illustrationResult.projection.metrics.irr.toFinalYear * 100).toFixed(2)}%`
+                        : "(n/a)"}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            )}
+            <table className="kv-table">
+              <thead>
+                <tr>
+                  <th>Year</th>
+                  <th>Attained age</th>
+                  <th>Premium</th>
+                  <th>Cumulative premium</th>
+                  <th>Death benefit</th>
+                  <th>Cash value</th>
+                  <th>Surrender value</th>
+                  <th>Net amount at risk</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Array.isArray(illustrationResult.projection?.rows) &&
+                  illustrationResult.projection.rows.map((r: any, idx: number) => (
+                    <tr key={idx}>
+                      <td>{r.year}</td>
+                      <td>{r.attainedAge ?? ""}</td>
+                      <td>{r.premium ?? ""}</td>
+                      <td>{r.cumulativePremium ?? ""}</td>
+                      <td>{r.deathBenefit ?? ""}</td>
+                      <td>{r.cashValue ?? ""}</td>
+                      <td>{r.surrenderValue ?? ""}</td>
+                      <td>{r.netAmountAtRisk ?? ""}</td>
+                      <td>{r.status ?? ""}</td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </>
+        )}
       </section>
     </div>
   );

@@ -29,6 +29,7 @@ from actuarypoc.extract.assumptions_for_product import (
     generate_assumption_set_for_product,
 )
 from actuarypoc.agents.pmr_ai import summarise_pmr, propose_decision
+from actuarypoc.agents.scenario_ai import generate_scenarios_for_product
 from actuarypoc.storage.postgres_client import (
     get_last_product_model_review_decision,
     list_product_model_review_decisions,
@@ -409,6 +410,15 @@ class ProductAssumptionsAIGenerateRequest(BaseModel):  # type: ignore[misc]
     model: Optional[str] = None
     feedback: Optional[str] = None
     previous: Optional[Dict[str, Any]] = None
+
+
+class ProductScenariosAIGenerateRequest(BaseModel):  # type: ignore[misc]
+    productCode: str
+    filingId: Optional[str] = None
+    productType: Optional[str] = None
+    model: Optional[str] = None
+    feedback: Optional[str] = None
+    previous: Optional[List[Dict[str, Any]]] = None
 
 
 class ScenarioConfig(BaseModel):  # type: ignore[misc]
@@ -5960,6 +5970,40 @@ def api_product_assumptions_ai_generate(payload: ProductAssumptionsAIGenerateReq
         raise HTTPException(status_code=500, detail=f"Failed to generate AssumptionSet via OpenAI: {exc}") from exc
 
     return {"assumptionSet": asn.to_dict()}
+
+
+@app.post("/api/product-scenarios/ai-generate")
+def api_product_scenarios_ai_generate(payload: ProductScenariosAIGenerateRequest) -> Dict[str, Any]:
+    """Generate a draft set of scenarios for a product using filings + OpenAI.
+
+    This stage derives ScenarioConfig-style entries suitable for the
+    onboarding UI. It supports feedback-driven retries by accepting a
+    previous scenario list plus reviewer feedback.
+    """
+
+    code = (payload.productCode or "").strip()
+    filing = (payload.filingId or "").strip() or None
+    product_type = (payload.productType or "").strip() or None
+    model = (payload.model or "").strip() or None
+    feedback = (payload.feedback or "").strip() or None
+    previous = payload.previous or None
+
+    if not code:
+        raise HTTPException(status_code=400, detail="productCode is required")
+
+    try:
+        scenarios = generate_scenarios_for_product(
+            product_code=code,
+            filing_id=filing,
+            product_type=product_type,
+            model=model,
+            feedback=feedback,
+            previous=previous,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Failed to generate scenarios via OpenAI: {exc}") from exc
+
+    return {"scenarios": scenarios}
 
 
 def _build_product_review_payload(product_code: str) -> Dict[str, Any]:
