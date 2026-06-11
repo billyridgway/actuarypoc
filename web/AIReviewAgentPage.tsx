@@ -86,10 +86,13 @@ export const AIReviewAgentPage: React.FC = () => {
   };
 
   const handleFilesSelected = async (files: FileList | File[]) => {
-    const code = normalisedCode;
+    let code = normalisedCode;
+    // If no product code is set yet, generate a temporary one so uploads
+    // have a stable anchor. Later stages (metadata) can propose a
+    // product_code derived from filings.
     if (!code) {
-      setError("Enter or select a product code before uploading documents.");
-      return;
+      code = `TMP-${Date.now().toString(36)}`;
+      setProductCode(code);
     }
 
     const arr = Array.from(files as any);
