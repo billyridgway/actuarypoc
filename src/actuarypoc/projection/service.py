@@ -43,14 +43,9 @@ def _resolve_policy_formula_path(product_code: str | None) -> Path:
     if code.startswith("TERM23") or code.startswith("TERM-23"):
         return _BASE_DSL_DIR / "term23_level_term.yaml"
 
-    # ICC18 P18PRUL Promise UL (and variants where the product_code
-    # includes the ICC form prefix) should use the UL-specific DSL stub
-    # instead of the generic whole-life skeleton. This keeps projections
-    # and illustration outputs product-aware even before detailed UL
-    # tables are wired in.
-    if code.endswith("P18PRUL"):
-        return _BASE_DSL_DIR / "p18prul_ul.yaml"
-
+    # For all other products, fall back to the generic whole-life DSL.
+    # Product-specific behaviour should come from AssumptionSets and DSL
+    # files referenced there, not from hard-coded branches in Python.
     return DEFAULT_POLICY_FORMULA_PATH
 
 
