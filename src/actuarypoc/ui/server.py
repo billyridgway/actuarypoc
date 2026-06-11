@@ -24,6 +24,7 @@ from actuarypoc.projection.engine import ProjectionEngine
 from actuarypoc.projection.mortality import build_term23_surface
 from actuarypoc.projection.premium import PremiumLookupService, build_premium_table, load_premium_table_from_csv, select_face_band
 from actuarypoc.projection.service import store_projection
+from actuarypoc.extract.assumptions_for_product import generate_product_metadata_from_minio
 from actuarypoc.storage.postgres_client import (
     get_last_product_model_review_decision,
     list_product_model_review_decisions,
@@ -379,6 +380,12 @@ class ProductReviewDraftRequest(BaseModel):  # type: ignore[misc]
     product_code: str
     product_type: str
     filing_id: Optional[str] = None
+
+
+class ProductReviewMetadataSuggestionRequest(BaseModel):  # type: ignore[misc]
+    productCodeHint: Optional[str] = None
+    filingIdHint: Optional[str] = None
+    model: Optional[str] = None
 
 
 class ScenarioConfig(BaseModel):  # type: ignore[misc]
@@ -5809,6 +5816,34 @@ def api_product_review_draft(payload: ProductReviewDraftRequest) -> Dict[str, An
             "filingId": review_state.get("filing_id"),
         },
     }
+
+
+@app.post("/api/product-review/metadata/suggest")
+def api_product_review_metadata_suggest(payload: ProductReviewMetadataSuggestionRequest) -> Dict[str, Any]:
+    """Suggest basic Product Review metadata from filings via OpenAI.
+
+    This endpoint uses MinIO-backed filings plus the OpenAI API to infer
+    carrier_name, product_name, product_code, product_type, and a
+    primary_filing_id for pre-filling the onboarding UI.
+    """
+
+    product_code_hint = (payload.productCodeHint or "").strip()
+    filing_id_hint = (payload.filingIdHint or "").strip() or None
+    model = (payload.model or "").strip() or None
+
+    if not product_code_hint:
+        raise HTTPException(status_code=400, detail="productCodeHint is required")
+
+    try:
+        meta = generate_product_metadata_from_minio(
+            product_code=product_code_hint,
+            filing_id=filing_id_hint,
+            model=model,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Failed to derive metadata from filings: {exc}") from exc
+
+    return meta
 
 
 def _build_product_review_payload(product_code: str) -> Dict[str, Any]:

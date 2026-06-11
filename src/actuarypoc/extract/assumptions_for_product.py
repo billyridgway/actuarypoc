@@ -25,6 +25,7 @@ from actuarypoc.config.assumptions import AssumptionSet, upsert_assumption_set
 from actuarypoc.extract.assumptions_extractor import (
     assumption_set_to_json,
     extract_assumption_set_from_text,
+    extract_product_metadata_from_text,
     read_document_text,
 )
 from actuarypoc.storage.minio_client import get_bucket_name, get_minio_client
@@ -194,6 +195,32 @@ def generate_assumption_set_for_product(
         asn = upsert_assumption_set(asn)
 
     return asn
+
+
+def generate_product_metadata_from_minio(
+    *, product_code: str, filing_id: Optional[str] = None, model: Optional[str] = None
+) -> Dict[str, Any]:
+    """Derive basic product metadata from filings in MinIO.
+
+    This uses the same filing-discovery logic as AssumptionSet extraction
+    but returns a lightweight dict suitable for pre-filling the Product
+    Review UI (carrier_name, product_name, product_code, product_type,
+    primary_filing_id).
+    """
+
+    code_norm = (product_code or "").strip().upper()
+    if not code_norm:
+        raise ValueError("product_code is required")
+
+    text = load_filing_text_from_minio(product_code=code_norm, filing_id=filing_id)
+    meta = extract_product_metadata_from_text(text=text, model=model)
+
+    # Ensure the hinted product_code is surfaced when the filing is
+    # ambiguous or uses slightly different labelling.
+    if not meta.get("product_code"):
+        meta["product_code"] = code_norm
+
+    return meta
 
 
 def main(argv: Optional[List[str]] = None) -> int:

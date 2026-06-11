@@ -106,6 +106,78 @@ def extract_assumption_set_from_text(
     return AssumptionSet.from_dict(data)
 
 
+def _build_metadata_system_prompt() -> str:
+    """System prompt for extracting basic product metadata from filings.
+
+    The model must return a single JSON object with a fixed set of fields
+    so that the UI can pre-fill Product Review metadata without any
+    product-specific branches in Python.
+    """
+
+    return (
+        "You are an actuarial assistant helping configure a life insurance "
+        "illustration engine. From product filings and actuarial memos, "
+        "you extract a single structured JSON object describing the "
+        "carrier and product metadata.\n\n"
+        "The JSON you return MUST be a single object with this shape (no "
+        "extra commentary):\n"
+        "{\n"
+        "  \"carrier_name\": string | null,\n"
+        "  \"product_name\": string | null,\n"
+        "  \"product_code\": string | null,\n"
+        "  \"product_type\": string | null,   // e.g. 'Term Life', 'Universal Life'\n"
+        "  \"primary_filing_id\": string | null  // SERFF/filing id when present\n"
+        "}\n\n"
+        "If the filing does not clearly specify a field, return null for "
+        "that field instead of guessing. Use the text and document names "
+        "to recover realistic values when possible."
+    )
+
+
+def extract_product_metadata_from_text(
+    *, text: str, model: str | None = None
+) -> Dict[str, Any]:
+    """Use OpenAI to extract basic product metadata from filing text.
+
+    Returns a plain dict with keys: carrier_name, product_name,
+    product_code, product_type, primary_filing_id.
+    """
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is not set in the environment")
+
+    client = OpenAI(api_key=api_key)
+    model = model or os.getenv("METADATA_EXTRACT_MODEL", os.getenv("ASSUMPTION_EXTRACT_MODEL", "gpt-4o-mini"))
+
+    messages = [
+        {"role": "system", "content": _build_metadata_system_prompt()},
+        {"role": "user", "content": text[:50000]},  # bound prompt size defensively
+    ]
+
+    resp = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=0.1,
+    )
+
+    raw = resp.choices[0].message.content or ""
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"LLM response was not valid JSON: {exc}\nRaw: {raw}") from exc
+
+    # Normalise shape: ensure all expected keys are present.
+    meta: Dict[str, Any] = {}
+    meta["carrier_name"] = data.get("carrier_name") if isinstance(data, dict) else None
+    meta["product_name"] = data.get("product_name") if isinstance(data, dict) else None
+    meta["product_code"] = data.get("product_code") if isinstance(data, dict) else None
+    meta["product_type"] = data.get("product_type") if isinstance(data, dict) else None
+    meta["primary_filing_id"] = data.get("primary_filing_id") if isinstance(data, dict) else None
+
+    return meta
+
+
 def read_document_text(path: str) -> str:
     """Read a local document into plain text for extraction.
 
