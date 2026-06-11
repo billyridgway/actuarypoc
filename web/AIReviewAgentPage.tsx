@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 
 export const AIReviewAgentPage: React.FC = () => {
   const [productCode, setProductCode] = useState<string>("");
@@ -26,8 +26,30 @@ export const AIReviewAgentPage: React.FC = () => {
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
+  const [products, setProducts] = useState<any[] | null>(null);
+  const [uploadedDocs, setUploadedDocs] = useState<any[] | null>(null);
+
   const normalisedCode = (productCode || "").trim();
   const normalisedFiling = (filingId || "").trim();
+
+  useEffect(() => {
+    const loadProducts = async () => {
+      try {
+        const res = await fetch("/api/products");
+        if (!res.ok) {
+          setProducts([]);
+          return;
+        }
+        const data = await res.json();
+        const list = Array.isArray(data?.products) ? data.products : [];
+        setProducts(list);
+      } catch {
+        setProducts([]);
+      }
+    };
+
+    void loadProducts();
+  }, []);
 
   const handleAutofillMetadata = async () => {
     if (!normalisedCode) {
@@ -58,6 +80,47 @@ export const AIReviewAgentPage: React.FC = () => {
       setMetadataApproved(false);
     } catch (e: any) {
       setError(e?.message || "Failed to autofill metadata from filings.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleFilesSelected = async (files: FileList | File[]) => {
+    const code = normalisedCode;
+    if (!code) {
+      setError("Enter or select a product code before uploading documents.");
+      return;
+    }
+
+    const arr = Array.from(files as any);
+    if (arr.length === 0) return;
+
+    setError(null);
+    setLoading(true);
+    try {
+      const allDocs: any[] = [];
+      for (const file of arr) {
+        const form = new FormData();
+        form.append("file", file);
+        form.append("kind", "filing");
+        form.append("description", file.name);
+
+        const res = await fetch(`/api/product-review/${encodeURIComponent(code)}/documents`, {
+          method: "POST",
+          body: form,
+        });
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(text || `HTTP ${res.status}`);
+        }
+        const payload = await res.json();
+        if (Array.isArray(payload?.documents)) {
+          allDocs.splice(0, allDocs.length, ...payload.documents);
+        }
+      }
+      setUploadedDocs(allDocs.length > 0 ? allDocs : null);
+    } catch (e: any) {
+      setError(e?.message || "Failed to upload document(s).");
     } finally {
       setLoading(false);
     }
@@ -417,6 +480,88 @@ export const AIReviewAgentPage: React.FC = () => {
           <p className="error">{error}</p>
         </section>
       )}
+
+      <section className="card">
+        <h2>0. Upload Filings</h2>
+        <p className="muted">
+          Start by choosing a product (when known) and uploading SERFF-style PDFs or other filings. Documents are stored
+          in MinIO and become the source for all downstream AI stages.
+        </p>
+        <div className="form-grid">
+          <div className="form-row">
+            <label htmlFor="agent-product-select">Known products</label>
+            <select
+              id="agent-product-select"
+              value={productCode}
+              onChange={(e) => setProductCode(e.target.value)}
+            >
+              <option value="">(Custom / new product)</option>
+              {products &&
+                products.map((p) => (
+                  <option key={p.productCode} value={p.productCode}>
+                    {p.productCode} – {p.productName}
+                  </option>
+                ))}
+            </select>
+          </div>
+        </div>
+        <div
+          className="upload-dropzone"
+          onDrop={(e) => {
+            e.preventDefault();
+            if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+              void handleFilesSelected(e.dataTransfer.files);
+              e.dataTransfer.clearData();
+            }
+          }}
+          onDragOver={(e) => e.preventDefault()}
+          onClick={() => {
+            const input = document.getElementById("agent-file-input") as HTMLInputElement | null;
+            if (input) input.click();
+          }}
+        >
+          <p>{loading ? "Uploading…" : "Drag & drop filings here, or click to browse."}</p>
+          <input
+            id="agent-file-input"
+            type="file"
+            multiple
+            style={{ display: "none" }}
+            onChange={(e) => {
+              if (e.target.files) {
+                void handleFilesSelected(e.target.files);
+                e.target.value = "";
+              }
+            }}
+          />
+        </div>
+        {uploadedDocs && uploadedDocs.length > 0 && (
+          <>
+            <h3>Uploaded documents</h3>
+            <table className="kv-table">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Kind</th>
+                  <th>Description</th>
+                  <th>Object path</th>
+                  <th>Created</th>
+                </tr>
+              </thead>
+              <tbody>
+                {uploadedDocs.map((d) => (
+                  <tr key={d.id}>
+                    <td>{d.id}</td>
+                    <td>{d.kind || "filing"}</td>
+                    <td>{d.description || "(none)"}</td>
+                    <td>{d.objectPath}</td>
+                    <td>{d.createdAt ? String(d.createdAt) : ""}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </>
+        )}
+      </section>
 
       <section className="card">
         <h2>1. Product & Filing Hints</h2>
