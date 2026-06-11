@@ -7,6 +7,8 @@ export const AIReviewAgentPage: React.FC = () => {
   const [carrierName, setCarrierName] = useState<string>("");
   const [productName, setProductName] = useState<string>("");
   const [productType, setProductType] = useState<string>("");
+  const [metadataApproved, setMetadataApproved] = useState<boolean>(false);
+  const [metadataFeedback, setMetadataFeedback] = useState<string>("");
 
   const [assumptionSetJson, setAssumptionSetJson] = useState<string | null>(null);
   const [pmrSummary, setPmrSummary] = useState<any | null>(null);
@@ -44,8 +46,57 @@ export const AIReviewAgentPage: React.FC = () => {
       if (data.product_code) setProductCode(data.product_code);
       if (data.product_type) setProductType(data.product_type);
       if (data.primary_filing_id) setFilingId(data.primary_filing_id);
+      setMetadataApproved(false);
     } catch (e: any) {
       setError(e?.message || "Failed to autofill metadata from filings.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleRetryMetadataWithFeedback = async () => {
+    if (!normalisedCode) {
+      setError("Enter at least a product code before retrying metadata.");
+      return;
+    }
+    if (!metadataFeedback.trim()) {
+      setError("Provide feedback explaining what needs to change.");
+      return;
+    }
+
+    setError(null);
+    setLoading(true);
+    try {
+      const previous = {
+        carrier_name: carrierName || null,
+        product_name: productName || null,
+        product_code: productCode || null,
+        product_type: productType || null,
+        primary_filing_id: filingId || null,
+      };
+      const res = await fetch("/api/product-review/metadata/suggest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          productCodeHint: normalisedCode,
+          filingIdHint: normalisedFiling || undefined,
+          feedback: metadataFeedback,
+          previous,
+        }),
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      if (data.carrier_name) setCarrierName(data.carrier_name);
+      if (data.product_name) setProductName(data.product_name);
+      if (data.product_code) setProductCode(data.product_code);
+      if (data.product_type) setProductType(data.product_type);
+      if (data.primary_filing_id) setFilingId(data.primary_filing_id);
+      setMetadataApproved(false);
+    } catch (e: any) {
+      setError(e?.message || "Failed to retry metadata with feedback.");
     } finally {
       setLoading(false);
     }
@@ -54,6 +105,10 @@ export const AIReviewAgentPage: React.FC = () => {
   const handleGenerateAssumptions = async () => {
     if (!normalisedCode) {
       setError("Enter a product code before generating assumptions.");
+      return;
+    }
+    if (!metadataApproved) {
+      setError("Approve metadata first, then generate assumptions.");
       return;
     }
     setError(null);
@@ -165,6 +220,22 @@ export const AIReviewAgentPage: React.FC = () => {
             <button type="button" onClick={handleAutofillMetadata} disabled={loading}>
               {loading ? "Working…" : "Autofill metadata from filings"}
             </button>
+            <button
+              type="button"
+              onClick={handleRetryMetadataWithFeedback}
+              disabled={loading}
+              style={{ marginLeft: "0.5rem" }}
+            >
+              {loading ? "Working…" : "Reject & retry with feedback"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setMetadataApproved(true)}
+              disabled={loading}
+              style={{ marginLeft: "0.5rem" }}
+            >
+              Mark metadata as approved
+            </button>
           </div>
           <div className="form-row">
             <label>Carrier name</label>
@@ -177,6 +248,16 @@ export const AIReviewAgentPage: React.FC = () => {
           <div className="form-row">
             <label>Product type</label>
             <input type="text" value={productType} onChange={(e) => setProductType(e.target.value)} />
+          </div>
+          <div className="form-row">
+            <label htmlFor="metadata-feedback">Feedback (for retries)</label>
+            <textarea
+              id="metadata-feedback"
+              value={metadataFeedback}
+              onChange={(e) => setMetadataFeedback(e.target.value)}
+              placeholder="Explain what is wrong or what should change in the metadata."
+              rows={3}
+            />
           </div>
         </div>
       </section>

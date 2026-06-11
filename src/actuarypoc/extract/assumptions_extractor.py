@@ -135,7 +135,7 @@ def _build_metadata_system_prompt() -> str:
 
 
 def extract_product_metadata_from_text(
-    *, text: str, model: str | None = None
+    *, text: str, model: str | None = None, feedback: str | None = None, previous: Dict[str, Any] | None = None
 ) -> Dict[str, Any]:
     """Use OpenAI to extract basic product metadata from filing text.
 
@@ -150,9 +150,30 @@ def extract_product_metadata_from_text(
     client = OpenAI(api_key=api_key)
     model = model or os.getenv("METADATA_EXTRACT_MODEL", os.getenv("ASSUMPTION_EXTRACT_MODEL", "gpt-4o-mini"))
 
+    user_parts = []
+    if previous is not None or feedback:
+        user_parts.append("Previous metadata draft (may be incorrect):")
+        if previous is not None:
+            try:
+                user_parts.append(json.dumps(previous, indent=2, sort_keys=True))
+            except Exception:
+                user_parts.append(str(previous))
+        user_parts.append("")
+        user_parts.append("Reviewer feedback:")
+        user_parts.append(feedback or "(none provided)")
+        user_parts.append("")
+        user_parts.append("Please correct or refine the metadata accordingly based on this feedback.")
+        user_parts.append("")
+        user_parts.append("=== FILING TEXT START ===")
+        user_parts.append(text[:50000])
+        user_parts.append("=== FILING TEXT END ===")
+        user_content = "\n".join(user_parts)
+    else:
+        user_content = text[:50000]
+
     messages = [
         {"role": "system", "content": _build_metadata_system_prompt()},
-        {"role": "user", "content": text[:50000]},  # bound prompt size defensively
+        {"role": "user", "content": user_content},
     ]
 
     resp = client.chat.completions.create(

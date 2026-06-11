@@ -198,7 +198,12 @@ def generate_assumption_set_for_product(
 
 
 def generate_product_metadata_from_minio(
-    *, product_code: str, filing_id: Optional[str] = None, model: Optional[str] = None
+    *,
+    product_code: str,
+    filing_id: Optional[str] = None,
+    model: Optional[str] = None,
+    feedback: Optional[str] = None,
+    previous: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Derive basic product metadata from filings in MinIO.
 
@@ -213,7 +218,7 @@ def generate_product_metadata_from_minio(
         raise ValueError("product_code is required")
 
     text = load_filing_text_from_minio(product_code=code_norm, filing_id=filing_id)
-    meta = extract_product_metadata_from_text(text=text, model=model)
+    meta = extract_product_metadata_from_text(text=text, model=model, feedback=feedback, previous=previous)
 
     # Ensure the hinted product_code is surfaced when the filing is
     # ambiguous or uses slightly different labelling.

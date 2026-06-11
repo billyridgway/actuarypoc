@@ -390,6 +390,8 @@ class ProductReviewMetadataSuggestionRequest(BaseModel):  # type: ignore[misc]
     productCodeHint: Optional[str] = None
     filingIdHint: Optional[str] = None
     model: Optional[str] = None
+    feedback: Optional[str] = None
+    previous: Optional[Dict[str, Any]] = None
 
 
 class ProductModelReviewAISummaryRequest(BaseModel):  # type: ignore[misc]
@@ -5884,6 +5886,8 @@ def api_product_review_metadata_suggest(payload: ProductReviewMetadataSuggestion
     product_code_hint = (payload.productCodeHint or "").strip()
     filing_id_hint = (payload.filingIdHint or "").strip() or None
     model = (payload.model or "").strip() or None
+    feedback = (payload.feedback or "").strip() or None
+    previous = payload.previous or None
 
     if not product_code_hint:
         raise HTTPException(status_code=400, detail="productCodeHint is required")
@@ -5893,6 +5897,8 @@ def api_product_review_metadata_suggest(payload: ProductReviewMetadataSuggestion
             product_code=product_code_hint,
             filing_id=filing_id_hint,
             model=model,
+            feedback=feedback,
+            previous=previous,
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"Failed to derive metadata from filings: {exc}") from exc
