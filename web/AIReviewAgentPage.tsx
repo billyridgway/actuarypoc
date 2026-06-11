@@ -53,7 +53,7 @@ export const AIReviewAgentPage: React.FC = () => {
 
   const handleGenerateAssumptions = async () => {
     if (!normalisedCode) {
-      setError("Enter a product code hint before generating assumptions.");
+      setError("Enter a product code before generating assumptions.");
       return;
     }
     setError(null);
@@ -63,8 +63,8 @@ export const AIReviewAgentPage: React.FC = () => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          productCodeHint: normalisedCode,
-          filingIdHint: normalisedFiling || undefined,
+          productCode: normalisedCode,
+          filingId: normalisedFiling || undefined,
         }),
       });
       if (!res.ok) {

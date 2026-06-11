@@ -398,9 +398,9 @@ class ProductModelReviewAISummaryRequest(BaseModel):  # type: ignore[misc]
 
 
 class ProductAssumptionsAIGenerateRequest(BaseModel):  # type: ignore[misc]
-    productCodeHint: str
-    filingIdHint: Optional[str] = None
-    setIdHint: Optional[str] = None
+    productCode: str
+    filingId: Optional[str] = None
+    setId: Optional[str] = None
     model: Optional[str] = None
 
 
@@ -5910,19 +5910,19 @@ def api_product_assumptions_ai_generate(payload: ProductAssumptionsAIGenerateReq
     AssumptionSet is returned as JSON for inspection.
     """
 
-    code_hint = (payload.productCodeHint or "").strip()
-    filing_hint = (payload.filingIdHint or "").strip() or None
-    set_id_hint = (payload.setIdHint or "").strip() or None
+    code = (payload.productCode or "").strip()
+    filing = (payload.filingId or "").strip() or None
+    set_id = (payload.setId or "").strip() or None
     model = (payload.model or "").strip() or None
 
-    if not code_hint:
-        raise HTTPException(status_code=400, detail="productCodeHint is required")
+    if not code:
+        raise HTTPException(status_code=400, detail="productCode is required")
 
     try:
         asn = generate_assumption_set_for_product(
-            product_code=code_hint,
-            filing_id=filing_hint,
-            set_id=set_id_hint,
+            product_code=code,
+            filing_id=filing,
+            set_id=set_id,
             model=model,
             auto_upsert=True,
         )
