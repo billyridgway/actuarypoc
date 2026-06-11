@@ -3268,6 +3268,83 @@ def _get_illustration_provider(product_code: str) -> Optional[ProductIllustratio
     return _ILLUSTRATION_PROVIDERS.get(code_norm)
 
 
+def _build_projection_inputs_and_table_from_summary(data: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """Derive scenario-like inputs and a compact projection table from a
+    projection summary JSON object.
+
+    This is intentionally product-agnostic and only assumes a
+    term-style projection with ``years``, ``death_benefits``, optional
+    ``cash_values``, and either ``expected_premiums`` or ``premiums``.
+    """
+
+    inputs = data.get("inputs") or {}
+    policy_inputs = inputs.get("policy_inputs") or {}
+    if not isinstance(policy_inputs, dict):
+        policy_inputs = {}
+
+    issue_age = policy_inputs.get("issue_age")
+    gender = policy_inputs.get("gender")
+    smoker_class = policy_inputs.get("smoker_class")
+    risk_class = policy_inputs.get("risk_class")
+    level_period = policy_inputs.get("level_period")
+    face_amount = policy_inputs.get("face_amount")
+    premium_mode_raw = policy_inputs.get("premium_mode") or ""
+    premium_mode = str(premium_mode_raw or "").strip().upper() or "UNKNOWN"
+
+    scenario_inputs = {
+        "age": issue_age if isinstance(issue_age, (int, float)) else "unknown",
+        "sex": str(gender).strip() or "unknown",
+        "smokerClass": str(smoker_class).strip() or "unknown",
+        "termYears": level_period or 0,
+        "faceAmount": face_amount or 0.0,
+        "premiumMode": premium_mode,
+    }
+
+    full_proj = data.get("projection") or {}
+    proj_years = full_proj.get("years") or []
+    proj_db = full_proj.get("death_benefits") or []
+    proj_cash = full_proj.get("cash_values") or []
+    proj_prem = full_proj.get("expected_premiums") or full_proj.get("premiums") or []
+
+    projection_table: List[Dict[str, Any]] = []
+    for idx, y in enumerate(proj_years):
+        if y is None:
+            continue
+        try:
+            year_int = int(y)
+        except (TypeError, ValueError):
+            year_int = y  # keep as-is if it cannot be coerced
+
+        attained_age: Optional[int] = None
+        if isinstance(issue_age, (int, float)) and isinstance(year_int, int):
+            try:
+                attained_age = int(issue_age) + max(0, year_int - 1)
+            except Exception:
+                attained_age = None
+
+        premium = proj_prem[idx] if idx < len(proj_prem) else None
+        dbv = proj_db[idx] if idx < len(proj_db) else None
+
+        status_label: Optional[str] = None
+        if isinstance(level_period, int) and level_period > 0 and isinstance(year_int, int):
+            status_label = "in_force_term" if year_int <= level_period else "post_term"
+
+        row: Dict[str, Any] = {
+            "year": year_int,
+            "attainedAge": attained_age,
+            "premium": premium,
+            "deathBenefit": dbv,
+            "status": status_label,
+        }
+
+        if idx < len(proj_cash):
+            row["cashValue"] = proj_cash[idx]
+
+        projection_table.append(row)
+
+    return scenario_inputs, projection_table
+
+
 def api_product_model_review_generic(product_code: str) -> Dict[str, Any]:
     """Generic Product Model Review builder for ad-hoc products.
 
@@ -3586,24 +3663,17 @@ def api_product_illustration(product_code: str, payload: IllustrationRequest) ->
     """
 
     cfg = _get_product_config(product_code)
-    if cfg is None:
-        raise HTTPException(status_code=404, detail=f"Unknown product_code '{product_code}'.")
-
     status = cfg.get("status") or "unknown"
     code_norm = (cfg.get("productCode") or product_code or "").strip().upper()
 
-    if status != "implemented":
-        raise HTTPException(
-            status_code=501,
-            detail="On-demand illustration is not implemented for this product yet.",
-        )
-
+    # Prefer a product-specific illustration provider when one is
+    # registered (currently P12TRF), but fall back to a generic term
+    # illustration provider for any product that has term-style
+    # projections. Unknown / experimental products are therefore
+    # supported on a best-effort basis instead of returning 501.
     provider = _get_illustration_provider(code_norm)
     if provider is None:
-        raise HTTPException(
-            status_code=501,
-            detail="On-demand illustration provider is not registered for this product yet.",
-        )
+        provider = build_generic_term_illustration
 
     try:
         request_dict = payload.dict()  # type: ignore[call-arg]
@@ -4309,7 +4379,7 @@ def build_p12trf_illustration(product_code: str, request: Dict[str, Any]) -> Dic
     scen_and_rates = _build_p12trf_scenarios_and_rates()
     scenarios = scen_and_rates.get("scenarios") or []
     if not isinstance(scenarios, list) or not scenarios:
-        raise HTTPException(status_code=500, detail="No P12TRF scenarios available for illustration.")
+        raise HTTPException(status_code=500, detail="No scenarios available for illustration.")
 
     # Find a template scenario with matching term and, when possible,
     # matching premium mode.
@@ -4337,7 +4407,7 @@ def build_p12trf_illustration(product_code: str, request: Dict[str, Any]) -> Dic
     if not best or best_score <= 0:
         raise HTTPException(
             status_code=400,
-            detail="No compatible P12TRF scenario template found for requested termYears/premiumMode.",
+            detail="No compatible scenario template found for requested termYears/premiumMode.",
         )
 
     inputs = best.get("inputs") or {}
@@ -4600,6 +4670,323 @@ def build_p12trf_illustration(product_code: str, request: Dict[str, Any]) -> Dic
 
 
 _ILLUSTRATION_PROVIDERS["P12TRF"] = build_p12trf_illustration
+
+
+def build_generic_term_illustration(product_code: str, request: Dict[str, Any]) -> Dict[str, Any]:
+    """Generic on-demand illustration provider for term-style products.
+
+    This reuses existing projections under ``projections/{product}/reviews``
+    as templates and scales face-dependent fields to the requested face
+    amount. It is intentionally conservative: when no compatible template
+    exists for the requested term/premium mode, it returns a 400.
+    """
+
+    code = (product_code or "").strip().upper()
+    code_lower = code.lower()
+
+    # Normalise request inputs with conservative defaults.
+    age_req = request.get("age")
+    try:
+        age_norm = int(age_req) if age_req is not None else None
+    except (TypeError, ValueError):
+        age_norm = None
+
+    term_req = request.get("termYears")
+    try:
+        term_years = int(term_req) if term_req is not None else None
+    except (TypeError, ValueError):
+        term_years = None
+
+    risk_class = (request.get("riskClass") or "").strip() or None
+    smoker_class = (request.get("smokerClass") or "").strip() or None
+    premium_mode_raw = (request.get("premiumMode") or "").strip()
+    premium_mode = premium_mode_raw.upper() or "ANNUAL"
+
+    face_req = request.get("faceAmount")
+    try:
+        face_amount = float(face_req) if face_req is not None else None
+    except (TypeError, ValueError):
+        face_amount = None
+
+    if term_years is None or term_years <= 0:
+        raise HTTPException(status_code=400, detail="termYears must be a positive integer.")
+    if face_amount is None or face_amount <= 0:
+        raise HTTPException(status_code=400, detail="faceAmount must be a positive number.")
+
+    # Discover candidate projection artefacts for this product.
+    prefix = f"projections/{code_lower}/reviews/"
+    object_names = [name for name in _list_projection_objects(prefix=prefix) if name.endswith(".json")]
+    if not object_names:
+        raise HTTPException(status_code=400, detail="No projections available for this product.")
+
+    candidates: List[Dict[str, Any]] = []
+    for obj_name in object_names:
+        try:
+            data = get_projection(obj_name)
+            scen_inputs, proj_table = _build_projection_inputs_and_table_from_summary(data)
+        except Exception:
+            continue
+        if not proj_table:
+            continue
+        candidates.append({"object_name": obj_name, "inputs": scen_inputs, "projectionTable": proj_table})
+
+    if not candidates:
+        raise HTTPException(status_code=400, detail="No usable projection templates available for illustration.")
+
+    def _score_template(entry: Dict[str, Any]) -> int:
+        score = 0
+        inputs = entry.get("inputs") or {}
+        s_term = inputs.get("termYears")
+        s_mode = (inputs.get("premiumMode") or "").upper()
+        if isinstance(s_term, int) and s_term == term_years:
+            score += 10
+        if s_mode == premium_mode:
+            score += 3
+        return score
+
+    best: Optional[Dict[str, Any]] = None
+    best_score = -1
+    for entry in candidates:
+        score = _score_template(entry)
+        if score > best_score:
+            best_score = score
+            best = entry
+
+    if not best or best_score <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="No compatible scenario template found for requested termYears/premiumMode.",
+        )
+
+    inputs = best.get("inputs") or {}
+    projection_table = best.get("projectionTable") or []
+
+    try:
+        template_face = float(inputs.get("faceAmount") or 0.0)
+    except (TypeError, ValueError):
+        template_face = 0.0
+
+    if template_face <= 0.0:
+        template_face = face_amount
+
+    scale = face_amount / template_face if template_face not in (0.0, None) else 1.0
+
+    rows: List[Dict[str, Any]] = []
+    cumulative_premium: Optional[float] = 0.0
+    years: List[Any] = []
+
+    for row in projection_table:
+        if not isinstance(row, dict):
+            continue
+        year = row.get("year")
+        attained_age = row.get("attainedAge")
+        premium = row.get("premium")
+        death_benefit = row.get("deathBenefit")
+        cash_value = row.get("cashValue")
+
+        # Adjust attained age if a numeric age was provided.
+        if age_norm is not None and isinstance(inputs.get("age"), int) and isinstance(attained_age, int):
+            base_issue_age = inputs.get("age")
+            try:
+                delta = age_norm - int(base_issue_age)
+                attained_age = attained_age + delta
+            except Exception:
+                pass
+
+        def _scaled(x: Any) -> Any:
+            try:
+                return float(x) * scale if x is not None else None
+            except Exception:
+                return x
+
+        scaled_premium = _scaled(premium)
+        scaled_death_benefit = _scaled(death_benefit)
+        scaled_cash_value = _scaled(cash_value)
+
+        cumulative_premium_value: Optional[float]
+        if isinstance(scaled_premium, (int, float)):
+            if cumulative_premium is None:
+                cumulative_premium = float(scaled_premium)
+            else:
+                cumulative_premium += float(scaled_premium)
+            cumulative_premium_value = cumulative_premium
+        else:
+            cumulative_premium_value = cumulative_premium
+
+        if isinstance(scaled_cash_value, (int, float)):
+            surrender_value: Optional[float] = float(scaled_cash_value)
+        else:
+            surrender_value = None
+
+        if isinstance(scaled_death_benefit, (int, float)) and isinstance(scaled_cash_value, (int, float)):
+            net_amount_at_risk: Optional[float] = float(scaled_death_benefit) - float(scaled_cash_value)
+        else:
+            net_amount_at_risk = None
+
+        rows.append(
+            {
+                "year": year,
+                "attainedAge": attained_age,
+                "premium": scaled_premium,
+                "cumulativePremium": cumulative_premium_value,
+                "deathBenefit": scaled_death_benefit,
+                "cashValue": scaled_cash_value,
+                "surrenderValue": surrender_value,
+                "netAmountAtRisk": net_amount_at_risk,
+                "status": row.get("status"),
+            }
+        )
+
+        if year is not None:
+            years.append(year)
+
+    # Lightweight decision hooks so a single projection is more actionable
+    # for an actuary or product partner.
+
+    def _first_break_even_year() -> Optional[int]:
+        for r in rows:
+            year_val = r.get("year")
+            cv = r.get("cashValue")
+            cp = r.get("cumulativePremium")
+            if not isinstance(year_val, int):
+                continue
+            if not isinstance(cv, (int, float)) or not isinstance(cp, (int, float)):
+                continue
+            try:
+                if float(cv) >= float(cp):
+                    return year_val
+            except Exception:
+                continue
+        return None
+
+    def _compute_irr_for_horizon(horizon_year: int) -> Optional[float]:
+        if horizon_year <= 0:
+            return None
+
+        by_year: Dict[int, Dict[str, Any]] = {}
+        for r in rows:
+            y_val = r.get("year")
+            if isinstance(y_val, int):
+                by_year[y_val] = r
+
+        if horizon_year not in by_year:
+            return None
+
+        cashflows: List[float] = []
+        has_positive = False
+        has_negative = False
+
+        for y in range(1, horizon_year + 1):
+            row = by_year.get(y) or {}
+            prem = row.get("premium")
+            try:
+                prem_val = float(prem) if isinstance(prem, (int, float)) else 0.0
+            except Exception:
+                prem_val = 0.0
+            cf = -prem_val
+            if cf > 0:
+                has_positive = True
+            if cf < 0:
+                has_negative = True
+            cashflows.append(cf)
+
+        terminal = by_year.get(horizon_year) or {}
+        cv_term = terminal.get("cashValue")
+        try:
+            term_val = float(cv_term) if isinstance(cv_term, (int, float)) else 0.0
+        except Exception:
+            term_val = 0.0
+
+        if cashflows:
+            cashflows[-1] += term_val
+            if term_val > 0:
+                has_positive = True
+
+        if not (has_positive and has_negative):
+            return None
+
+        def _npv(rate: float) -> float:
+            total = 0.0
+            for t, cf in enumerate(cashflows):
+                try:
+                    total += cf / ((1.0 + rate) ** t)
+                except Exception:
+                    total += float("inf") if cf > 0 else float("-inf")
+            return total
+
+        low = -0.999
+        high = 1.0
+        npv_low = _npv(low)
+        npv_high = _npv(high)
+
+        if npv_low == 0.0:
+            return low
+        if npv_high == 0.0:
+            return high
+        if npv_low * npv_high > 0:
+            return None
+
+        mid = 0.0
+        for _ in range(60):
+            mid = (low + high) / 2.0
+            npv_mid = _npv(mid)
+            if abs(npv_mid) < 1e-6:
+                break
+            if npv_low * npv_mid < 0:
+                high = mid
+                npv_high = npv_mid
+            else:
+                low = mid
+                npv_low = npv_mid
+        return mid
+
+    max_year: Optional[int] = None
+    for r in rows:
+        y_val = r.get("year")
+        if isinstance(y_val, int):
+            if max_year is None or y_val > max_year:
+                max_year = y_val
+
+    break_even_year = _first_break_even_year()
+
+    irr_to_10: Optional[float] = None
+    irr_to_20: Optional[float] = None
+    irr_to_final: Optional[float] = None
+    if max_year is not None:
+        if max_year >= 10:
+            irr_to_10 = _compute_irr_for_horizon(10)
+        if max_year >= 20:
+            irr_to_20 = _compute_irr_for_horizon(20)
+        irr_to_final = _compute_irr_for_horizon(max_year)
+
+    product_block = {"code": code, "name": code}
+
+    return {
+        "productCode": product_block.get("code") or code,
+        "productName": product_block.get("name"),
+        "request": {
+            "age": age_norm,
+            "termYears": term_years,
+            "riskClass": risk_class,
+            "smokerClass": smoker_class,
+            "faceAmount": face_amount,
+            "premiumMode": premium_mode,
+        },
+        "templateScenarioId": None,
+        "projection": {
+            "years": years,
+            "rows": rows,
+            "metrics": {
+                "breakEvenYear": break_even_year,
+                "maximumYear": max_year,
+                "irr": {
+                    "toYear10": irr_to_10,
+                    "toYear20": irr_to_20,
+                    "toFinalYear": irr_to_final,
+                },
+            },
+        },
+    }
 
 
 @app.post("/api/product-model-review/p12trf/evidence/seed")

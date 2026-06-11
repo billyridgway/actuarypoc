@@ -863,9 +863,9 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
       <section className="card">
         <h2>Quick Illustration (POC)</h2>
         <p className="muted">
-          Enter a simple P12TRF case to generate a fresh illustration projection using
-          the current product configuration. This endpoint is product-aware and will
-          be extended for additional products over time.
+          Enter a simple case to generate a fresh illustration projection using
+          the current product configuration. This endpoint is product-aware and
+          supports any product with term-style projections.
         </p>
         <form
           className="form-grid"
