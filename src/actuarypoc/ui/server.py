@@ -97,7 +97,15 @@ def _get_product_config(product_code: str) -> Optional[Dict[str, Any]]:
     for entry in _PRODUCT_REGISTRY:
         if (entry.get("productCode") or "").upper() == code_norm:
             return entry
-    return None
+    # For ad‑hoc product codes that aren't yet in the static registry,
+    # synthesise a minimal config so they can still participate in the
+    # Product Review / Model Review flows.
+    return {
+        "productCode": code_norm,
+        "productName": code_norm,
+        "status": "unknown",
+        "reviewEndpoint": f"/api/product-model-review/{code_norm}",
+    }
 
 
 def _product_definition_object_key(product_code: str, filing_id: str) -> str:
@@ -120,8 +128,11 @@ def _load_or_seed_product_definition(product_code: str, filing_id: str) -> Optio
     """Best-effort load of a ProductDefinition artefact for (product, filing).
 
     For v1 this prefers the MinIO-backed artefact. When none exists and the
-    product is P12TRF, a minimal ProductDefinitionV1 is synthesised from the
-    bundled P12TRF ProductDefinition JSON and written to MinIO.
+    product has no stored ProductDefinition, we seed a minimal artefact using
+    whatever base definition is available for that product. For historical
+    reasons the bundled P12TRF ProductDefinition JSON is still used as a
+    fallback *only* when no product-specific definition is available and the
+    product code itself is P12TRF.
     """
 
     product_code = (product_code or "").upper()
@@ -151,11 +162,15 @@ def _load_or_seed_product_definition(product_code: str, filing_id: str) -> Optio
         # where possible.
         pass
 
-    # Seed a minimal artefact for P12TRF only in this v1 slice.
-    if product_code != "P12TRF":
+    # Seed a minimal artefact when we have a base ProductDefinition shape
+    # available for this product. For P12TRF we fall back to the bundled
+    # fixture when no database-backed definition exists.
+    base_def = get_product_definition(product_code)
+    if base_def is None and product_code == "P12TRF":
+        base_def = _load_p12trf_definition()
+    if base_def is None:
+        # No base definition to seed from for this product.
         return None
-
-    base_def = get_product_definition(product_code) or _load_p12trf_definition()
     issue_limits = base_def.get("issue_age_limits") or {}
     underwriting = base_def.get("underwriting_classes") or []
 
@@ -338,12 +353,6 @@ class ProductModelReviewDecisionResponse(BaseModel):  # type: ignore[misc]
     validation_pass_count: Optional[int] = None
     validation_warning_count: Optional[int] = None
     validation_fail_count: Optional[int] = None
-
-    # Scenario validation snapshot at decision time.
-    scenario_validation_status: Optional[str] = None
-    scenario_validation_pass_count: Optional[int] = None
-    scenario_validation_warning_count: Optional[int] = None
-    scenario_validation_fail_count: Optional[int] = None
 
     # Scenario validation snapshot at decision time
     scenario_validation_status: Optional[str] = None
@@ -623,6 +632,8 @@ _P12TRF_SCENARIO_CONFIG: List[Dict[str, Any]] = [
         "id": "S1",
         "name": "Typical mid-age non-smoker",
         # Scenario projection built from configurable fixture inputs
+        # (historical P12TRF alias; generation-scoped keys are under
+        # projections/{product_code}/reviews/{generation_id}/scenarios/).
         "projection_key": "projections/p12trf/scenarios/S1.json",
     },
     {
@@ -796,10 +807,18 @@ def _ui_scenarios_to_internal(product_code: str, scenarios: List[ScenarioConfig]
     """Convert UI ScenarioConfig models into internal policy dicts.
 
     The internal representation mirrors ``examples/p12trf_scenarios.json`` so
-    we can reuse the same scenario projection wiring.
+    we can reuse the same scenario projection wiring for any term-style
+    product. The underlying projection engine is parameterised by
+    ``product_code`` so artefacts are always tagged with the correct
+    product, even though the DSL and actuarial tables are currently shared
+    across term products.
     """
 
     internal: List[Dict[str, Any]] = []
+    # For historical reasons the DSL type for the POC term product is
+    # "p12trf_term". For all other products we default to the lowercased
+    # product code so future DSLs can plug in cleanly without changing
+    # stored policies.
     base_policy_type = "p12trf_term" if product_code.upper() == "P12TRF" else product_code.lower()
     for idx, s in enumerate(scenarios):
         sid_raw = (s.id or f"S{idx + 1}").strip()
@@ -829,7 +848,7 @@ def _ui_scenarios_to_internal(product_code: str, scenarios: List[ScenarioConfig]
     return internal
 
 
-def _generate_p12trf_scenarios_from_config(
+def _generate_term_scenarios_from_config(
     scenarios: List[Dict[str, Any]],
     years: int = 40,
     *,
@@ -837,10 +856,10 @@ def _generate_p12trf_scenarios_from_config(
     product_code: str = "P12TRF",
     generated_at: Optional[str] = None,
 ) -> List[str]:
-    """Project configured P12TRF scenarios and persist them to MinIO.
+    """Project configured term-style scenarios and persist them to MinIO.
 
-    This is a thin, API-friendly wrapper around the CLI helper
-    ``project-p12trf-scenarios-minio``. It expects ``scenarios`` to be a
+    This is a thin, API-friendly wrapper around the internal projection
+    engine used by the original P12TRF POC. It expects ``scenarios`` to be a
     list of objects with ``id``, optional ``name``, and a ``policy`` block
     mirroring ``examples/p12trf_scenarios.json``.
 
@@ -849,7 +868,7 @@ def _generate_p12trf_scenarios_from_config(
     prefix. For backward compatibility with the existing Product Model
     Review Trust Surface, it also writes "latest" alias objects under the
     legacy ``projections/p12trf/scenarios/{scenario_id}.json`` paths when
-    product_code == "P12TRF".
+    ``product_code == "P12TRF"``.
     """
 
     if not scenarios:
@@ -972,11 +991,14 @@ def _generate_p12trf_scenarios_from_config(
                 "term23_actuarial_object": None,
                 "premium_table_object": None,
                 "policy_id": policy.get("policy_number") or sid,
-                "product_id": "P12TRF",
-                "product_code": "P12TRF",
+                # Tag artefacts with the *actual* product, even though the
+                # underlying DSL and actuarial tables are currently shared
+                # across term products.
+                "product_id": product_code_norm,
+                "product_code": product_code_norm,
                 "formula_path": str(dsl_path),
                 "assumption_set_id": None,
-                "run_id": f"p12trf-scenario-{sid}",
+                "run_id": f"{product_code_lower}-scenario-{sid}",
                 "scenario_id": sid,
                 "scenario_label": label,
                 "policy_inputs": policy_inputs,
@@ -2237,11 +2259,15 @@ def api_product_detail(product_code: str) -> Dict[str, Any]:
 
     cfg = _get_product_config(product_code)
     if cfg is None:
-        # Unknown product entirely.
-        raise HTTPException(status_code=404, detail=f"Unknown product_code '{product_code}'.")
-
-    status = cfg.get("status") or "unknown"
-    code_norm = (cfg.get("productCode") or product_code or "").strip().upper()
+        # Unknown product from the static catalog; still surface a generic
+        # product shell so that ad‑hoc product codes can participate in the
+        # Product Review / Model Review flows.
+        code_norm = (product_code or "").strip().upper()
+        status = "unknown"
+        cfg = {"productCode": code_norm, "productName": code_norm, "status": status, "reviewEndpoint": None}
+    else:
+        status = cfg.get("status") or "unknown"
+        code_norm = (cfg.get("productCode") or product_code or "").strip().upper()
     builder = _get_product_model_review_builder(code_norm)
     builder_registered = builder is not None
     review_endpoint: Optional[str]
@@ -2718,7 +2744,7 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
         "missingFeatures": [
             {
                 "id": "gap_riders_not_modeled",
-                "description": "Optional riders (e.g. waiver of premium, child term) from the P12TRF ProductDefinition are not yet modeled in this POC.",
+                "description": "Optional riders (e.g. waiver of premium, child term) from the ProductDefinition are not yet modeled in this POC.",
                 "severity": "medium",
             }
         ],
@@ -2727,8 +2753,8 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
 
     product_block = {
         "code": defn.get("product_code", "P12TRF"),
-        "name": defn.get("marketing_name", "P12TRF Term Life (POC)"),
-        "definitionId": defn.get("product_definition_id", "P12TRF-def-v1-poc"),
+        "name": defn.get("marketing_name", "Term Life (POC)"),
+        "definitionId": defn.get("product_definition_id", "term-def-v1-poc"),
     }
 
     # Optional review metadata: tie the Trust Surface back to the latest
@@ -3242,6 +3268,170 @@ def _get_illustration_provider(product_code: str) -> Optional[ProductIllustratio
     return _ILLUSTRATION_PROVIDERS.get(code_norm)
 
 
+def api_product_model_review_generic(product_code: str) -> Dict[str, Any]:
+    """Generic Product Model Review builder for ad-hoc products.
+
+    This uses the same Product Review draft state as the P12TRF builder but
+    avoids product-specific assumptions beyond the core term-style
+    dimensionality (age, term, classes, face amount, premium mode). Where
+    richer artefacts (ProductDefinition, coverage matrix, evidence) are not
+    available, it returns empty shells instead of failing.
+    """
+
+    code = (product_code or "").strip().upper()
+
+    rec = get_product_review(code)
+    meta = (rec or {}).get("metadata") or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    review_state = meta.get("review") or {}
+    if not isinstance(review_state, dict):
+        review_state = {}
+
+    filing_id = review_state.get("filing_id") if isinstance(review_state, dict) else None
+    if isinstance(filing_id, str):
+        filing_id = filing_id.strip() or None
+
+    current_generation = review_state.get("current_generation") if isinstance(review_state, dict) else None
+    generated_at = review_state.get("generated_at") if isinstance(review_state, dict) else None
+    internal_scenarios = review_state.get("scenarios") if isinstance(review_state, dict) else None
+
+    # Build a minimal scenario evidence block from the stored scenarios and
+    # any generation-scoped projections we can find.
+    scenarios: List[Dict[str, Any]] = []
+    code_lower = code.lower()
+    if isinstance(internal_scenarios, list):
+        for s in internal_scenarios:
+            if not isinstance(s, dict):
+                continue
+            sid = str(s.get("id") or "").strip()
+            if not sid:
+                continue
+            name = str(s.get("name") or sid)
+            policy = s.get("policy") or {}
+
+            inputs = {
+                "age": policy.get("issue_age", "unknown"),
+                "sex": policy.get("gender", "unknown"),
+                "smokerClass": policy.get("smoker_class", "unknown"),
+                "termYears": policy.get("level_period") or 0,
+                "faceAmount": policy.get("face_amount") or 0,
+                "premiumMode": (policy.get("premium_mode") or "UNKNOWN").upper(),
+            }
+
+            projection_key = None
+            if current_generation:
+                projection_key = f"projections/{code_lower}/reviews/{current_generation}/scenarios/{sid}.json"
+
+            scen_entry: Dict[str, Any] = {
+                "id": sid,
+                "name": name,
+                "purpose": s.get("purpose"),
+                "dimensionsExercised": s.get("dimensions_exercised"),
+                "source": s.get("source"),
+                "inputs": inputs,
+                "expectedBehavior": [],
+                "modelBehaviorSummary": "",
+                "status": "unknown",
+                "ruleIds": [],
+                "runId": None,
+                "projectionKey": projection_key,
+                "checks": {},
+                "projection": {},
+                "projectionTable": [],
+            }
+
+            scenarios.append(scen_entry)
+
+    # Best-effort ProductDefinition load; when unavailable we surface a
+    # null definition and empty coverage matrix.
+    product_definition_summary: Optional[Dict[str, Any]] = None
+    product_definition_full: Optional[ProductDefinitionV1] = None
+    coverage_matrix: List[Dict[str, Any]] = []
+    if filing_id:
+        try:
+            pd = _load_or_seed_product_definition(code, filing_id)
+        except Exception:
+            pd = None
+        if pd is not None:
+            product_definition_full = pd
+            product_definition_summary = pd.summary()
+
+    # Documents associated with this product / filing.
+    documents_payload: List[Dict[str, Any]] = []
+    docs: List[Dict[str, Any]] = []
+    try:
+        docs = list_product_documents(code, filing_id=filing_id)
+        for d in docs:
+            documents_payload.append(
+                {
+                    "id": d.get("id"),
+                    "kind": d.get("kind"),
+                    "description": d.get("description"),
+                    "objectPath": d.get("object_path"),
+                    "createdAt": d.get("created_at"),
+                    "filingId": d.get("serff_id") or filing_id,
+                }
+            )
+    except Exception:
+        docs = []
+
+    review_meta: Dict[str, Any] = {
+        "filingId": filing_id,
+        "currentGeneration": current_generation,
+        "generatedAt": generated_at,
+        "documentCount": len(docs),
+        "scenarioCount": len(scenarios),
+        "traceableRuleCount": 0,
+        "unattributedRuleCount": 0,
+    }
+
+    product_block = {
+        "code": code,
+        "name": (meta.get("name") or code) if isinstance(meta, dict) else code,
+        "definitionId": None,
+    }
+
+    # Minimal, generic shells for sections that the UI expects.
+    traceability = {"rules": []}
+    rates = {"cellsChecked": 0, "cellsMatched": 0, "exceptions": [], "spotChecks": []}
+    assumptions = {"filed": [], "aiProposed": []}
+    gaps = {"missingFeatures": [], "ambiguousLanguage": []}
+    review_freshness = {
+        "status": "unknown",
+        "messages": [],
+        "latestDocumentUploadedAt": None,
+        "currentGeneration": current_generation,
+        "generatedAt": generated_at,
+        "productDefinitionGeneratedAt": None,
+        "latestDecisionCreatedAt": None,
+    }
+
+    return {
+        "product": product_block,
+        "scope": {
+            "filings": ([{"id": filing_id, "name": filing_id}] if filing_id else []),
+            "featuresModeled": [],
+            "featuresNotModeled": [],
+            "confidence": "medium",
+            "pocLabel": "generic-term-poc",
+        },
+        "traceability": traceability,
+        "rates": rates,
+        "scenarios": scenarios,
+        "assumptions": assumptions,
+        "gaps": gaps,
+        "reviewMeta": review_meta,
+        "reviewFreshness": review_freshness,
+        "productDefinition": product_definition_summary,
+        "coverageMatrix": coverage_matrix,
+        "productDefinitionBuild": None,
+        "productDefinitionValidation": None,
+        "scenarioValidation": None,
+        "decisionTimeline": None,
+    }
+
+
 @app.get("/api/product-model-review/{product_code}")
 def api_product_model_review_product(product_code: str) -> Dict[str, Any]:
     """Product-aware Product Model Review entrypoint.
@@ -3252,27 +3442,16 @@ def api_product_model_review_product(product_code: str) -> Dict[str, Any]:
     """
 
     cfg = _get_product_config(product_code)
-    if cfg is None:
-        raise HTTPException(status_code=404, detail=f"Unknown product_code '{product_code}'.")
+    code_norm = (cfg.get("productCode") if cfg else product_code or "").strip().upper()
 
-    status = cfg.get("status") or "unknown"
-    code_norm = (cfg.get("productCode") or product_code or "").strip().upper()
-
-    if status != "implemented":
-        # Known but not yet implemented product.
-        raise HTTPException(
-            status_code=501,
-            detail="Product Model Review is not implemented for this product yet.",
-        )
-
+    # Prefer a product-specific builder when one is registered (currently
+    # P12TRF), but fall back to a generic builder so any product with a
+    # Product Review can still surface a model review snapshot.
     builder = _get_product_model_review_builder(code_norm)
-    if builder is None:
-        raise HTTPException(
-            status_code=501,
-            detail="Product Model Review builder is not registered for this product yet.",
-        )
+    if builder is not None:
+        return builder()
 
-    return builder()
+    return api_product_model_review_generic(code_norm)
 
 
 @app.get("/api/products/{product_code}/requirements")
@@ -5298,10 +5477,15 @@ def _build_product_review_payload(product_code: str) -> Dict[str, Any]:
                 }
             )
 
-    if not scenarios_ui and code == "P12TRF":
-        # Prefer ProductDefinition-driven suggestions when available.
+    # When no scenarios have been configured yet, prefer
+    # ProductDefinition-driven suggestions when available. For the
+    # historical P12TRF POC, we fall back to the bundled fixture.
+    if not scenarios_ui:
         pd_scenarios = _default_p12trf_scenarios_from_product_definition(code, filing_id)
-        scenarios_ui = pd_scenarios or _default_p12trf_scenarios_for_ui()
+        if code == "P12TRF":
+            scenarios_ui = pd_scenarios or _default_p12trf_scenarios_for_ui()
+        else:
+            scenarios_ui = pd_scenarios
 
     return {
         "product": {
@@ -5462,11 +5646,6 @@ def api_generate_product_review(product_code: str) -> Dict[str, Any]:
     if not code:
         raise HTTPException(status_code=400, detail="product_code is required")
 
-    # MVP restriction: we only support P12TRF for now, reusing the existing
-    # scenario projection wiring and Product Model Review Trust Surface.
-    if code != "P12TRF":
-        raise HTTPException(status_code=400, detail="Generate Product Review is only implemented for P12TRF in this MVP")
-
     # Generation identifier for this Product Review run. We use an
     # ISO-like UTC timestamp that is easy to read and sort.
     now = datetime.utcnow()
@@ -5501,7 +5680,7 @@ def api_generate_product_review(product_code: str) -> Dict[str, Any]:
     if not internal_scenarios:
         raise HTTPException(status_code=400, detail="No scenarios available for Product Review generation")
 
-    written_keys = _generate_p12trf_scenarios_from_config(
+    written_keys = _generate_term_scenarios_from_config(
         internal_scenarios,
         years=40,
         generation_id=generation_id,
@@ -5531,12 +5710,14 @@ def api_generate_product_review(product_code: str) -> Dict[str, Any]:
         # Log via the shared failure counter but otherwise ignore.
         pass
 
+    # Include the product code in the default redirect so the Trust Surface
+    # can open directly on the relevant product.
     return {
         "ok": True,
         "generation_id": generation_id,
         "generated_at": generated_at,
         "written": written_keys,
-        "redirectUrl": "/web?view=product-model",
+        "redirectUrl": f"/web?view=product-model&productCode={code}",
     }
 
 
