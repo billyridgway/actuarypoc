@@ -24,7 +24,10 @@ from actuarypoc.projection.engine import ProjectionEngine
 from actuarypoc.projection.mortality import build_term23_surface
 from actuarypoc.projection.premium import PremiumLookupService, build_premium_table, load_premium_table_from_csv, select_face_band
 from actuarypoc.projection.service import store_projection
-from actuarypoc.extract.assumptions_for_product import generate_product_metadata_from_minio
+from actuarypoc.extract.assumptions_for_product import (
+    generate_product_metadata_from_minio,
+    generate_assumption_set_for_product,
+)
 from actuarypoc.agents.pmr_ai import summarise_pmr, propose_decision
 from actuarypoc.storage.postgres_client import (
     get_last_product_model_review_decision,
@@ -392,6 +395,13 @@ class ProductReviewMetadataSuggestionRequest(BaseModel):  # type: ignore[misc]
 class ProductModelReviewAISummaryRequest(BaseModel):  # type: ignore[misc]
     modelSummary: Optional[str] = None  # explicit model override for summary stage
     modelDecision: Optional[str] = None  # explicit model override for decision stage
+
+
+class ProductAssumptionsAIGenerateRequest(BaseModel):  # type: ignore[misc]
+    productCodeHint: str
+    filingIdHint: Optional[str] = None
+    setIdHint: Optional[str] = None
+    model: Optional[str] = None
 
 
 class ScenarioConfig(BaseModel):  # type: ignore[misc]
@@ -5888,6 +5898,38 @@ def api_product_review_metadata_suggest(payload: ProductReviewMetadataSuggestion
         raise HTTPException(status_code=500, detail=f"Failed to derive metadata from filings: {exc}") from exc
 
     return meta
+
+
+@app.post("/api/product-assumptions/ai-generate")
+def api_product_assumptions_ai_generate(payload: ProductAssumptionsAIGenerateRequest) -> Dict[str, Any]:
+    """Generate a draft AssumptionSet for a product using filings + OpenAI.
+
+    This stage reads filings from MinIO for the hinted product/filing,
+    calls the LLM-backed extractor to propose an AssumptionSet, and, by
+    default, upserts it into the MinIO-backed registry. The resulting
+    AssumptionSet is returned as JSON for inspection.
+    """
+
+    code_hint = (payload.productCodeHint or "").strip()
+    filing_hint = (payload.filingIdHint or "").strip() or None
+    set_id_hint = (payload.setIdHint or "").strip() or None
+    model = (payload.model or "").strip() or None
+
+    if not code_hint:
+        raise HTTPException(status_code=400, detail="productCodeHint is required")
+
+    try:
+        asn = generate_assumption_set_for_product(
+            product_code=code_hint,
+            filing_id=filing_hint,
+            set_id=set_id_hint,
+            model=model,
+            auto_upsert=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Failed to generate AssumptionSet via OpenAI: {exc}") from exc
+
+    return {"assumptionSet": asn.to_dict()}
 
 
 def _build_product_review_payload(product_code: str) -> Dict[str, Any]:

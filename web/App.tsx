@@ -1,200 +1,21 @@
-import React, { useEffect, useState } from "react";
-import { RunDetailPage } from "./RunDetailPage";
-import type { RunDetail } from "./run-detail.types";
-import { ProductModelReviewPage, type ProductModelReview } from "./ProductModelReviewPage";
-import { CreateProductReviewPage } from "./CreateProductReviewPage";
-import { ProductDetailPage } from "./ProductDetailPage";
+import React from "react";
+import { AIReviewAgentPage } from "./AIReviewAgentPage";
 
 export const App: React.FC = () => {
-  const [runDetail, setRunDetail] = useState<RunDetail | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState<boolean>(false);
-
-  const [productReview, setProductReview] = useState<ProductModelReview | null>(null);
-  const [products, setProducts] = useState<any[] | null>(null);
-
-  // Object key comes from the URL query (?key=...), falling back to a
-  // placeholder. This keeps the frontend dumb: it just calls the backend
-  // endpoint and renders the RunDetail it gets back.
-  const searchParams = new URLSearchParams(window.location.search);
-  const viewParam = searchParams.get("view");
-  const view = viewParam || "home";
-  const objectKey = searchParams.get("key") || "projections/projection-1779276320.json";
-  const productCodeParam = searchParams.get("productCode") || "P12TRF";
-
-  // Minimal client-side error reporter so SPA crashes are visible in
-  // pod logs via /api/client-error.
-  React.useEffect(() => {
-    const reportClientError = (payload: any) => {
-      try {
-        fetch("/api/client-error", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-          keepalive: true,
-        }).catch(() => {
-          // Best-effort only.
-        });
-      } catch {
-        // Ignore reporting failures.
-      }
-    };
-
-    const handleError = (event: ErrorEvent) => {
-      reportClientError({
-        type: "error",
-        message: event.message,
-        source: event.filename,
-        lineno: event.lineno,
-        colno: event.colno,
-        stack: event.error && (event.error as any).stack,
-        userAgent: navigator.userAgent,
-      });
-    };
-
-    const handleRejection = (event: PromiseRejectionEvent) => {
-      reportClientError({
-        type: "unhandledrejection",
-        reason: String(event.reason),
-        stack: (event.reason && (event.reason as any).stack) || null,
-        userAgent: navigator.userAgent,
-      });
-    };
-
-    window.addEventListener("error", handleError);
-    window.addEventListener("unhandledrejection", handleRejection);
-
-    return () => {
-      window.removeEventListener("error", handleError);
-      window.removeEventListener("unhandledrejection", handleRejection);
-    };
-  }, []);
-
-  useEffect(() => {
-    const fetchData = async () => {
-      // The onboarding flow has its own data fetching; keep the shared
-      // bootstrap simple and skip backend calls for that view.
-      if (view === "create-review") {
-        setRunDetail(null);
-        setProductReview(null);
-        setError(null);
-        setLoading(false);
-        return;
-      }
-
-      setLoading(true);
-      try {
-        setError(null);
-
-        // When view is "product-model" or "home" or "product",
-        // load the current Product Model Review snapshot. The product
-        // detail page will then call its own product-level endpoint.
-        if (view === "product-model" || view === "home" || view === "product") {
-          const pmrProductCode = view === "product-model" ? productCodeParam || "P12TRF" : "P12TRF";
-
-          const res = await fetch(`/api/product-model-review/${encodeURIComponent(pmrProductCode)}`);
-          if (!res.ok) {
-            const text = await res.text();
-            if (view === "product-model" && (res.status === 404 || res.status === 501)) {
-              const msg = `Product Model Review is not implemented for ${pmrProductCode} yet.`;
-              throw new Error(msg);
-            }
-            throw new Error(text || `HTTP ${res.status}`);
-          }
-          const data: ProductModelReview = await res.json();
-          setProductReview(data);
-          // When on the Home view, also load the product catalog so the
-          // Products section can show all known products, not just P12TRF.
-          if (view === "home") {
-            try {
-              const prodRes = await fetch("/api/products");
-              if (prodRes.ok) {
-                const prodData = await prodRes.json();
-                setProducts(Array.isArray(prodData?.products) ? prodData.products : []);
-              } else {
-                setProducts([]);
-              }
-            } catch {
-              setProducts([]);
-            }
-          } else {
-            setProducts(null);
-          }
-          setRunDetail(null);
-        } else {
-          const res = await fetch(`/api/run-detail?key=${encodeURIComponent(objectKey)}`);
-          if (!res.ok) {
-            throw new Error(`HTTP ${res.status}`);
-          }
-          const data: RunDetail = await res.json();
-          setRunDetail(data);
-          setProductReview(null);
-        }
-      } catch (e: any) {
-        setError(e.message || "Failed to load data");
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    void fetchData();
-  }, [objectKey, view, productCodeParam]);
-
-  if (loading && !runDetail && !productReview && view !== "create-review" && view !== "home") {
-    return <div className="loading">Loading…</div>;
-  }
-
-  const renderContent = () => {
-    if (error) {
-      return <div className="error">Error loading data: {error}</div>;
-    }
-
-    if (view === "home") {
-      return <HomePage productReview={productReview} products={products} />;
-    }
-
-    if (view === "create-review") {
-      return <CreateProductReviewPage />;
-    }
-
-    if (view === "product-model") {
-      if (!productReview) {
-        return <div>No product model review data available.</div>;
-      }
-      return <ProductModelReviewPage review={productReview} />;
-    }
-
-    if (view === "product") {
-      if (!productReview) {
-        return <div>No product model review data available.</div>;
-      }
-      return <ProductDetailPage productCode={productCodeParam} />;
-    }
-
-    if (!runDetail) {
-      return <div>No run detail available.</div>;
-    }
-
-    return <RunDetailPage runDetail={runDetail} />;
-  };
-
   return (
     <div className="app-shell">
       <header className="top-nav">
-        <div className="top-nav__brand">ActuaryPOC</div>
-        <nav className="top-nav__links">
-          <a href="/web?view=home">Home</a>
-          <a href="/web?view=create-review">Create Review</a>
-          <a href="/web?view=product-model">Trust Surface</a>
-        </nav>
+        <div className="top-nav__brand">ActuaryPOC – AI Agent</div>
       </header>
-      <main className="app-shell__main">{renderContent()}</main>
+      <main className="app-shell__main">
+        <AIReviewAgentPage />
+      </main>
     </div>
   );
 };
 
 
-const HomePage: React.FC<{ productReview: ProductModelReview | null; products: any[] | null }> = ({
+const HomePage: React.FC<{ productReview: any | null; products: any[] | null }> = ({
   productReview,
   products,
 }) => {
