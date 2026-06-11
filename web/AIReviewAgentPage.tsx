@@ -15,6 +15,8 @@ export const AIReviewAgentPage: React.FC = () => {
   const [assumptionsFeedback, setAssumptionsFeedback] = useState<string>("");
   const [pmrSummary, setPmrSummary] = useState<any | null>(null);
   const [pmrDecision, setPmrDecision] = useState<any | null>(null);
+  const [pmrApproved, setPmrApproved] = useState<boolean>(false);
+  const [pmrFeedback, setPmrFeedback] = useState<string>("");
 
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
@@ -210,8 +212,51 @@ export const AIReviewAgentPage: React.FC = () => {
       const data = await res.json();
       setPmrSummary(data.aiSummary || null);
       setPmrDecision(data.aiDecision || null);
+      setPmrApproved(false);
     } catch (e: any) {
       setError(e?.message || "Failed to run PMR AI agents.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleRetryPmrWithFeedback = async () => {
+    const code = normalisedCode.trim();
+    if (!code) {
+      setError("Enter a product code before retrying PMR agents.");
+      return;
+    }
+    if (!pmrFeedback.trim()) {
+      setError("Provide feedback explaining what needs to change in the PMR summary/decision.");
+      return;
+    }
+    if (!pmrSummary && !pmrDecision) {
+      setError("Run the PMR agents once before retrying.");
+      return;
+    }
+
+    setError(null);
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/product-model-review/${encodeURIComponent(code)}/ai-summary`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          feedback: pmrFeedback,
+          previousSummary: pmrSummary || undefined,
+          previousDecision: pmrDecision || undefined,
+        }),
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      setPmrSummary(data.aiSummary || null);
+      setPmrDecision(data.aiDecision || null);
+      setPmrApproved(false);
+    } catch (e: any) {
+      setError(e?.message || "Failed to retry PMR agents with feedback.");
     } finally {
       setLoading(false);
     }
@@ -375,6 +420,22 @@ export const AIReviewAgentPage: React.FC = () => {
             <button type="button" onClick={handleRunPmrAgents} disabled={loading}>
               {loading ? "Working…" : "Run PMR AI summary & suggestion"}
             </button>
+            <button
+              type="button"
+              onClick={handleRetryPmrWithFeedback}
+              disabled={loading}
+              style={{ marginLeft: "0.5rem" }}
+            >
+              {loading ? "Working…" : "Reject & retry with feedback"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setPmrApproved(true)}
+              disabled={loading}
+              style={{ marginLeft: "0.5rem" }}
+            >
+              Mark PMR AI suggestion as approved
+            </button>
           </div>
         </div>
         {pmrSummary && (
@@ -426,6 +487,18 @@ export const AIReviewAgentPage: React.FC = () => {
             )}
           </div>
         )}
+        <div className="form-grid">
+          <div className="form-row">
+            <label htmlFor="pmr-feedback">Feedback (for retries)</label>
+            <textarea
+              id="pmr-feedback"
+              value={pmrFeedback}
+              onChange={(e) => setPmrFeedback(e.target.value)}
+              placeholder="Explain what is wrong or missing in the PMR AI summary/decision."
+              rows={3}
+            />
+          </div>
+        </div>
       </section>
     </div>
   );

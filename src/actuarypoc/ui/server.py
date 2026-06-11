@@ -397,6 +397,9 @@ class ProductReviewMetadataSuggestionRequest(BaseModel):  # type: ignore[misc]
 class ProductModelReviewAISummaryRequest(BaseModel):  # type: ignore[misc]
     modelSummary: Optional[str] = None  # explicit model override for summary stage
     modelDecision: Optional[str] = None  # explicit model override for decision stage
+    feedback: Optional[str] = None
+    previousSummary: Optional[Dict[str, Any]] = None
+    previousDecision: Optional[Dict[str, Any]] = None
 
 
 class ProductAssumptionsAIGenerateRequest(BaseModel):  # type: ignore[misc]
@@ -3579,13 +3582,28 @@ def api_product_model_review_ai_summary(
     # Reuse the product-aware PMR entrypoint to assemble the base payload.
     pmr = api_product_model_review_product(product_code)
 
+    feedback = (payload.feedback or "").strip() or None
+    previous_summary = payload.previousSummary or None
+    previous_decision = payload.previousDecision or None
+
     try:
-        summary = summarise_pmr(pmr, model=payload.modelSummary)
+        summary = summarise_pmr(
+            pmr,
+            model=payload.modelSummary,
+            feedback=feedback,
+            previous=previous_summary,
+        )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"Failed to summarise PMR via OpenAI: {exc}") from exc
 
     try:
-        decision = propose_decision(pmr, summary, model=payload.modelDecision)
+        decision = propose_decision(
+            pmr,
+            summary,
+            model=payload.modelDecision,
+            feedback=feedback,
+            previous=previous_decision,
+        )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"Failed to propose decision via OpenAI: {exc}") from exc
 

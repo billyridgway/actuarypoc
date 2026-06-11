@@ -67,20 +67,46 @@ def _decision_system_prompt() -> str:
     )
 
 
-def summarise_pmr(pmr_payload: Dict[str, Any], model: str | None = None) -> Dict[str, Any]:
-    """Return a structured AI-generated summary for a PMR payload."""
+def summarise_pmr(
+    pmr_payload: Dict[str, Any],
+    model: str | None = None,
+    feedback: str | None = None,
+    previous: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """Return a structured AI-generated summary for a PMR payload.
+
+    When feedback/previous are provided, they are included in the prompt
+    so the model can correct or refine an earlier draft summary.
+    """
 
     client = _get_openai_client()
     model = model or os.getenv("PMR_SUMMARY_MODEL", os.getenv("ASSUMPTION_EXTRACT_MODEL", "gpt-4o-mini"))
 
     try:
-        text = json.dumps(pmr_payload, sort_keys=True)
+        pmr_text = json.dumps(pmr_payload, sort_keys=True)
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(f"Failed to serialise PMR payload: {exc}") from exc
 
+    user_lines = []
+    if previous is not None or feedback:
+        user_lines.append("Previous PMR summary (may be incorrect):")
+        try:
+            user_lines.append(json.dumps(previous or {}, indent=2, sort_keys=True))
+        except Exception:
+            user_lines.append(str(previous))
+        user_lines.append("")
+        user_lines.append("Reviewer feedback:")
+        user_lines.append(feedback or "(none provided)")
+        user_lines.append("")
+        user_lines.append("Please correct or refine the summary accordingly based on this feedback.")
+        user_lines.append("")
+    user_lines.append("=== PMR JSON START ===")
+    user_lines.append(pmr_text[:100000])
+    user_lines.append("=== PMR JSON END ===")
+
     messages = [
         {"role": "system", "content": _pmr_system_prompt()},
-        {"role": "user", "content": text[:100000]},  # bound prompt size defensively
+        {"role": "user", "content": "\n".join(user_lines)},
     ]
 
     resp = client.chat.completions.create(
@@ -118,20 +144,44 @@ def propose_decision(
     pmr_payload: Dict[str, Any],
     pmr_summary: Dict[str, Any],
     model: str | None = None,
+    feedback: str | None = None,
+    previous: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
-    """Return a draft decision suggestion based on PMR + its summary."""
+    """Return a draft decision suggestion based on PMR + its summary.
+
+    When feedback/previous are provided, they are included in the prompt
+    so the model can correct or refine an earlier draft decision.
+    """
 
     client = _get_openai_client()
     model = model or os.getenv("PMR_DECISION_MODEL", os.getenv("ASSUMPTION_EXTRACT_MODEL", "gpt-4o-mini"))
 
     try:
-        text = json.dumps({"pmr": pmr_payload, "summary": pmr_summary}, sort_keys=True)
+        base = {"pmr": pmr_payload, "summary": pmr_summary}
+        base_text = json.dumps(base, sort_keys=True)
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(f"Failed to serialise PMR+summary payload: {exc}") from exc
 
+    user_lines = []
+    if previous is not None or feedback:
+        user_lines.append("Previous decision suggestion (may be incorrect):")
+        try:
+            user_lines.append(json.dumps(previous or {}, indent=2, sort_keys=True))
+        except Exception:
+            user_lines.append(str(previous))
+        user_lines.append("")
+        user_lines.append("Reviewer feedback:")
+        user_lines.append(feedback or "(none provided)")
+        user_lines.append("")
+        user_lines.append("Please correct or refine the decision suggestion accordingly.")
+        user_lines.append("")
+    user_lines.append("=== PMR+SUMMARY JSON START ===")
+    user_lines.append(base_text[:100000])
+    user_lines.append("=== PMR+SUMMARY JSON END ===")
+
     messages = [
         {"role": "system", "content": _decision_system_prompt()},
-        {"role": "user", "content": text[:100000]},
+        {"role": "user", "content": "\n".join(user_lines)},
     ]
 
     resp = client.chat.completions.create(
