@@ -25,6 +25,7 @@ from actuarypoc.projection.mortality import build_term23_surface
 from actuarypoc.projection.premium import PremiumLookupService, build_premium_table, load_premium_table_from_csv, select_face_band
 from actuarypoc.projection.service import store_projection
 from actuarypoc.extract.assumptions_for_product import generate_product_metadata_from_minio
+from actuarypoc.agents.pmr_ai import summarise_pmr, propose_decision
 from actuarypoc.storage.postgres_client import (
     get_last_product_model_review_decision,
     list_product_model_review_decisions,
@@ -386,6 +387,11 @@ class ProductReviewMetadataSuggestionRequest(BaseModel):  # type: ignore[misc]
     productCodeHint: Optional[str] = None
     filingIdHint: Optional[str] = None
     model: Optional[str] = None
+
+
+class ProductModelReviewAISummaryRequest(BaseModel):  # type: ignore[misc]
+    modelSummary: Optional[str] = None  # explicit model override for summary stage
+    modelDecision: Optional[str] = None  # explicit model override for decision stage
 
 
 class ScenarioConfig(BaseModel):  # type: ignore[misc]
@@ -3536,6 +3542,44 @@ def api_product_model_review_product(product_code: str) -> Dict[str, Any]:
         return builder()
 
     return api_product_model_review_generic(code_norm)
+
+
+@app.post("/api/product-model-review/{product_code}/ai-summary")
+def api_product_model_review_ai_summary(
+    product_code: str,
+    payload: ProductModelReviewAISummaryRequest,
+) -> Dict[str, Any]:
+    """Run multi-level AI agents on top of the PMR for this product.
+
+    This endpoint:
+    - builds the current PMR payload for the product, and
+    - runs two AI stages over it:
+      1) structured PMR summary
+      2) draft decision suggestion.
+
+    It returns a JSON object containing the original PMR payload plus the
+    AI-derived summary and suggestion. No database writes are performed;
+    callers remain responsible for persisting any accepted decision.
+    """
+
+    # Reuse the product-aware PMR entrypoint to assemble the base payload.
+    pmr = api_product_model_review_product(product_code)
+
+    try:
+        summary = summarise_pmr(pmr, model=payload.modelSummary)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Failed to summarise PMR via OpenAI: {exc}") from exc
+
+    try:
+        decision = propose_decision(pmr, summary, model=payload.modelDecision)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Failed to propose decision via OpenAI: {exc}") from exc
+
+    return {
+        "pmr": pmr,
+        "aiSummary": summary,
+        "aiDecision": decision,
+    }
 
 
 @app.get("/api/products/{product_code}/requirements")
