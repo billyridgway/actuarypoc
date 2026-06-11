@@ -404,6 +404,8 @@ class ProductAssumptionsAIGenerateRequest(BaseModel):  # type: ignore[misc]
     filingId: Optional[str] = None
     setId: Optional[str] = None
     model: Optional[str] = None
+    feedback: Optional[str] = None
+    previous: Optional[Dict[str, Any]] = None
 
 
 class ScenarioConfig(BaseModel):  # type: ignore[misc]
@@ -5920,6 +5922,8 @@ def api_product_assumptions_ai_generate(payload: ProductAssumptionsAIGenerateReq
     filing = (payload.filingId or "").strip() or None
     set_id = (payload.setId or "").strip() or None
     model = (payload.model or "").strip() or None
+    feedback = (payload.feedback or "").strip() or None
+    previous = payload.previous or None
 
     if not code:
         raise HTTPException(status_code=400, detail="productCode is required")
@@ -5931,6 +5935,8 @@ def api_product_assumptions_ai_generate(payload: ProductAssumptionsAIGenerateReq
             set_id=set_id,
             model=model,
             auto_upsert=True,
+            feedback=feedback,
+            previous=previous,
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"Failed to generate AssumptionSet via OpenAI: {exc}") from exc

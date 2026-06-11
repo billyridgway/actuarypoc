@@ -57,6 +57,8 @@ def extract_assumption_set_from_text(
     set_id: str,
     description_hint: str | None = None,
     model: str | None = None,
+    feedback: str | None = None,
+    previous: Dict[str, Any] | None = None,
 ) -> AssumptionSet:
     """Use OpenAI to extract a single AssumptionSet from raw filing text.
 
@@ -72,19 +74,29 @@ def extract_assumption_set_from_text(
     client = OpenAI(api_key=api_key)
     model = model or os.getenv("ASSUMPTION_EXTRACT_MODEL", "gpt-4o-mini")
 
-    user_prompt = [
+    user_lines = [
         f"Target product_code: {product_code}",
         f"Desired assumption set id: {set_id}",
     ]
     if description_hint:
-        user_prompt.append(f"Description hint: {description_hint}")
-    user_prompt.append("\n=== FILING TEXT START ===\n")
-    user_prompt.append(text.strip())
-    user_prompt.append("\n=== FILING TEXT END ===\n")
+        user_lines.append(f"Description hint: {description_hint}")
+    if previous is not None or feedback:
+        user_lines.append("")
+        user_lines.append("Previous AssumptionSet draft (may be incorrect):")
+        try:
+            user_lines.append(json.dumps(previous or {}, indent=2, sort_keys=True))
+        except Exception:
+            user_lines.append(str(previous))
+        user_lines.append("")
+        user_lines.append("Reviewer feedback:")
+        user_lines.append(feedback or "(none provided)")
+    user_lines.append("\n=== FILING TEXT START ===\n")
+    user_lines.append(text.strip())
+    user_lines.append("\n=== FILING TEXT END ===\n")
 
     messages = [
         {"role": "system", "content": _build_system_prompt()},
-        {"role": "user", "content": "\n".join(user_prompt)},
+        {"role": "user", "content": "\n".join(user_lines)},
     ]
 
     resp = client.chat.completions.create(

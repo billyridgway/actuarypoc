@@ -159,6 +159,8 @@ def generate_assumption_set_for_product(
     description_hint: Optional[str] = None,
     model: Optional[str] = None,
     auto_upsert: bool = True,
+    feedback: Optional[str] = None,
+    previous: Optional[Dict[str, Any]] = None,
 ) -> AssumptionSet:
     """Derive a draft AssumptionSet for a product from its filings.
 
@@ -189,6 +191,8 @@ def generate_assumption_set_for_product(
         set_id=set_id,
         description_hint=description_hint,
         model=model,
+        feedback=feedback,
+        previous=previous,
     )
 
     if auto_upsert:

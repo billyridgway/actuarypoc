@@ -11,6 +11,8 @@ export const AIReviewAgentPage: React.FC = () => {
   const [metadataFeedback, setMetadataFeedback] = useState<string>("");
 
   const [assumptionSetJson, setAssumptionSetJson] = useState<string | null>(null);
+  const [assumptionsApproved, setAssumptionsApproved] = useState<boolean>(false);
+  const [assumptionsFeedback, setAssumptionsFeedback] = useState<string>("");
   const [pmrSummary, setPmrSummary] = useState<any | null>(null);
   const [pmrDecision, setPmrDecision] = useState<any | null>(null);
 
@@ -128,8 +130,56 @@ export const AIReviewAgentPage: React.FC = () => {
       }
       const data = await res.json();
       setAssumptionSetJson(JSON.stringify(data.assumptionSet, null, 2));
+      setAssumptionsApproved(false);
     } catch (e: any) {
       setError(e?.message || "Failed to generate assumptions from filings.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleRetryAssumptionsWithFeedback = async () => {
+    if (!normalisedCode) {
+      setError("Enter a product code before retrying assumptions.");
+      return;
+    }
+    if (!assumptionsFeedback.trim()) {
+      setError("Provide feedback explaining what needs to change in the assumptions.");
+      return;
+    }
+    if (!assumptionSetJson) {
+      setError("Generate an AssumptionSet once before retrying.");
+      return;
+    }
+
+    setError(null);
+    setLoading(true);
+    try {
+      let previous: any = null;
+      try {
+        previous = JSON.parse(assumptionSetJson);
+      } catch {
+        previous = null;
+      }
+      const res = await fetch("/api/product-assumptions/ai-generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          productCode: normalisedCode,
+          filingId: normalisedFiling || undefined,
+          feedback: assumptionsFeedback,
+          previous,
+        }),
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      setAssumptionSetJson(JSON.stringify(data.assumptionSet, null, 2));
+      setAssumptionsApproved(false);
+    } catch (e: any) {
+      setError(e?.message || "Failed to retry assumptions with feedback.");
     } finally {
       setLoading(false);
     }
@@ -139,6 +189,10 @@ export const AIReviewAgentPage: React.FC = () => {
     const code = normalisedCode.trim();
     if (!code) {
       setError("Enter a product code before running PMR agents.");
+      return;
+    }
+    if (!assumptionsApproved) {
+      setError("Approve assumptions first, then run PMR agents.");
       return;
     }
     setError(null);
@@ -273,6 +327,22 @@ export const AIReviewAgentPage: React.FC = () => {
             <button type="button" onClick={handleGenerateAssumptions} disabled={loading}>
               {loading ? "Working…" : "Generate AssumptionSet from filings"}
             </button>
+            <button
+              type="button"
+              onClick={handleRetryAssumptionsWithFeedback}
+              disabled={loading}
+              style={{ marginLeft: "0.5rem" }}
+            >
+              {loading ? "Working…" : "Reject & retry with feedback"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setAssumptionsApproved(true)}
+              disabled={loading}
+              style={{ marginLeft: "0.5rem" }}
+            >
+              Mark assumptions as approved
+            </button>
           </div>
         </div>
         {assumptionSetJson && (
@@ -280,6 +350,18 @@ export const AIReviewAgentPage: React.FC = () => {
             {assumptionSetJson}
           </pre>
         )}
+        <div className="form-grid">
+          <div className="form-row">
+            <label htmlFor="assumptions-feedback">Feedback (for retries)</label>
+            <textarea
+              id="assumptions-feedback"
+              value={assumptionsFeedback}
+              onChange={(e) => setAssumptionsFeedback(e.target.value)}
+              placeholder="Explain what is wrong or missing in the AssumptionSet."
+              rows={3}
+            />
+          </div>
+        </div>
       </section>
 
       <section className="card">
