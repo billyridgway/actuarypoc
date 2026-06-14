@@ -28,6 +28,7 @@ export const AIReviewAgentPage: React.FC = () => {
 
   const [products, setProducts] = useState<any[] | null>(null);
   const [uploadedDocs, setUploadedDocs] = useState<any[] | null>(null);
+  const [initialProductCode, setInitialProductCode] = useState<string>("");
 
   const normalisedCode = (productCode || "").trim();
   const normalisedFiling = (filingId || "").trim();
@@ -93,6 +94,9 @@ export const AIReviewAgentPage: React.FC = () => {
     if (!code) {
       code = `TMP-${Date.now().toString(36)}`;
       setProductCode(code);
+      if (!initialProductCode) setInitialProductCode(code);
+    } else if (!initialProductCode) {
+      setInitialProductCode(code);
     }
 
     const arr = Array.from(files as any);
@@ -617,11 +621,40 @@ export const AIReviewAgentPage: React.FC = () => {
             </button>
             <button
               type="button"
-              onClick={() => setMetadataApproved(true)}
+              onClick={async () => {
+                const oldCode = (initialProductCode || "").trim() || (productCode || "").trim();
+                const newCode = (productCode || "").trim();
+                if (!oldCode || !newCode) {
+                  setError("Cannot finalise metadata without a product code.");
+                  return;
+                }
+                setError(null);
+                setLoading(true);
+                try {
+                  const res = await fetch("/api/product-review/finalize-product-code", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      oldProductCode: oldCode,
+                      newProductCode: newCode,
+                    }),
+                  });
+                  if (!res.ok) {
+                    const text = await res.text();
+                    throw new Error(text || `HTTP ${res.status}`);
+                  }
+                  setInitialProductCode(newCode);
+                  setMetadataApproved(true);
+                } catch (e: any) {
+                  setError(e?.message || "Failed to finalise metadata and migrate documents.");
+                } finally {
+                  setLoading(false);
+                }
+              }}
               disabled={loading}
               style={{ marginLeft: "0.5rem" }}
             >
-              Mark metadata as approved
+              Mark metadata as approved (finalise code & docs)
             </button>
           </div>
           <div className="form-row">

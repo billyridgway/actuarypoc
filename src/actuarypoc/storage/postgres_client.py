@@ -546,6 +546,36 @@ def record_document_upload(
         return None
 
 
+def relabel_documents_product(old_product_id: str, new_product_id: str) -> int:
+    """Update documents rows from one product_id to another.
+
+    Returns the number of rows updated. When Postgres is unavailable this
+    returns 0 instead of raising.
+    """
+
+    if not old_product_id or not new_product_id or old_product_id == new_product_id:
+        return 0
+
+    ensure_schema()
+    try:
+        with _conn() as conn:
+            if conn is None:
+                return 0
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE documents
+                       SET product_id = %s
+                     WHERE product_id = %s
+                    """,
+                    (new_product_id, old_product_id),
+                )
+                return cur.rowcount or 0
+    except Exception as exc:  # noqa: BLE001
+        _note_failure(exc)
+        return 0
+
+
 def list_product_documents(product_id: str, filing_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """Return documents for a product + optional filing, newest first.
 

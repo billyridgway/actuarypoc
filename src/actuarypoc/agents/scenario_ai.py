@@ -106,8 +106,26 @@ def propose_scenarios_from_text(
     )
 
     raw = resp.choices[0].message.content or ""
+
+    # The model sometimes wraps the JSON array in Markdown-style code
+    # fences (```json ... ```). Strip those fences before attempting to
+    # parse so that callers see a clean error only when the inner content
+    # is truly invalid JSON.
+    def _strip_code_fences(text: str) -> str:
+        s = text.strip()
+        if s.startswith("```"):
+            # Drop the first line (``` or ```json)
+            parts = s.split("\n", 1)
+            s = parts[1] if len(parts) == 2 else ""
+        s = s.strip()
+        if s.endswith("```"):
+            s = s.rsplit("```", 1)[0]
+        return s.strip()
+
+    clean = _strip_code_fences(raw)
+
     try:
-        data = json.loads(raw)
+        data = json.loads(clean)
     except json.JSONDecodeError as exc:  # noqa: BLE001
         raise RuntimeError(f"LLM scenario proposal was not valid JSON: {exc}\nRaw: {raw}") from exc
 

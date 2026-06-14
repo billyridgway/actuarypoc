@@ -37,6 +37,7 @@ from actuarypoc.storage.postgres_client import (
     get_product_review,
     list_filing_rule_evidence,
     list_product_documents,
+    relabel_documents_product,
     record_document_upload,
     record_filing_rule_evidence,
     record_product_model_review_decision,
@@ -401,6 +402,11 @@ class ProductModelReviewAISummaryRequest(BaseModel):  # type: ignore[misc]
     feedback: Optional[str] = None
     previousSummary: Optional[Dict[str, Any]] = None
     previousDecision: Optional[Dict[str, Any]] = None
+
+
+class ProductCodeFinalizeRequest(BaseModel):  # type: ignore[misc]
+    oldProductCode: str
+    newProductCode: str
 
 
 class ProductAssumptionsAIGenerateRequest(BaseModel):  # type: ignore[misc]
@@ -3622,6 +3628,77 @@ def api_product_model_review_ai_summary(
         "aiSummary": summary,
         "aiDecision": decision,
     }
+
+
+@app.post("/api/product-review/finalize-product-code")
+def api_product_review_finalize_product_code(payload: ProductCodeFinalizeRequest) -> Dict[str, Any]:
+    """Migrate documents from a temporary product code to a final one.
+
+    This endpoint supports flows where filings were uploaded under a
+    temporary product identifier (e.g. TMP-*) and the metadata stage then
+    identifies the canonical product code from the filings.
+
+    It:
+    - moves MinIO objects under docs/{old}/... to docs/{new}/..., and
+    - updates the documents.product_id column from old → new.
+    """
+
+    old = (payload.oldProductCode or "").strip().upper()
+    new = (payload.newProductCode or "").strip().upper()
+
+    if not old or not new:
+        raise HTTPException(status_code=400, detail="oldProductCode and newProductCode are required")
+
+    if old == new:
+        # Nothing to do.
+        return {"movedObjects": 0, "updatedRows": 0, "skipped": True}
+
+    client = get_minio_client()
+    ensure_bucket(client)
+    bucket = get_bucket_name()
+
+    old_prefix = f"docs/{old}/"
+    new_prefix = f"docs/{new}/"
+
+    moved = 0
+    try:
+        # Move all objects under docs/{old}/ to docs/{new}/.
+        for obj in client.list_objects(bucket, prefix=old_prefix, recursive=True):
+            old_name = obj.object_name
+            if not old_name.startswith(old_prefix):
+                continue
+            suffix = old_name[len(old_prefix) :]
+            new_name = f"{new_prefix}{suffix}"
+
+            # Copy contents then delete the old object.
+            try:
+                response = client.get_object(bucket, old_name)
+                body = response.read()
+            finally:
+                try:
+                    response.close()
+                    response.release_conn()
+                except Exception:
+                    pass
+
+            import io as _io
+
+            client.put_object(
+                bucket,
+                new_name,
+                _io.BytesIO(body),
+                length=len(body),
+                content_type=obj.content_type or "application/octet-stream",
+            )
+            client.remove_object(bucket, old_name)
+            moved += 1
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Failed to migrate MinIO objects from {old} to {new}: {exc}") from exc
+
+    # Relabel documents rows in Postgres.
+    updated_rows = relabel_documents_product(old, new)
+
+    return {"movedObjects": moved, "updatedRows": updated_rows, "skipped": False}
 
 
 @app.get("/api/products/{product_code}/requirements")
