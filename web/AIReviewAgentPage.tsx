@@ -571,37 +571,7 @@ export const AIReviewAgentPage: React.FC = () => {
       </section>
 
       <section className="card">
-        <h2>1. Product & Filing Hints</h2>
-        <p className="muted">
-          Start with a rough product code and optional filing id. The AI agents will use these to find relevant filings
-          in MinIO and derive metadata and assumptions.
-        </p>
-        <div className="form-grid">
-          <div className="form-row">
-            <label htmlFor="agent-product-code">Product code hint</label>
-            <input
-              id="agent-product-code"
-              type="text"
-              value={productCode}
-              onChange={(e) => setProductCode(e.target.value)}
-              placeholder="e.g. ICC18 P18PRUL"
-            />
-          </div>
-          <div className="form-row">
-            <label htmlFor="agent-filing-id">Filing ID hint (optional)</label>
-            <input
-              id="agent-filing-id"
-              type="text"
-              value={filingId}
-              onChange={(e) => setFilingId(e.target.value)}
-              placeholder="e.g. PALD-131619832"
-            />
-          </div>
-        </div>
-      </section>
-
-      <section className="card">
-        <h2>2. Metadata (Stage 1)</h2>
+        <h2>1. Metadata (Stage 1)</h2>
         <p className="muted">
           Let the AI agent infer carrier name, product name, product code, product type, and primary filing id directly
           from the filings.
