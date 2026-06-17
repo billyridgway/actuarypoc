@@ -443,6 +443,15 @@ class ScenarioConfig(BaseModel):  # type: ignore[misc]
     levelPeriod: Optional[int] = None
     premiumMode: Optional[str] = None
     modalPremium: Optional[float] = None
+     # Some products are funded via a single deposit rather than recurring
+     # modal premiums. For those cases the UI can treat modalPremium as the
+     # recurring amount (when present) and initialDeposit as the up-front
+     # funding amount.
+     initialDeposit: Optional[float] = None
+     # Derived banding based on DSL/meta.face_bands; populated server-side
+     # for term-style products so actuaries can see which face band each
+     # scenario falls into.
+     faceBand: Optional[str] = None
     purpose: Optional[str] = None
     dimensionsExercised: Optional[List[str]] = None
     source: Optional[str] = None
@@ -888,6 +897,10 @@ def _ui_scenarios_to_internal(product_code: str, scenarios: List[ScenarioConfig]
             "modal_premium": s.modalPremium,
             "premium_mode": s.premiumMode,
         }
+        if s.initialDeposit is not None:
+            policy["initial_deposit"] = s.initialDeposit
+        if s.faceBand is not None:
+            policy["face_band"] = s.faceBand
         entry: Dict[str, Any] = {"id": sid, "name": name, "policy": policy}
         if s.purpose is not None:
             entry["purpose"] = s.purpose
@@ -6135,6 +6148,8 @@ def _build_product_review_payload(product_code: str) -> Dict[str, Any]:
                     "levelPeriod": policy.get("level_period"),
                     "premiumMode": policy.get("premium_mode"),
                     "modalPremium": policy.get("modal_premium"),
+                    "initialDeposit": policy.get("initial_deposit"),
+                    "faceBand": policy.get("face_band"),
                     "purpose": s.get("purpose"),
                     "dimensionsExercised": s.get("dimensions_exercised"),
                     "source": s.get("source"),
@@ -6235,6 +6250,51 @@ def _build_product_review_payload(product_code: str) -> Dict[str, Any]:
                                 "expectedPath": str(path_value),
                             }
                         )
+
+            # Compute face bands for scenarios from DSL meta.face_bands
+            # where available. This gives actuaries quick feedback on
+            # which band a given scenario's face amount falls into without
+            # having to cross-reference tables.
+            if isinstance(meta_section, dict):
+                fb_cfg = meta_section.get("face_bands")
+
+                def _band_for_face(face: Any) -> Optional[Any]:
+                    if not isinstance(fb_cfg, list):
+                        return None
+                    try:
+                        fa_val = float(face)
+                    except (TypeError, ValueError):
+                        return None
+                    for band_def in fb_cfg:
+                        if not isinstance(band_def, dict):
+                            continue
+                        band_id = band_def.get("band")
+                        try:
+                            mn = float(band_def.get("min")) if band_def.get("min") is not None else None
+                        except (TypeError, ValueError):
+                            mn = None
+                        try:
+                            mx = float(band_def.get("max")) if band_def.get("max") is not None else None
+                        except (TypeError, ValueError):
+                            mx = None
+                        if mn is not None and fa_val < mn:
+                            continue
+                        if mx is not None and fa_val > mx:
+                            continue
+                        return band_id
+                    return None
+
+                if isinstance(scenarios_ui, list) and fb_cfg:
+                    for row in scenarios_ui:
+                        try:
+                            fa = row.get("faceAmount") if isinstance(row, dict) else None
+                        except Exception:
+                            fa = None
+                        if fa is None:
+                            continue
+                        band_id = _band_for_face(fa)
+                        if band_id is not None:
+                            row.setdefault("faceBand", band_id)
     except Exception:
         # DSL inspection is advisory only; ignore any failures here.
         pass

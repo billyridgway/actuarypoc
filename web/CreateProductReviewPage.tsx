@@ -82,6 +82,12 @@ export interface ScenarioRow {
   levelPeriod?: number | null;
   premiumMode?: string | null;
   modalPremium?: number | null;
+   // For products funded via a single up-front payment, treat this as the
+   // initial deposit amount; for recurring-premium products, modalPremium
+   // remains the primary knob.
+   initialDeposit?: number | null;
+   // Derived face band (when available) from DSL meta.face_bands.
+   faceBand?: string | number | null;
   purpose?: string | null;
   dimensionsExercised?: string[] | null;
   source?: string | null;
@@ -699,9 +705,23 @@ export const CreateProductReviewPage: React.FC = () => {
       <section className="card">
         <h2>3. Scenario Configuration</h2>
         <p className="muted">
-          Configure a small set of P12TRF scenarios via form inputs. These are turned into policy test-cases for the
-          Trust Surface, not a full pricing grid.
+          Configure a small set of scenarios that exercise the important dimensions of this product. For term-style
+          products, that usually means age, duration/level period, risk/smoker class, face amount, and premium mode. For
+          other product types, it is fine to leave term/premium-mode fields blank and focus on face amount and initial
+          premium or deposit.
         </p>
+        {scenarios.some((s) => (s.faceAmount == null || s.faceAmount === 0) || s.modalPremium == null) && (
+          <p className="muted warning">
+            At least one scenario is missing a face amount or an initial premium/deposit. Consider filling these in so
+            each scenario is a usable test case.
+          </p>
+        )}
+        {uploadInsights && uploadInsights.sampleProjection && (
+          <p className="muted" style={{ fontSize: "0.8rem" }}>
+            Hint: the sample projection above can help sanity-check that scenario inputs (face, premium/deposit,
+            duration) line up with the engine’s behaviour.
+          </p>
+        )}
         {loading && scenarios.length === 0 ? (
           <p className="muted">Loading default scenarios…</p>
         ) : (
@@ -716,9 +736,10 @@ export const CreateProductReviewPage: React.FC = () => {
                   <th>Smoker class</th>
                   <th>Risk class</th>
                   <th>Face amount</th>
-                  <th>Level period</th>
-                  <th>Premium mode</th>
-                  <th>Modal premium</th>
+                  <th>Face band</th>
+                  <th>Level period (if applicable)</th>
+                  <th>Premium mode (if applicable)</th>
+                  <th>Initial premium / deposit</th>
                 </tr>
               </thead>
               <tbody>
@@ -775,6 +796,14 @@ export const CreateProductReviewPage: React.FC = () => {
                         type="number"
                         value={s.faceAmount ?? ""}
                         onChange={(e) => updateScenarioField(idx, "faceAmount", e.target.value)}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        type="text"
+                        value={s.faceBand ?? ""}
+                        onChange={(e) => updateScenarioField(idx, "faceBand" as any, e.target.value)}
+                        style={{ width: "4rem" }}
                       />
                     </td>
                     <td>
