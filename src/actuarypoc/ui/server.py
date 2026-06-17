@@ -7216,18 +7216,13 @@ def _build_run_detail(object_name: str, data: Dict[str, Any]) -> Dict[str, Any]:
 async def ui_root() -> HTMLResponse:
     """Redirect the top-level UI to the React app under /web.
 
-    If projections exist, we default to the most recent object's key so that
-    /ui immediately opens a concrete run in the SPA.
+    For the Product Review onboarding MVP we default the base URL to the
+    Create Product Review flow instead of jumping straight into the most
+    recent projection object. This makes the demo entry point stable while
+    still keeping direct /web?key=... links working for existing flows.
     """
-    from urllib.parse import quote
 
-    objs = _list_projection_objects()
-    if objs:
-        latest = objs[-1]
-        url = f"/web?key={quote(latest)}"
-    else:
-        url = "/web"
-
+    url = "/web?view=create-review"
     return RedirectResponse(url=url, status_code=307)
 
 
