@@ -390,47 +390,6 @@ export const CreateProductReviewPage: React.FC = () => {
     }
   };
 
-  const handleAutofillMetadata = async () => {
-    const codeHint = (productCode || "").trim();
-    const filingHint = (filingId || "").trim();
-
-    if (!codeHint) {
-      setError("Enter at least a product code hint before autofilling.");
-      return;
-    }
-
-    setError(null);
-    try {
-      const res = await fetch("/api/product-review/metadata/suggest", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          productCodeHint: codeHint,
-          filingIdHint: filingHint || undefined,
-        }),
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || `HTTP ${res.status}`);
-      }
-      const data = (await res.json()) as {
-        carrier_name?: string | null;
-        product_name?: string | null;
-        product_code?: string | null;
-        product_type?: string | null;
-        primary_filing_id?: string | null;
-      };
-
-      if (data.carrier_name) setCarrierName(data.carrier_name);
-      if (data.product_name) setProductName(data.product_name);
-      if (data.product_code) setProductCode(data.product_code);
-      if (data.product_type) setProductType(data.product_type);
-      if (data.primary_filing_id) setFilingId(data.primary_filing_id);
-    } catch (e: any) {
-      setError(e?.message || "Failed to autofill metadata from filings.");
-    }
-  };
-
   return (
     <div className="run-detail-page">
       <header className="card">
@@ -523,9 +482,6 @@ export const CreateProductReviewPage: React.FC = () => {
             />
           </div>
           <div className="form-row">
-            <button type="button" onClick={handleAutofillMetadata} style={{ marginRight: "0.5rem" }}>
-              Autofill from filings (OpenAI)
-            </button>
             <button type="button" onClick={handleSaveDraft} disabled={savingDraft}>
               {savingDraft ? "Saving draft…" : "Save draft & continue to documents"}
             </button>
