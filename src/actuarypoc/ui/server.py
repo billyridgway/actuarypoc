@@ -6146,6 +6146,162 @@ def _build_product_review_payload(product_code: str) -> Dict[str, Any]:
         else:
             scenarios_ui = pd_scenarios
 
+    # Derive lightweight "upload insights" for the onboarding flow. These
+    # are intentionally advisory and best-effort only; failures should not
+    # break the core Product Review API.
+    upload_insights: Dict[str, Any] = {
+        "productCode": code,
+        "productName": meta.get("name") or code,
+        "productType": meta.get("type") or "",
+        "carrierName": (rec or {}).get("carrier") or "",
+    }
+
+    # Surface DSL-backed formulas (charges and credit rates) so the
+    # Document Upload step can show actuaries which fees/interest/COI
+    # structures the engine is currently using for this product.
+    dsl_charges: List[Dict[str, Any]] = []
+    dsl_rates: List[Dict[str, Any]] = []
+    missing_docs: List[Dict[str, Any]] = []
+
+    try:
+        base = Path(__file__).resolve().parents[1]
+        # For the historical P12TRF POC we know the DSL file explicitly.
+        # For other products we fall back to a conventional
+        # ``{product_code_lower}.yaml`` name when present.
+        if code == "P12TRF":
+            dsl_path = base / "dsl" / "examples" / "p12trf_term.yaml"
+        else:
+            dsl_path = base / "dsl" / "examples" / f"{code.lower()}.yaml"
+        if dsl_path.exists():
+            formula = load_formula(str(dsl_path))
+            for ch in getattr(formula, "charges", []) or []:
+                dsl_charges.append(
+                    {
+                        "name": getattr(ch, "name", None),
+                        "formula": getattr(ch, "formula", None),
+                        "description": getattr(ch, "description", None),
+                        "optional": bool(getattr(ch, "optional", False)),
+                    }
+                )
+            for rate in getattr(formula, "credit_rates", []) or []:
+                dsl_rates.append(
+                    {
+                        "rate_type": getattr(rate, "rate_type", None),
+                        "expression": getattr(rate, "expression", None),
+                        "description": getattr(rate, "description", None),
+                    }
+                )
+
+            # When the DSL exposes source_documents in meta, treat these as
+            # a desired checklist and flag any that do not appear among the
+            # currently uploaded documents for this Product Review.
+            meta_section = getattr(formula, "meta", None) or {}
+            src_docs = meta_section.get("source_documents") if isinstance(meta_section, dict) else None
+            if isinstance(src_docs, dict):
+                # Build a set of uploaded basenames for quick matching.
+                uploaded_basenames = []
+                for d in docs:
+                    op = d.get("object_path") or ""
+                    try:
+                        uploaded_basenames.append(Path(str(op)).name.lower())
+                    except Exception:
+                        continue
+
+                for key, path_value in src_docs.items():
+                    try:
+                        basename = Path(str(path_value)).name.lower()
+                    except Exception:
+                        basename = str(path_value).lower()
+                    found = False
+                    for ub in uploaded_basenames:
+                        if not ub:
+                            continue
+                        # Treat either an exact filename match or a
+                        # substring match as satisfying the requirement;
+                        # this keeps things resilient to timestamped
+                        # prefixes in MinIO object names.
+                        if ub == basename or basename in ub or ub in basename:
+                            found = True
+                            break
+                    if not found:
+                        missing_docs.append(
+                            {
+                                "id": str(key),
+                                "expectedPath": str(path_value),
+                            }
+                        )
+    except Exception:
+        # DSL inspection is advisory only; ignore any failures here.
+        pass
+
+    upload_insights["dslCharges"] = dsl_charges
+    upload_insights["dslCreditRates"] = dsl_rates
+    upload_insights["missingDocuments"] = missing_docs
+
+    # Show which AssumptionSets currently exist for this product so the
+    # onboarding flow can call out gaps in assumption coverage.
+    try:
+        asn_for_product: List[Dict[str, Any]] = []
+        for a in list_assumption_sets():
+            try:
+                if (a.product_code or "").strip().upper() != code:
+                    continue
+            except Exception:
+                continue
+            asn_for_product.append(
+                {
+                    "id": a.id,
+                    "description": a.description,
+                    "dsl_file": a.dsl_file,
+                    "actuarial_prefix": a.actuarial_prefix,
+                    "status": a.status,
+                    "is_current": a.is_current,
+                }
+            )
+        upload_insights["assumptionSets"] = asn_for_product
+    except Exception:
+        # MinIO/Postgres may not be configured; treat as advisory only.
+        upload_insights["assumptionSets"] = []
+
+    # Optionally surface a tiny sample projection for validation based on
+    # the existing P12TRF scenario artefacts when present. This avoids
+    # triggering additional projection work from the onboarding step while
+    # still giving actuaries something concrete to compare against.
+    sample_projection: Optional[Dict[str, Any]] = None
+    if code == "P12TRF":
+        try:
+            proj_key = "projections/p12trf/scenarios/S1.json"
+            data = get_projection(proj_key)
+            rd = _build_run_detail(proj_key, data)
+            policy_input = (rd.get("policy_input") or {})
+            core = policy_input.get("core_fields") or {}
+            proj_summary = rd.get("projection_summary") or {}
+            years = proj_summary.get("years") or []
+            death_benefits = proj_summary.get("death_benefits") or []
+            premiums = proj_summary.get("expected_premiums") or []
+
+            sample_projection = {
+                "key": proj_key,
+                "inputs": {
+                    "issue_age": core.get("issue_age"),
+                    "gender": core.get("gender"),
+                    "smoker_class": core.get("smoker_class"),
+                    "risk_class": core.get("risk_class"),
+                    "face_amount": core.get("face_amount"),
+                    "level_period": core.get("level_period"),
+                    "premium_mode": core.get("premium_mode"),
+                },
+                "projection": {
+                    "years": years[:5],
+                    "death_benefits": death_benefits[:5],
+                    "expected_premiums": premiums[:5],
+                },
+            }
+        except Exception:
+            sample_projection = None
+
+    upload_insights["sampleProjection"] = sample_projection
+
     return {
         "product": {
             "code": code,
@@ -6171,6 +6327,7 @@ def _build_product_review_payload(product_code: str) -> Dict[str, Any]:
             for d in docs
         ],
         "scenarios": scenarios_ui,
+        "uploadInsights": upload_insights,
     }
 
 

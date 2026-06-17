@@ -24,6 +24,53 @@ interface DocumentSummary {
   createdAt?: string | null;
 }
 
+interface UploadInsights {
+  productCode?: string;
+  productName?: string;
+  productType?: string;
+  carrierName?: string;
+  dslCharges?: {
+    name?: string | null;
+    formula?: string | null;
+    description?: string | null;
+    optional?: boolean;
+  }[];
+  dslCreditRates?: {
+    rate_type?: string | null;
+    expression?: string | null;
+    description?: string | null;
+  }[];
+  missingDocuments?: {
+    id: string;
+    expectedPath: string;
+  }[];
+  assumptionSets?: {
+    id: string;
+    description?: string | null;
+    dsl_file?: string | null;
+    actuarial_prefix?: string | null;
+    status?: string | null;
+    is_current?: boolean;
+  }[];
+  sampleProjection?: {
+    key?: string;
+    inputs?: {
+      issue_age?: number | null;
+      gender?: string | null;
+      smoker_class?: string | null;
+      risk_class?: string | null;
+      face_amount?: number | null;
+      level_period?: number | null;
+      premium_mode?: string | null;
+    } | null;
+    projection?: {
+      years?: (number | string | null)[];
+      death_benefits?: (number | null)[];
+      expected_premiums?: (number | null)[];
+    } | null;
+  } | null;
+}
+
 export interface ScenarioRow {
   id?: string;
   name?: string;
@@ -46,6 +93,7 @@ interface ProductReviewPayload {
   documents: DocumentSummary[];
   scenarios: ScenarioRow[];
   lastUploaded?: DocumentSummary;
+  uploadInsights?: UploadInsights;
 }
 
 const parseNumber = (value: string): number | null => {
@@ -70,6 +118,7 @@ export const CreateProductReviewPage: React.FC = () => {
   const [documents, setDocuments] = useState<DocumentSummary[]>([]);
   const [scenarios, setScenarios] = useState<ScenarioRow[]>([]);
   const [reviewFreshness, setReviewFreshness] = useState<{ status: string; messages?: string[] } | null>(null);
+  const [uploadInsights, setUploadInsights] = useState<UploadInsights | null>(null);
 
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
@@ -120,6 +169,7 @@ export const CreateProductReviewPage: React.FC = () => {
       setGeneratedAt(payload.review?.generatedAt || undefined);
       setDocuments(payload.documents || []);
       setScenarios((payload.scenarios || []).length > 0 ? payload.scenarios : []);
+      setUploadInsights(payload.uploadInsights ?? null);
       // Refresh freshness based on the current Product Model Review, when available.
       void refreshReviewFreshness();
     } catch (e: any) {
@@ -214,6 +264,7 @@ export const CreateProductReviewPage: React.FC = () => {
         setReviewStatus(payload.review?.status || reviewStatus);
         setCurrentGeneration(payload.review?.currentGeneration || currentGeneration);
         setGeneratedAt(payload.review?.generatedAt || generatedAt);
+        setUploadInsights(payload.uploadInsights ?? uploadInsights);
       }
       void refreshReviewFreshness();
     } catch (e: any) {
@@ -279,6 +330,7 @@ export const CreateProductReviewPage: React.FC = () => {
       setReviewStatus(data.review?.status || reviewStatus);
       setCurrentGeneration(data.review?.currentGeneration || currentGeneration);
       setGeneratedAt(data.review?.generatedAt || generatedAt);
+      setUploadInsights(data.uploadInsights ?? uploadInsights);
       setStep(4);
       void refreshReviewFreshness();
     } catch (e: any) {
@@ -510,6 +562,113 @@ export const CreateProductReviewPage: React.FC = () => {
               ))}
             </tbody>
           </table>
+        )}
+        {uploadInsights && (
+          <section style={{ marginTop: "1rem" }}>
+            <h3>Draft insights from DSL &amp; assumptions</h3>
+            <p className="muted">
+              These insights are derived from the current DSL and assumption registry for this product and are advisory
+              for the MVP demo.
+            </p>
+            <div className="form-grid">
+              <div className="form-row">
+                <label>DSL charges (fees / COI)</label>
+                {uploadInsights.dslCharges && uploadInsights.dslCharges.length > 0 ? (
+                  <ul>
+                    {uploadInsights.dslCharges.map((c, idx) => (
+                      <li key={`${c.name || "charge"}-${idx}`}>
+                        <strong>{c.name || "(unnamed)"}</strong>: {c.formula || "(no formula)"}
+                        {c.description && <span> – {c.description}</span>}
+                        {c.optional && <span> (optional)</span>}
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="muted">No DSL charges found for this product.</p>
+                )}
+              </div>
+              <div className="form-row">
+                <label>Credit rates (interest / discount)</label>
+                {uploadInsights.dslCreditRates && uploadInsights.dslCreditRates.length > 0 ? (
+                  <ul>
+                    {uploadInsights.dslCreditRates.map((r, idx) => (
+                      <li key={`${r.rate_type || "rate"}-${idx}`}>
+                        <strong>{r.rate_type || "rate"}</strong>: {r.expression || "(no expression)"}
+                        {r.description && <span> – {r.description}</span>}
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="muted">No DSL credit rates found for this product.</p>
+                )}
+              </div>
+              <div className="form-row">
+                <label>Required documents from DSL</label>
+                {uploadInsights.missingDocuments && uploadInsights.missingDocuments.length > 0 ? (
+                  <ul>
+                    {uploadInsights.missingDocuments.map((m) => (
+                      <li key={m.id}>
+                        <strong>{m.id}</strong>: expected something like <code>{m.expectedPath}</code>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="muted">No missing DSL-linked documents detected for this product.</p>
+                )}
+              </div>
+              <div className="form-row">
+                <label>Assumption sets for this product</label>
+                {uploadInsights.assumptionSets && uploadInsights.assumptionSets.length > 0 ? (
+                  <ul>
+                    {uploadInsights.assumptionSets.map((a) => (
+                      <li key={a.id}>
+                        <strong>{a.id}</strong> – {a.description || "(no description)"} [
+                        {a.status || "status unknown"}
+                        {a.is_current ? ", current" : ""}]
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="muted">No assumption sets registered for this product yet.</p>
+                )}
+              </div>
+              {uploadInsights.sampleProjection && uploadInsights.sampleProjection.projection && (
+                <div className="form-row">
+                  <label>Sample projection (first 5 years)</label>
+                  <table className="kv-table">
+                    <thead>
+                      <tr>
+                        <th>Year</th>
+                        <th>E[Premium]</th>
+                        <th>Death benefit</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(uploadInsights.sampleProjection.projection.years || []).map((y, idx) => (
+                        <tr key={String(y) + idx}>
+                          <td>{y}</td>
+                          <td>
+                            {uploadInsights.sampleProjection?.projection?.expected_premiums &&
+                            uploadInsights.sampleProjection.projection.expected_premiums[idx] !== undefined &&
+                            uploadInsights.sampleProjection.projection.expected_premiums[idx] !== null
+                              ? uploadInsights.sampleProjection.projection.expected_premiums[idx]
+                              : ""}
+                          </td>
+                          <td>
+                            {uploadInsights.sampleProjection?.projection?.death_benefits &&
+                            uploadInsights.sampleProjection.projection.death_benefits[idx] !== undefined &&
+                            uploadInsights.sampleProjection.projection.death_benefits[idx] !== null
+                              ? uploadInsights.sampleProjection.projection.death_benefits[idx]
+                              : ""}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </section>
         )}
       </section>
 
