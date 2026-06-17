@@ -53,6 +53,11 @@ except Exception:  # pragma: no cover - extremely unlikely in this env
 
 app = FastAPI(title="ActuaryPOC Projection Viewer", version="0.1.0")
 
+# Simple runtime marker so UIs can distinguish deployments without needing
+# access to git metadata. This is initialised when the process starts,
+# which is sufficient for "did the pod restart?" checks.
+BUILD_STARTED_AT = datetime.utcnow().isoformat() + "Z"
+
 
 # Mount built React UI (if present) under /web. This expects `vite build`
 # to have been run in the `web/` directory at the project root, producing
@@ -6538,8 +6543,12 @@ def api_generate_product_review(product_code: str) -> Dict[str, Any]:
 
 
 @app.get("/health")
-def health() -> Dict[str, str]:
-    return {"status": "ok"}
+def health() -> Dict[str, Any]:
+    return {
+        "status": "ok",
+        "version": getattr(app, "version", None),
+        "started_at": BUILD_STARTED_AT,
+    }
 
 
 def _list_projection_objects(prefix: str = "projections/") -> List[str]:

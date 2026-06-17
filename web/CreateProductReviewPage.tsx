@@ -120,6 +120,9 @@ export const CreateProductReviewPage: React.FC = () => {
   const [reviewFreshness, setReviewFreshness] = useState<{ status: string; messages?: string[] } | null>(null);
   const [uploadInsights, setUploadInsights] = useState<UploadInsights | null>(null);
 
+  const [uiVersion, setUiVersion] = useState<string | null>(null);
+  const [uiStartedAt, setUiStartedAt] = useState<string | null>(null);
+
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [savingDraft, setSavingDraft] = useState<boolean>(false);
@@ -186,6 +189,20 @@ export const CreateProductReviewPage: React.FC = () => {
       // Errors are surfaced via state; nothing else to do here.
     });
     void refreshReviewFreshness();
+
+    // Fetch UI/server version so we can surface it in the header and
+    // quickly confirm when a new pod has rolled out.
+    (async () => {
+      try {
+        const res = await fetch("/health");
+        if (!res.ok) return;
+        const data = (await res.json()) as { version?: string; started_at?: string };
+        if (data.version) setUiVersion(String(data.version));
+        if (data.started_at) setUiStartedAt(String(data.started_at));
+      } catch {
+        // Best-effort only; absence of version info should not block the flow.
+      }
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -424,13 +441,19 @@ export const CreateProductReviewPage: React.FC = () => {
               &nbsp;·&nbsp; <strong>Filing:</strong> {filingId}
             </>
           )}
-          {currentGeneration && (
-            <>
-              {" "}
-              &nbsp;·&nbsp; <strong>Generation:</strong> {currentGeneration}
-            </>
-          )}
+              {currentGeneration && (
+                <>
+                  {" "}
+                  &nbsp;·&nbsp; <strong>Generation:</strong> {currentGeneration}
+                </>
+              )}
         </p>
+        {(uiVersion || uiStartedAt) && (
+          <p className="muted" style={{ fontSize: "0.8rem" }}>
+            UI version: {uiVersion || "unknown"}
+            {uiStartedAt && <> &nbsp;·&nbsp; started {uiStartedAt}</>}
+          </p>
+        )}
       </header>
 
       {error && (
