@@ -6620,6 +6620,49 @@ def _list_projection_objects(prefix: str = "projections/") -> List[str]:
     return sorted(objects)
 
 
+def _list_minio_prefix(prefix: str = "") -> Dict[str, Any]:
+    """Return a shallow listing of the MinIO bucket under a given prefix.
+
+    This is a dev-only helper used by the /ui/dev object browser and
+    /api/dev/objects endpoint. It discovers immediate child "directories"
+    and objects under the supplied prefix without recursing arbitrarily
+    deep into the tree.
+    """
+
+    client = get_minio_client()
+    bucket = get_bucket_name()
+
+    norm_prefix = prefix or ""
+    dirs: set[str] = set()
+    files: List[Dict[str, Any]] = []
+
+    for obj in client.list_objects(bucket, prefix=norm_prefix, recursive=True):
+        name = obj.object_name
+        if not name.startswith(norm_prefix):
+            continue
+        remainder = name[len(norm_prefix) :]
+        if "/" in remainder:
+            head = remainder.split("/", 1)[0]
+            dirs.add(f"{norm_prefix}{head}/")
+        else:
+            files.append(
+                {
+                    "name": name,
+                    "size": getattr(obj, "size", None),
+                    "lastModified": getattr(obj, "last_modified", None).isoformat()
+                    if getattr(obj, "last_modified", None)
+                    else None,
+                }
+            )
+
+    return {
+        "bucket": bucket,
+        "prefix": norm_prefix,
+        "directories": sorted(dirs),
+        "objects": files,
+    }
+
+
 def _load_projection_summary(object_name: str) -> Optional[Dict[str, Any]]:
     """Load one projection and extract a small summary.
 
@@ -6688,6 +6731,48 @@ def list_projections() -> Dict[str, Any]:
     """Return a list of available projection JSON objects in MinIO."""
     objs = _list_projection_objects()
     return {"count": len(objs), "objects": objs}
+
+
+@app.get("/api/dev/objects")
+def api_dev_objects(prefix: str = Query("", description="Object key prefix to browse")) -> Dict[str, Any]:
+    """List immediate prefixes and objects under a MinIO prefix (dev-only).
+
+    This endpoint is intentionally simple and unpaginated; it is meant for
+    local debugging and exploration of the object store, not as a
+    production-grade listing API.
+    """
+
+    try:
+        return _list_minio_prefix(prefix)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Failed to list objects from MinIO: {exc}") from exc
+
+
+@app.get("/api/dev/object")
+def api_dev_object(key: str = Query(..., description="Exact object key to download")) -> Response:
+    """Download a single object from MinIO as an HTTP response (dev-only)."""
+
+    client = get_minio_client()
+    bucket = get_bucket_name()
+
+    try:
+        resp = client.get_object(bucket, key)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=404, detail=f"Object not found: {key}") from exc
+
+    try:
+        body = resp.read()
+        content_type = resp.headers.get("Content-Type", "application/octet-stream")  # type: ignore[union-attr]
+    finally:
+        try:
+            resp.close()
+            resp.release_conn()
+        except Exception:
+            pass
+
+    filename = Path(key).name or "object"
+    headers = {"Content-Disposition": f"attachment; filename=\"{filename}\""}
+    return Response(content=body, media_type=content_type, headers=headers)
 
 
 @app.get("/projections/{object_name:path}")
@@ -7348,6 +7433,107 @@ async def ui_assumptions() -> HTMLResponse:
           </thead>
           <tbody>
             {rows_html}
+          </tbody>
+        </table>
+      </body>
+    </html>
+    """
+    return HTMLResponse(content=html)
+
+
+@app.get("/ui/dev", response_class=HTMLResponse)
+async def ui_dev(prefix: str = Query("", description="Prefix to browse in the MinIO bucket")) -> HTMLResponse:
+    """Simple dev-only object store browser.
+
+    This view lets developers walk the MinIO-backed bucket hierarchy and
+    download individual objects for inspection.
+    """
+
+    try:
+        listing = _list_minio_prefix(prefix)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Failed to list objects from MinIO: {exc}") from exc
+
+    bucket = listing.get("bucket")
+    norm_prefix = listing.get("prefix") or ""
+    dirs = listing.get("directories") or []
+    objects = listing.get("objects") or []
+
+    def _escape(text: Any) -> str:
+        from html import escape as _esc
+
+        return _esc(str(text))
+
+    rows_dirs = "".join(
+        f"<tr><td>dir</td><td colspan='3'><a href='/ui/dev?prefix={_escape(d)}'>{_escape(d)}</a></td></tr>" for d in dirs
+    ) or "<tr><td colspan='4'><em>No sub-directories under this prefix.</em></td></tr>"
+
+    file_rows = []
+    for obj in objects:
+        name = obj.get("name")
+        size = obj.get("size")
+        lm = obj.get("lastModified")
+        href = f"/api/dev/object?key={_escape(name)}"
+        file_rows.append(
+            f"<tr><td>file</td><td>{_escape(name)}</td><td>{_escape(size) if size is not None else ''}</td>"
+            f"<td>{_escape(lm or '')}</td><td><a href='{href}'>download</a></td></tr>"
+        )
+    rows_files = "".join(file_rows) or "<tr><td colspan='5'><em>No objects under this prefix.</em></td></tr>"
+
+    parent_link = ""
+    if norm_prefix:
+        parent = norm_prefix.rstrip("/")
+        if "/" in parent:
+            parent = parent.rsplit("/", 1)[0] + "/"
+        else:
+            parent = ""
+        parent_link = f"<a href='/ui/dev?prefix={_escape(parent)}'>&larr; Up to '{_escape(parent or '/')}""</a>"
+
+    html = f"""
+    <html>
+      <head>
+        <title>Object Store Browser (dev)</title>
+        <style>
+          body {{ font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif; margin: 2rem; }}
+          table {{ border-collapse: collapse; width: 100%; margin-top: 1rem; }}
+          th, td {{ border: 1px solid #ddd; padding: 0.4rem; font-size: 0.85rem; }}
+          th {{ background: #f5f5f5; text-align: left; }}
+          caption {{ text-align: left; font-weight: 600; margin-bottom: 0.5rem; }}
+          .muted {{ color: #666; font-size: 0.85rem; }}
+        </style>
+      </head>
+      <body>
+        <p><a href="/ui">&larr; Back to UI home</a></p>
+        <h1>Object Store Browser (dev)</h1>
+        <p class="muted">Bucket: <code>{_escape(bucket)}</code> &nbsp;·&nbsp; Prefix: <code>{_escape(norm_prefix or '/')}</code></p>
+        <p>{parent_link}</p>
+
+        <table>
+          <caption>Directories under this prefix</caption>
+          <thead>
+            <tr>
+              <th>Type</th>
+              <th colspan="3">Name</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows_dirs}
+          </tbody>
+        </table>
+
+        <table>
+          <caption>Objects under this prefix</caption>
+          <thead>
+            <tr>
+              <th>Type</th>
+              <th>Key</th>
+              <th>Size (bytes)</th>
+              <th>Last modified</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows_files}
           </tbody>
         </table>
       </body>
