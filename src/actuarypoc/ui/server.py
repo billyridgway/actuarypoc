@@ -443,15 +443,15 @@ class ScenarioConfig(BaseModel):  # type: ignore[misc]
     levelPeriod: Optional[int] = None
     premiumMode: Optional[str] = None
     modalPremium: Optional[float] = None
-     # Some products are funded via a single deposit rather than recurring
-     # modal premiums. For those cases the UI can treat modalPremium as the
-     # recurring amount (when present) and initialDeposit as the up-front
-     # funding amount.
-     initialDeposit: Optional[float] = None
-     # Derived banding based on DSL/meta.face_bands; populated server-side
-     # for term-style products so actuaries can see which face band each
-     # scenario falls into.
-     faceBand: Optional[str] = None
+    # Some products are funded via a single deposit rather than recurring
+    # modal premiums. For those cases the UI can treat modalPremium as the
+    # recurring amount (when present) and initialDeposit as the up-front
+    # funding amount.
+    initialDeposit: Optional[float] = None
+    # Derived banding based on DSL/meta.face_bands; populated server-side
+    # for term-style products so actuaries can see which face band each
+    # scenario falls into.
+    faceBand: Optional[str] = None
     purpose: Optional[str] = None
     dimensionsExercised: Optional[List[str]] = None
     source: Optional[str] = None
