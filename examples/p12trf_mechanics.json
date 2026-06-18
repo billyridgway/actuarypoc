@@ -2,6 +2,212 @@
   "product_code": "P12TRF",
   "mechanics": [
     {
+      "id": "p12trf_issue_age",
+      "product_code": "P12TRF",
+      "name": "Issue Age",
+      "type": "input",
+      "description": "Issue age of the insured at policy inception; drives eligibility for each level term period and selection of premium rates.",
+      "filing_sources": [
+        {
+          "id": "p12trf_actuarial_memo_issue_ages",
+          "document_hint": "ICC12_P12TRF_Actuarial_Memo.pdf",
+          "page": "Issue age limits",
+          "snippet": "Minimum and maximum issue ages by level premium period are as follows...",
+          "confidence": 0.9
+        }
+      ],
+      "dsl_refs": [
+        {
+          "id": "dsl.meta.issue_ages",
+          "file": "dsl/examples/p12trf_term.yaml",
+          "path": "meta.issue_ages",
+          "description": "Issue age ranges keyed by level premium period."
+        }
+      ],
+      "upstream_ids": [],
+      "downstream_ids": [
+        "p12trf_level_term_period",
+        "p12trf_premium"
+      ],
+      "confidence": 0.9
+    },
+    {
+      "id": "p12trf_risk_class",
+      "product_code": "P12TRF",
+      "name": "Risk Class",
+      "type": "input",
+      "description": "Underwriting risk class (e.g. Super Preferred Non-Tobacco) used to select mortality assumptions and premium rates.",
+      "filing_sources": [
+        {
+          "id": "p12trf_risk_mapping_term_pet",
+          "document_hint": "Risk_Class_Mapping_Term_PET.pdf",
+          "page": "Mapping table",
+          "snippet": "Risk class names as filed and the corresponding normalized risk class labels used for pricing.",
+          "confidence": 0.9
+        }
+      ],
+      "dsl_refs": [
+        {
+          "id": "dsl.meta.filed_risk_classes",
+          "file": "dsl/examples/p12trf_term.yaml",
+          "path": "meta.filed_risk_classes",
+          "description": "List of filed risk class labels."
+        },
+        {
+          "id": "dsl.meta.risk_class_mapping",
+          "file": "dsl/examples/p12trf_term.yaml",
+          "path": "meta.risk_class_mapping",
+          "description": "Mapping from PAS / filing risk class labels to normalized engine labels."
+        },
+        {
+          "id": "dsl.meta.mortality_risk_class_mapping",
+          "file": "dsl/examples/p12trf_term.yaml",
+          "path": "meta.mortality_risk_class_mapping",
+          "description": "Mapping from normalized risk classes to mortality table classes."
+        }
+      ],
+      "upstream_ids": [],
+      "downstream_ids": [
+        "p12trf_premium",
+        "p12trf_death_benefit"
+      ],
+      "confidence": 0.9
+    },
+    {
+      "id": "p12trf_face_amount",
+      "product_code": "P12TRF",
+      "name": "Face Amount",
+      "type": "input",
+      "description": "Initial amount of insurance in force; determines the death benefit during the level term period and interacts with face bands.",
+      "filing_sources": [
+        {
+          "id": "p12trf_sov_face_amount",
+          "document_hint": "P12TRF_Statement_of_Variability.pdf",
+          "page": "Face amount limits",
+          "snippet": "Minimum face amount and any stated maximums or underwriting constraints for the product.",
+          "confidence": 0.85
+        }
+      ],
+      "dsl_refs": [
+        {
+          "id": "dsl.meta.min_face_amount",
+          "file": "dsl/examples/p12trf_term.yaml",
+          "path": "meta.min_face_amount",
+          "description": "Minimum face amount per product design."
+        },
+        {
+          "id": "dsl.meta.max_face_amount",
+          "file": "dsl/examples/p12trf_term.yaml",
+          "path": "meta.max_face_amount",
+          "description": "Maximum face amount, when constrained by design or underwriting."
+        }
+      ],
+      "upstream_ids": [],
+      "downstream_ids": [
+        "p12trf_face_band",
+        "p12trf_death_benefit",
+        "p12trf_premium"
+      ],
+      "confidence": 0.85
+    },
+    {
+      "id": "p12trf_face_band",
+      "product_code": "P12TRF",
+      "name": "Face Band",
+      "type": "structure",
+      "description": "Face amount banding used by mortality and premium tables (e.g. Band 1: 0–999,999; Band 2: 1,000,000–2,999,999).",
+      "filing_sources": [
+        {
+          "id": "p12trf_actuarial_memo_face_bands",
+          "document_hint": "ICC12_P12TRF_Actuarial_Memo.pdf",
+          "page": "Face amount bands",
+          "snippet": "Description of face amount bands and how they apply to premium and mortality tables.",
+          "confidence": 0.85
+        }
+      ],
+      "dsl_refs": [
+        {
+          "id": "dsl.meta.face_bands",
+          "file": "dsl/examples/p12trf_term.yaml",
+          "path": "meta.face_bands",
+          "description": "Structured definition of face amount bands."
+        }
+      ],
+      "upstream_ids": [
+        "p12trf_face_amount"
+      ],
+      "downstream_ids": [
+        "p12trf_premium"
+      ],
+      "confidence": 0.85
+    },
+    {
+      "id": "p12trf_premium_mode",
+      "product_code": "P12TRF",
+      "name": "Premium Mode",
+      "type": "input",
+      "description": "Payment frequency for premiums (e.g. Annual, Monthly) and the modalization factors applied to annual rates.",
+      "filing_sources": [
+        {
+          "id": "p12trf_actuarial_memo_premium_modes",
+          "document_hint": "ICC12_P12TRF_Actuarial_Memo.pdf",
+          "page": "Modes of payment",
+          "snippet": "Description of allowable premium modes and the factors used to derive modal premiums from annual rates.",
+          "confidence": 0.85
+        }
+      ],
+      "dsl_refs": [
+        {
+          "id": "dsl.meta.premium_table.modalization",
+          "file": "dsl/examples/p12trf_term.yaml",
+          "path": "meta.premium_table.modalization",
+          "description": "Modalization rules mapping premium modes to transformations of annual per-1000 rates."
+        }
+      ],
+      "upstream_ids": [],
+      "downstream_ids": [
+        "p12trf_premium"
+      ],
+      "confidence": 0.85
+    },
+    {
+      "id": "p12trf_maturity",
+      "product_code": "P12TRF",
+      "name": "Expiry / Maturity",
+      "type": "structure",
+      "description": "The age or time at which coverage ends or the policy matures (term to age 95 with no cash values for P12TRF).",
+      "filing_sources": [
+        {
+          "id": "p12trf_actuarial_memo_maturity",
+          "document_hint": "ICC12_P12TRF_Actuarial_Memo.pdf",
+          "page": "Maturity / expiry",
+          "snippet": "Description of the ultimate maturity age and the nonforfeiture exception (no cash values).",
+          "confidence": 0.85
+        }
+      ],
+      "dsl_refs": [
+        {
+          "id": "dsl.meta.maturity_age",
+          "file": "dsl/examples/p12trf_term.yaml",
+          "path": "meta.maturity_age",
+          "description": "Configured maturity age (e.g. 95) for the term contract."
+        },
+        {
+          "id": "dsl.flags.has_cash_value",
+          "file": "dsl/examples/p12trf_term.yaml",
+          "path": "flags.has_cash_value",
+          "description": "Flag indicating that the product has no cash values (nonforfeiture exception)."
+        }
+      ],
+      "upstream_ids": [
+        "p12trf_level_term_period"
+      ],
+      "downstream_ids": [
+        "p12trf_death_benefit"
+      ],
+      "confidence": 0.85
+    },
+    {
       "id": "p12trf_premium",
       "product_code": "P12TRF",
       "name": "Premium",
