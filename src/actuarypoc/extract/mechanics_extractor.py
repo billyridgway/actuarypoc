@@ -59,6 +59,32 @@ def _build_mechanics_system_prompt() -> str:
     )
 
 
+def _strip_code_fence(raw: str) -> str:
+    """Best-effort removal of markdown code fences around JSON.
+
+    Some models occasionally wrap the JSON payload in ```json ... ``` even
+    when asked not to. This helper strips a single top-level fenced block so
+    that json.loads can succeed.
+    """
+
+    s = (raw or "").strip()
+    if not s.startswith("```"):
+        return s
+
+    # Drop opening fence line (e.g. ``` or ```json)
+    first_nl = s.find("\n")
+    if first_nl == -1:
+        return s
+    s = s[first_nl + 1 :]
+
+    # Trim trailing fence if present
+    end = s.rfind("```")
+    if end != -1:
+        s = s[:end]
+
+    return s.strip()
+
+
 def extract_mechanics_from_text(
     *,
     product_code: str,
@@ -102,8 +128,9 @@ def extract_mechanics_from_text(
     )
 
     raw = resp.choices[0].message.content or ""
+    cleaned = _strip_code_fence(raw)
     try:
-        data = json.loads(raw)
+        data = json.loads(cleaned)
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"LLM response was not valid JSON: {exc}\nRaw: {raw}") from exc
 
