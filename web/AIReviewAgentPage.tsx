@@ -1091,16 +1091,36 @@ export const AIReviewAgentPage: React.FC = () => {
                   {assumptionDslPreview.creditRates.map((r: any, idx: number) => (
                     <li key={r.rate_type || idx}>
                       <strong>{r.rate_type || "rate"}</strong>: {r.expression || "(no expression)"}
-                      {r.description && <span> – {r.description}</span>}
+                    {r.description && <span> – {r.description}</span>}
                     </li>
                   ))}
                 </ul>
               </div>
             )}
+            {assumptionDslPreview.mechanicAssumptions &&
+              assumptionDslPreview.mechanicAssumptions.length > 0 && (
+                <div style={{ marginBottom: "0.75rem" }}>
+                  <h4>Mechanics-informed assumption placeholders</h4>
+                  <p className="muted">
+                    These are not executable DSL yet. They highlight which assumption areas need values,
+                    formulas, and tables, based on the approved Product Mechanics for this product.
+                  </p>
+                  <ul>
+                    {assumptionDslPreview.mechanicAssumptions.map((ma: any) => (
+                      <li key={ma.mechanicId}>
+                        <strong>{ma.name}</strong>
+                        {ma.type && <span className="muted"> ({ma.type})</span>}: {ma.assumptionNotes}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
 
             {!assumptionDslPreview.meta &&
               (!assumptionDslPreview.charges || assumptionDslPreview.charges.length === 0) &&
-              (!assumptionDslPreview.creditRates || assumptionDslPreview.creditRates.length === 0) && (
+              (!assumptionDslPreview.creditRates || assumptionDslPreview.creditRates.length === 0) &&
+              (!assumptionDslPreview.mechanicAssumptions ||
+                assumptionDslPreview.mechanicAssumptions.length === 0) && (
                 <p className="muted">No DSL-backed assumptions were found for this AssumptionSet.</p>
               )}
           </section>

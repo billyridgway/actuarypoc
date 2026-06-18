@@ -6206,6 +6206,91 @@ def api_product_assumptions_ai_generate(payload: ProductAssumptionsAIGenerateReq
             # DSL inspection is best-effort only.
             dsl_preview = {}
 
+    # Mechanics-informed assumptions: even when no executable DSL exists
+    # yet for a product, we can still surface useful assumption review
+    # content derived from the approved Product Mechanics registry.
+    try:
+        mech_objects = load_mechanics_for_product(code)
+        mech_json = mechanics_to_json(mech_objects)
+    except Exception:
+        mech_json = []
+
+    mechanic_assumptions: List[Dict[str, Any]] = []
+
+    def _notes_for_mechanic(m: Dict[str, Any]) -> str:
+        name = (m.get("name") or "").lower()
+        mtype = (m.get("type") or "").lower()
+
+        if "account value" in name or "account" in name and "value" in name:
+            return (
+                "Specify account value roll-forward, premium additions, deductions, "
+                "interest crediting order, and timing."
+            )
+        if "cost of insurance" in name or "coi" in name:
+            return (
+                "Specify COI rate basis, monthly deduction timing, net amount at risk basis, "
+                "and how COI varies by age, risk class, and underwriting."
+            )
+        if "interest" in name or "credit" in name:
+            return (
+                "Specify credited rate, guaranteed minimum, index/fixed account behaviour (if applicable), "
+                "and whether interest is credited before or after charges."
+            )
+        if "surrender" in name:
+            return (
+                "Specify surrender charge schedule, duration, calculation basis, and how it "
+                "affects cash surrender value and policy value."
+            )
+        if "death benefit" in name:
+            return (
+                "Specify death benefit options, face amount behaviour, net amount at risk definition, "
+                "and changes after withdrawals or loans."
+            )
+        if "policy fee" in name or "administrative" in name or "admin" in name:
+            return (
+                "Specify fee amount, frequency, timing within the month, and whether it is deducted "
+                "before or after interest crediting."
+            )
+
+        if mtype == "charge":
+            return (
+                "Specify charge amount or rate, frequency, and timing, and how it interacts with "
+                "account value and cash surrender value."
+            )
+        if mtype == "benefit":
+            return (
+                "Specify benefit amount, eligibility conditions, and how it is linked to policy value, "
+                "face amount, and riders."
+            )
+        if mtype in {"feature", "structure"}:
+            return (
+                "Clarify how this feature behaves over time, which states it depends on, and how it "
+                "should be exercised in projections."
+            )
+
+        return "Clarify the assumptions, inputs, and calculations that drive this mechanic in projections."
+
+    for m in mech_json:
+        mid = m.get("id")
+        name = m.get("name")
+        if not mid or not name:
+            continue
+        mechanic_assumptions.append(
+            {
+                "mechanicId": mid,
+                "name": name,
+                "type": m.get("type"),
+                "description": m.get("description"),
+                "source": m.get("source") or "ai_extracted",
+                "status": m.get("status") or "approved",
+                "filingSources": m.get("filing_sources") or [],
+                "assumptionNotes": _notes_for_mechanic(m),
+            }
+        )
+
+    if mechanic_assumptions:
+        dsl_preview.setdefault("mechanicAssumptions", mechanic_assumptions)
+
     return {"assumptionSet": asn.to_dict(), "dslPreview": dsl_preview}
 
 
