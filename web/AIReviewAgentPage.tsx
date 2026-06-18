@@ -390,6 +390,40 @@ export const AIReviewAgentPage: React.FC = () => {
     }
   };
 
+  const handleUploadAssumptionSupport = async (files: FileList | File[]) => {
+    const code = normalisedCode.trim();
+    if (!code) {
+      setError("Enter a product code before uploading assumption support.");
+      return;
+    }
+    const arr = Array.from(files as any);
+    if (arr.length === 0) return;
+
+    setError(null);
+    setLoading(true);
+    try {
+      for (const file of arr) {
+        const form = new FormData();
+        form.append("file", file);
+        const res = await fetch(`/api/product-assumptions/${encodeURIComponent(code)}/support`, {
+          method: "POST",
+          body: form,
+        });
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(text || `HTTP ${res.status}`);
+        }
+        // We don't need to do anything with the response yet; support
+        // files will be picked up automatically on the next extraction
+        // run as additional context.
+      }
+    } catch (e: any) {
+      setError(e?.message || "Failed to upload assumption support file(s).");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleRetryScenariosWithFeedback = async () => {
     if (!normalisedCode) {
       setError("Enter a product code before retrying scenarios.");
@@ -982,13 +1016,17 @@ export const AIReviewAgentPage: React.FC = () => {
           </div>
         </div>
 
-        {assumptionDslPreview && (
+       {assumptionDslPreview && (
           <section style={{ marginTop: "1rem" }}>
-            <h3>DSL-backed assumptions</h3>
-            <p className="muted">
-              Preview derived from <code>{assumptionDslPreview.dslFile}</code>. This is what the engine will
-              actually use.
-            </p>
+            {assumptionDslPreview.dslFile && (
+              <>
+                <h3>DSL-backed assumptions</h3>
+                <p className="muted">
+                  Preview derived from <code>{assumptionDslPreview.dslFile}</code>. This is what the engine will
+                  actually use.
+                </p>
+              </>
+            )}
 
             {assumptionDslPreview.meta && assumptionDslPreview.meta.risk_class_mapping && (
               <div style={{ marginBottom: "0.75rem" }}>
@@ -1102,8 +1140,8 @@ export const AIReviewAgentPage: React.FC = () => {
                 <div style={{ marginBottom: "0.75rem" }}>
                   <h4>Mechanics-informed extracted assumptions</h4>
                   <p className="muted">
-                    These assumptions are extracted from the filings using the approved Product Mechanics as
-                    anchors. They are not executable DSL yet.
+                    These assumptions are extracted from the filings and any uploaded assumption support files using
+                    the approved Product Mechanics as anchors. They are not executable DSL yet.
                   </p>
                   <table className="kv-table">
                     <thead>
@@ -1169,6 +1207,30 @@ export const AIReviewAgentPage: React.FC = () => {
               )}
           </section>
         )}
+
+        <section style={{ marginTop: "1rem" }}>
+          <h3>Upload assumption support files</h3>
+          <p className="muted">
+            If key assumptions are missing or under-specified, upload support such as an actuarial assumption memo,
+            pricing workbook, COI rate table, surrender charge schedule, interest crediting support, expense / policy
+            fee schedule, or rider charge table, then re-run 
+            <em> Generate AssumptionSet from filings</em>.
+          </p>
+          <div className="form-grid">
+            <div className="form-row">
+              <input
+                type="file"
+                multiple
+                onChange={(e) => {
+                  if (e.target.files) {
+                    void handleUploadAssumptionSupport(e.target.files);
+                    e.target.value = "";
+                  }
+                }}
+              />
+            </div>
+          </div>
+        </section>
 
         {assumptionSetJson && (
           <pre className="code-block" style={{ maxHeight: "20rem", overflow: "auto" }}>

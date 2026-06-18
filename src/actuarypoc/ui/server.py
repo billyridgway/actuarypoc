@@ -6255,6 +6255,58 @@ def api_product_assumptions_ai_generate(payload: ProductAssumptionsAIGenerateReq
     return {"assumptionSet": asn.to_dict(), "dslPreview": dsl_preview}
 
 
+@app.post("/api/product-assumptions/{product_code}/support")
+async def api_upload_assumption_support(
+    product_code: str,
+    file: UploadFile = File(...),
+) -> Dict[str, Any]:
+    """Upload assumption support files for Stage 3 assumption discovery.
+
+    Support files are stored separately from generic filings under the
+    ``assumption-support/{PRODUCT_CODE}/`` prefix in MinIO so that
+    mechanics-assumption extraction can treat them as additional
+    context without conflating them with primary filings.
+    """
+
+    code = (product_code or "").strip().upper()
+    if not code:
+        raise HTTPException(status_code=400, detail="product_code is required")
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Filename is required")
+
+    safe_name = Path(file.filename).name
+    timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+    object_name = f"assumption-support/{code}/{timestamp}_{safe_name}"
+
+    client = get_minio_client()
+    ensure_bucket(client)
+    bucket = get_bucket_name()
+
+    content = await file.read()
+    size = len(content)
+    if size == 0:
+        raise HTTPException(status_code=400, detail="Empty file upload is not allowed")
+
+    import io as _io
+
+    client.put_object(
+        bucket,
+        object_name,
+        _io.BytesIO(content),
+        length=size,
+        content_type=file.content_type or "application/octet-stream",
+    )
+
+    return {
+        "productCode": code,
+        "support": {
+            "filename": safe_name,
+            "objectPath": object_name,
+            "kind": "assumption-support",
+        },
+    }
+
+
 @app.post("/api/product-scenarios/ai-generate")
 def api_product_scenarios_ai_generate(payload: ProductScenariosAIGenerateRequest) -> Dict[str, Any]:
     """Generate a draft set of scenarios for a product using filings + OpenAI.

@@ -19,6 +19,11 @@ import os
 
 from openai import OpenAI
 
+from actuarypoc.storage.minio_client import get_minio_client, get_bucket_name
+from actuarypoc.extract.assumptions_for_product import _download_minio_object  # type: ignore[attr-defined]
+from actuarypoc.extract.assumptions_extractor import read_document_text
+from tempfile import TemporaryDirectory
+
 
 def _strip_code_fence(raw: str) -> str:
     """Best-effort removal of markdown code fences around JSON.
@@ -124,6 +129,35 @@ def extract_mechanic_assumptions(
     if not mechanic_contexts:
         return []
 
+    # Load additional assumption support documents from MinIO, when
+    # present, and append their text as global context. We do not yet
+    # map individual support files to specific mechanics; the LLM sees
+    # them as shared context.
+    support_text_chunks: List[str] = []
+    try:
+        client_m = get_minio_client()
+        bucket = get_bucket_name()
+        prefix = f"assumption-support/{code_norm}/"
+        objects = list(client_m.list_objects(bucket, prefix=prefix, recursive=True))[:5]
+        if objects:
+            with TemporaryDirectory(prefix="mech_support_") as tmpdir_str:
+                from pathlib import Path as _Path
+
+                tmpdir = _Path(tmpdir_str)
+                for obj in objects:
+                    name = obj.object_name
+                    try:
+                        local = _download_minio_object(bucket, name, tmpdir)  # type: ignore[misc]
+                        text = read_document_text(str(local))
+                        label = f"[SUPPORT: {name}]\n"
+                        support_text_chunks.append(label + text.strip() + "\n\n")
+                    except Exception:
+                        continue
+    except Exception:
+        support_text_chunks = []
+
+    support_text = "".join(support_text_chunks).strip()
+
     client = OpenAI(api_key=api_key)
     model = model or os.getenv("MECHANIC_ASSUMPTION_MODEL", os.getenv("ASSUMPTION_EXTRACT_MODEL", "gpt-4o-mini"))
 
@@ -135,6 +169,13 @@ def extract_mechanic_assumptions(
         "Mechanics with filing evidence:",
         json.dumps(mechanic_contexts, indent=2, ensure_ascii=False),
     ]
+    if support_text:
+        user_content_lines.append("")
+        user_content_lines.append("Additional assumption support documents (may contain COI tables, surrender schedules, interest crediting details, etc.):")
+        # Truncate to keep prompts bounded.
+        max_chars = 40000
+        user_content_lines.append(support_text[:max_chars])
+
     user_content = "\n".join(user_content_lines)
 
     resp = client.chat.completions.create(
