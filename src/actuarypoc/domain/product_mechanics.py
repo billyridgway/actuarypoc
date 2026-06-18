@@ -8,8 +8,11 @@ import json
 
 
 # Minimal Product Mechanics v0.1 – intentionally small and file-backed.
-# This module is P12TRF-focused for now but the data model is generic
-# enough to support additional products via per-product JSON fixtures.
+#
+# The data model and loader are product-agnostic by design. For v0.1 we
+# only ship a curated mechanics fixture for P12TRF, but any product code
+# can be supported by adding an ``examples/{product_code_lower}_mechanics.json``
+# file or wiring a different backing store in future iterations.
 
 
 @dataclass
@@ -55,15 +58,20 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 def _mechanics_fixture_path_for_product(product_code: str) -> Optional[Path]:
     """Return the mechanics JSON fixture path for a given product.
 
-    v0.1 is intentionally minimal: only P12TRF is wired up via
-    ``examples/p12trf_mechanics.json``. Other products simply return
-    ``None`` so callers can treat mechanics as advisory.
+    v0.1 uses a simple convention-only lookup:
+
+        examples/{product_code_lower}_mechanics.json
+
+    For example, P12TRF uses ``examples/p12trf_mechanics.json``. If no
+    mechanics file exists yet for a product, callers should treat that as
+    "not populated yet", not "unsupported".
     """
 
-    code = (product_code or "").strip().upper()
-    if code == "P12TRF":
-        return _PROJECT_ROOT / "examples" / "p12trf_mechanics.json"
-    return None
+    code = (product_code or "").strip()
+    if not code:
+        return None
+    name = f"{code.lower()}_mechanics.json"
+    return _PROJECT_ROOT / "examples" / name
 
 
 def load_mechanics_for_product(product_code: str) -> List[ProductMechanic]:

@@ -683,9 +683,9 @@ export const AIReviewAgentPage: React.FC = () => {
       <section className="card">
         <h2>2. Mechanics (Preview)</h2>
         <p className="muted">
-          Curated mechanics for this product that connect filings, semantics, and DSL. For v0.1 this is
-          hand-maintained for P12TRF but represents the target "Product Mechanics" layer between filings
-          and DSL.
+          Curated mechanics for this product that connect filings, semantics, and DSL. For v0.1 the
+          mechanics dataset is currently populated for P12TRF as the first reference product, but the
+          underlying Product Mechanics model and APIs are product-agnostic.
         </p>
         {mechanics && mechanics.length > 0 ? (
           <table className="kv-table">

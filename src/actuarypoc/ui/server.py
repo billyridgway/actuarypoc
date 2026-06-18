@@ -3244,10 +3244,11 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
     # ProductDefinition validation.
     scenario_validation = _build_p12trf_scenario_validation(scen_and_rates["scenarios"])
 
-    # Advisory Product Mechanics Graph v0.1: for P12TRF we load a small
-    # curated mechanics set that links filings ↔ mechanics ↔ DSL. This is
-    # intentionally minimal and file-backed and should not break core PMR
-    # flows when unavailable.
+    # Advisory Product Mechanics Graph v0.1: load any curated mechanics
+    # set available for this product that links filings ↔ mechanics ↔ DSL.
+    # This is intentionally minimal and file-backed and should not break
+    # core PMR flows when unavailable. P12TRF is the first product with a
+    # populated mechanics fixture.
     try:
         mechanics = load_mechanics_for_product(product_block["code"])
         mechanics_payload = mechanics_to_json(mechanics)

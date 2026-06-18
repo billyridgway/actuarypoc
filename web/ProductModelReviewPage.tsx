@@ -2342,10 +2342,12 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
 
       {review.productMechanics && review.productMechanics.length > 0 && (
         <section className="card">
-          <h2>Product Mechanics (POC)</h2>
+          <h2>Product Mechanics</h2>
           <p className="muted">
             Curated view of key product mechanics for this product. Each mechanic links filings, semantics,
-            and DSL paths; this is the first step toward a Product Mechanics Graph.
+            and DSL paths; this is the first step toward a reusable Product Mechanics Graph abstraction.
+            The first populated mechanics dataset is P12TRF, but the underlying model and APIs are
+            intended to be product-agnostic.
           </p>
           <table className="kv-table">
             <thead>
