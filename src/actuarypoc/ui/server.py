@@ -48,6 +48,8 @@ from actuarypoc.storage.postgres_client import (
     record_document_upload,
     record_filing_rule_evidence,
     record_product_model_review_decision,
+    record_mechanic_patch_approval,
+    list_mechanic_patch_approvals,
     update_product_model_review_bundle,
     upsert_product_review_draft,
 )
@@ -437,6 +439,14 @@ class ProductScenariosAIGenerateRequest(BaseModel):  # type: ignore[misc]
     model: Optional[str] = None
     feedback: Optional[str] = None
     previous: Optional[List[Dict[str, Any]]] = None
+
+
+class MechanicPatchApprovalRequest(BaseModel):  # type: ignore[misc]
+    productCode: str
+    dslPath: str
+    patchStatus: str  # "approved" | "rejected"
+    reviewer: Optional[str] = None
+    comments: Optional[str] = None
 
 
 class ScenarioConfig(BaseModel):  # type: ignore[misc]
@@ -3272,6 +3282,23 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
             product_block["code"],
             dsl_paths=["meta.policy_fee"],
         )
+        # Attach latest approval metadata per dslPath when available so
+        # the UI can show whether a proposed patch has been reviewed.
+        approvals = list_mechanic_patch_approvals(product_block["code"]) or []
+        approvals_by_path: Dict[str, Dict[str, Any]] = {}
+        for row in approvals:
+            path = str(row.get("dsl_path") or "")
+            if path and path not in approvals_by_path:
+                approvals_by_path[path] = row
+        for patch in mechanics_patches:
+            path = str(patch.get("dslPath") or "")
+            info = approvals_by_path.get(path)
+            if not info:
+                continue
+            patch["approvalStatus"] = info.get("patch_status")
+            patch["approvalReviewer"] = info.get("reviewer")
+            patch["approvalReviewedAt"] = info.get("reviewed_at")
+            patch["approvalComments"] = info.get("comments")
     except Exception:
         mechanics_payload = []
         mechanics_checks = []
@@ -6220,6 +6247,82 @@ def api_get_product_mechanics(product_code: str) -> Dict[str, Any]:
         payload = []
 
     return {"productCode": code, "mechanics": payload}
+
+
+@app.post("/api/product-mechanics/patch-approval")
+def api_product_mechanics_patch_approval(payload: MechanicPatchApprovalRequest) -> Dict[str, Any]:
+    """Record an approval or rejection for a mechanics-derived DSL patch.
+
+    Mechanics Patch Approval v0.1 is intentionally limited:
+
+    - It only records human intent (approved/rejected) for a given
+      productCode + dslPath, based on the current mechanics-derived
+      patch preview.
+    - It does *not* modify DSL files or affect projection behaviour.
+    """
+
+    code = (payload.productCode or "").strip().upper()
+    if not code:
+        raise HTTPException(status_code=400, detail="productCode is required")
+
+    dsl_path = (payload.dslPath or "").strip()
+    if not dsl_path:
+        raise HTTPException(status_code=400, detail="dslPath is required")
+
+    patch_status = (payload.patchStatus or "").strip().lower()
+    if patch_status not in {"approved", "rejected"}:
+        raise HTTPException(status_code=400, detail="patchStatus must be 'approved' or 'rejected'")
+
+    reviewer = (payload.reviewer or "").strip() or None
+    comments = (payload.comments or "").strip() or None
+
+    # Derive the current patch preview for this (product, path) so that
+    # the stored approval always reflects the same values shown in the
+    # UI, rather than trusting client-side copies.
+    preview = build_dsl_patch_preview_from_mechanics(code, [dsl_path])
+    if not preview:
+        raise HTTPException(status_code=400, detail="No mechanics patch preview available for this path.")
+
+    frag = preview[0] or {}
+    current_value = frag.get("currentValue")
+    proposed_value = frag.get("proposedValue")
+    source_mechanic_id = frag.get("sourceMechanicId")
+    source_mechanic_name = frag.get("sourceMechanicName")
+
+    rec = record_mechanic_patch_approval(
+        product_code=code,
+        dsl_path=dsl_path,
+        source_mechanic_id=source_mechanic_id,
+        source_mechanic_name=source_mechanic_name,
+        patch_status=patch_status,
+        reviewer=reviewer,
+        comments=comments,
+        current_value=current_value,
+        proposed_value=proposed_value,
+    )
+
+    if rec is None:
+        # Postgres is optional; when unavailable we still return a
+        # best-effort acknowledgement so the UI does not break.
+        return {
+            "productCode": code,
+            "dslPath": dsl_path,
+            "patchStatus": patch_status,
+            "reviewer": reviewer,
+            "comments": comments,
+            "reviewedAt": None,
+            "persisted": False,
+        }
+
+    return {
+        "productCode": rec.get("product_code"),
+        "dslPath": rec.get("dsl_path"),
+        "patchStatus": rec.get("patch_status"),
+        "reviewer": rec.get("reviewer"),
+        "comments": rec.get("comments"),
+        "reviewedAt": rec.get("reviewed_at"),
+        "persisted": True,
+    }
 
 
 def _build_product_review_payload(product_code: str) -> Dict[str, Any]:

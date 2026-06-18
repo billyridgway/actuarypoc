@@ -454,6 +454,10 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
         ? String(selectedInputs.faceAmount)
         : null;
 
+  const [patchComments, setPatchComments] = React.useState<{ [path: string]: string }>({});
+  const [patchSubmitting, setPatchSubmitting] = React.useState<{ [path: string]: boolean }>({});
+  const [patchError, setPatchError] = React.useState<string | null>(null);
+
   // Simple, MVP-only Final Actuary Decision form state.
   const [reviewer, setReviewer] = React.useState("");
   const [decision, setDecision] = React.useState("");
@@ -664,6 +668,41 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
       setSaveError(err?.message || "Failed to save decision.");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handlePatchApproval = async (dslPath: string, status: "approved" | "rejected") => {
+    const code = (product?.code || "").trim().toUpperCase();
+    if (!code) {
+      setPatchError("Missing product code for patch approval.");
+      return;
+    }
+
+    setPatchSubmitting((prev) => ({ ...prev, [dslPath]: true }));
+    setPatchError(null);
+    try {
+      const body = {
+        productCode: code,
+        dslPath,
+        patchStatus: status,
+        reviewer: lastDecision?.reviewer || reviewer || undefined,
+        comments: patchComments[dslPath] || undefined,
+      };
+      const res = await fetch("/api/product-mechanics/patch-approval", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || `HTTP ${res.status}`);
+      }
+      // Reload to pick up latest approval state in the patch preview.
+      window.location.reload();
+    } catch (e: any) {
+      setPatchError(e?.message || "Failed to record patch approval.");
+    } finally {
+      setPatchSubmitting((prev) => ({ ...prev, [dslPath]: false }));
     }
   };
 
@@ -2587,6 +2626,13 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
               </tr>
             </thead>
             <tbody>
+              {patchError && (
+                <tr>
+                  <td colSpan={7}>
+                    <p className="error">{patchError}</p>
+                  </td>
+                </tr>
+              )}
               {review.mechanicsDslPatchPreview.patches.map((p) => (
                 <tr key={p.dslPath}>
                   <td>
@@ -2613,7 +2659,49 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                       <span className="muted">(none)</span>
                     )}
                   </td>
-                  <td className="muted">{p.message || ""}</td>
+                  <td>
+                    <div className="muted" style={{ marginBottom: "0.5rem" }}>
+                      {p.message || ""}
+                    </div>
+                    {p.approvalStatus && (
+                      <div className="muted" style={{ fontSize: "0.85rem", marginBottom: "0.5rem" }}>
+                        Approval: {p.approvalStatus} by {p.approvalReviewer || "(unknown)"} at {p.approvalReviewedAt || "(time unknown)"}
+                        {p.approvalComments && <>
+                          <br />Comment: {p.approvalComments}
+                        </>}
+                      </div>
+                    )}
+                    <div className="form-row" style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
+                      <textarea
+                        rows={2}
+                        placeholder="Optional approval comment"
+                        value={patchComments[p.dslPath] || ""}
+                        onChange={(e) =>
+                          setPatchComments((prev) => ({
+                            ...prev,
+                            [p.dslPath]: e.target.value,
+                          }))
+                        }
+                      />
+                      <div>
+                        <button
+                          type="button"
+                          onClick={() => handlePatchApproval(p.dslPath, "approved")}
+                          disabled={patchSubmitting[p.dslPath] === true}
+                          style={{ marginRight: "0.25rem" }}
+                        >
+                          {patchSubmitting[p.dslPath] ? "Approving…" : "Approve"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handlePatchApproval(p.dslPath, "rejected")}
+                          disabled={patchSubmitting[p.dslPath] === true}
+                        >
+                          {patchSubmitting[p.dslPath] ? "Rejecting…" : "Reject"}
+                        </button>
+                      </div>
+                    </div>
+                  </td>
                 </tr>
               ))}
             </tbody>

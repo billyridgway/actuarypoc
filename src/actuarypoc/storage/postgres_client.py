@@ -156,6 +156,23 @@ CREATE TABLE IF NOT EXISTS filing_rule_evidence (
 CREATE INDEX IF NOT EXISTS idx_filing_rule_evidence_product_filing
     ON filing_rule_evidence(product_code, filing_id);
 
+CREATE TABLE IF NOT EXISTS mechanic_patch_approvals (
+    id bigserial PRIMARY KEY,
+    product_code text NOT NULL,
+    dsl_path text NOT NULL,
+    source_mechanic_id text,
+    source_mechanic_name text,
+    patch_status text NOT NULL,
+    reviewer text,
+    comments text,
+    current_value jsonb,
+    proposed_value jsonb,
+    reviewed_at timestamptz DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_mechanic_patch_approvals_product_dsl
+    ON mechanic_patch_approvals(product_code, dsl_path);
+
 -- Backfill columns for extended Product Model Review decision context
 ALTER TABLE product_model_review_decisions
     ADD COLUMN IF NOT EXISTS filing_id text;
@@ -544,6 +561,132 @@ def record_document_upload(
     except Exception as exc:  # noqa: BLE001
         _note_failure(exc)
         return None
+
+
+def record_mechanic_patch_approval(
+    *,
+    product_code: str,
+    dsl_path: str,
+    source_mechanic_id: Optional[str],
+    source_mechanic_name: Optional[str],
+    patch_status: str,
+    reviewer: Optional[str],
+    comments: Optional[str],
+    current_value: Any,
+    proposed_value: Any,
+) -> Optional[Dict[str, Any]]:
+    """Persist a single mechanics-derived DSL patch approval decision.
+
+    This is intentionally MVP-only and does not attempt to enforce
+    uniqueness per (product_code, dsl_path); callers are expected to use
+    the latest record when summarising approval state.
+    """
+
+    ensure_schema()
+    try:
+        with _conn() as conn:
+            if conn is None:
+                return None
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO mechanic_patch_approvals (
+                        product_code,
+                        dsl_path,
+                        source_mechanic_id,
+                        source_mechanic_name,
+                        patch_status,
+                        reviewer,
+                        comments,
+                        current_value,
+                        proposed_value
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
+                    RETURNING id, product_code, dsl_path, source_mechanic_id,
+                              source_mechanic_name, patch_status, reviewer,
+                              comments, current_value, proposed_value,
+                              reviewed_at
+                    """,
+                    (
+                        product_code,
+                        dsl_path,
+                        source_mechanic_id,
+                        source_mechanic_name,
+                        patch_status,
+                        reviewer,
+                        comments,
+                        json.dumps(current_value) if current_value is not None else "null",
+                        json.dumps(proposed_value) if proposed_value is not None else "null",
+                    ),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                return {
+                    "id": row[0],
+                    "product_code": row[1],
+                    "dsl_path": row[2],
+                    "source_mechanic_id": row[3],
+                    "source_mechanic_name": row[4],
+                    "patch_status": row[5],
+                    "reviewer": row[6],
+                    "comments": row[7],
+                    "current_value": row[8],
+                    "proposed_value": row[9],
+                    "reviewed_at": row[10],
+                }
+    except Exception as exc:  # noqa: BLE001
+        _note_failure(exc)
+        return None
+
+
+def list_mechanic_patch_approvals(product_code: str) -> List[Dict[str, Any]]:
+    """Return all mechanic patch approvals for a product.
+
+    Results are ordered by reviewed_at descending so the first row per
+    (product_code, dsl_path) is the latest decision.
+    """
+
+    ensure_schema()
+    try:
+        with _conn() as conn:
+            if conn is None:
+                return []
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, product_code, dsl_path, source_mechanic_id,
+                           source_mechanic_name, patch_status, reviewer,
+                           comments, current_value, proposed_value,
+                           reviewed_at
+                      FROM mechanic_patch_approvals
+                     WHERE product_code = %s
+                     ORDER BY reviewed_at DESC
+                    """,
+                    (product_code,),
+                )
+                rows = cur.fetchall() or []
+                out: List[Dict[str, Any]] = []
+                for row in rows:
+                    out.append(
+                        {
+                            "id": row[0],
+                            "product_code": row[1],
+                            "dsl_path": row[2],
+                            "source_mechanic_id": row[3],
+                            "source_mechanic_name": row[4],
+                            "patch_status": row[5],
+                            "reviewer": row[6],
+                            "comments": row[7],
+                            "current_value": row[8],
+                            "proposed_value": row[9],
+                            "reviewed_at": row[10],
+                        }
+                    )
+                return out
+    except Exception as exc:  # noqa: BLE001
+        _note_failure(exc)
+        return []
 
 
 def relabel_documents_product(old_product_id: str, new_product_id: str) -> int:
