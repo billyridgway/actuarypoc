@@ -1,0 +1,174 @@
+{
+  "product_code": "P12TRF",
+  "mechanics": [
+    {
+      "id": "p12trf_premium",
+      "product_code": "P12TRF",
+      "name": "Premium",
+      "type": "charge",
+      "description": "Total premium paid by the policyowner, including both base mortality charges and policy fees, over the selected level term period.",
+      "filing_sources": [
+        {
+          "id": "p12trf_actuarial_memo_premium",
+          "document_hint": "ICC12_P12TRF_Actuarial_Memo.pdf",
+          "page": "Premium tables section",
+          "snippet": "Annual premium per $1,000 by issue age, gender, risk class, and level term period.",
+          "confidence": 0.9
+        }
+      ],
+      "dsl_refs": [
+        {
+          "id": "dsl.meta.premium_structure",
+          "file": "dsl/examples/p12trf_term.yaml",
+          "path": "meta.premium_structure",
+          "description": "Defines how premiums depend on issue age, gender, risk class, face band, and level period."
+        },
+        {
+          "id": "dsl.charges.risk_premium",
+          "file": "dsl/examples/p12trf_term.yaml",
+          "path": "charges[risk_premium]",
+          "description": "Risk premium charge per $1,000 of insurance driven by mortality assumptions."
+        }
+      ],
+      "upstream_ids": [
+        "p12trf_level_term_period"
+      ],
+      "downstream_ids": [
+        "p12trf_death_benefit"
+      ],
+      "confidence": 0.9
+    },
+    {
+      "id": "p12trf_level_term_period",
+      "product_code": "P12TRF",
+      "name": "Level Term Period",
+      "type": "structure",
+      "description": "Number of years during which premiums are level and death benefit remains in force under the P12TRF term contract.",
+      "filing_sources": [
+        {
+          "id": "p12trf_actuarial_memo_term_periods",
+          "document_hint": "ICC12_P12TRF_Actuarial_Memo.pdf",
+          "page": "Product description / level periods",
+          "snippet": "Level premium periods of 10, 15, 20, and 30 years are available.",
+          "confidence": 0.9
+        }
+      ],
+      "dsl_refs": [
+        {
+          "id": "dsl.meta.level_premium_durations",
+          "file": "dsl/examples/p12trf_term.yaml",
+          "path": "meta.level_premium_durations",
+          "description": "Configured level premium durations [10, 15, 20, 30]."
+        },
+        {
+          "id": "dsl.meta.issue_ages",
+          "file": "dsl/examples/p12trf_term.yaml",
+          "path": "meta.issue_ages",
+          "description": "Issue age ranges by level period."
+        }
+      ],
+      "upstream_ids": [],
+      "downstream_ids": [
+        "p12trf_premium",
+        "p12trf_death_benefit",
+        "p12trf_conversion_privilege"
+      ],
+      "confidence": 0.9
+    },
+    {
+      "id": "p12trf_policy_fee",
+      "product_code": "P12TRF",
+      "name": "Monthly Policy Fee",
+      "type": "charge",
+      "description": "Flat per-policy fee charged each period, within the range described in the Statement of Variability.",
+      "filing_sources": [
+        {
+          "id": "p12trf_sov_policy_fee",
+          "document_hint": "P12TRF_Statement_of_Variability.pdf",
+          "page": "Policy fee description",
+          "snippet": "A uniform per-policy fee between $0 and $120 may be charged in all years.",
+          "confidence": 0.85
+        }
+      ],
+      "dsl_refs": [
+        {
+          "id": "dsl.meta.policy_fee",
+          "file": "dsl/examples/p12trf_term.yaml",
+          "path": "meta.policy_fee",
+          "description": "Policy fee configuration (min, max, default)."
+        },
+        {
+          "id": "dsl.charges.policy_fee",
+          "file": "dsl/examples/p12trf_term.yaml",
+          "path": "charges[policy_fee]",
+          "description": "Policy fee charge applied in the projection engine."
+        }
+      ],
+      "upstream_ids": [],
+      "downstream_ids": [
+        "p12trf_premium"
+      ],
+      "confidence": 0.85
+    },
+    {
+      "id": "p12trf_death_benefit",
+      "product_code": "P12TRF",
+      "name": "Death Benefit During Term",
+      "type": "benefit",
+      "description": "Face amount paid if the insured dies while the policy is in force and before the end of the level term period.",
+      "filing_sources": [
+        {
+          "id": "p12trf_form_death_benefit",
+          "document_hint": "ICC12_P12TRF10_Policy_Form.pdf",
+          "page": "Death Benefit section",
+          "snippet": "If the Insured dies while this policy is in force and before the end of the level term period, we will pay the Face Amount shown on the Policy Schedule.",
+          "confidence": 0.95
+        }
+      ],
+      "dsl_refs": [
+        {
+          "id": "dsl.meta.maturity_age",
+          "file": "dsl/examples/p12trf_term.yaml",
+          "path": "meta.maturity_age",
+          "description": "Term to age 95 with no cash values; death benefit is payable during the level term.",
+          "valuePreview": null
+        }
+      ],
+      "upstream_ids": [
+        "p12trf_premium",
+        "p12trf_level_term_period"
+      ],
+      "downstream_ids": [],
+      "confidence": 0.95
+    },
+    {
+      "id": "p12trf_conversion_privilege",
+      "product_code": "P12TRF",
+      "name": "Conversion Privilege",
+      "type": "feature",
+      "description": "Right to convert the term policy to a permanent plan under certain conditions during the conversion period.",
+      "filing_sources": [
+        {
+          "id": "p12trf_form_conversion",
+          "document_hint": "ICC12_P12TRF10_Policy_Form.pdf",
+          "page": "Conversion provision",
+          "snippet": "This policy may be converted to a permanent plan of insurance subject to the terms described in the Conversion provision.",
+          "confidence": 0.8
+        }
+      ],
+      "dsl_refs": [
+        {
+          "id": "dsl.flags.convertible",
+          "file": "dsl/examples/p12trf_term.yaml",
+          "path": "flags.convertible",
+          "description": "Indicates the presence of a conversion feature in the product design."
+        }
+      ],
+      "upstream_ids": [
+        "p12trf_level_term_period"
+      ],
+      "downstream_ids": [],
+      "confidence": 0.8
+    }
+  ]
+}

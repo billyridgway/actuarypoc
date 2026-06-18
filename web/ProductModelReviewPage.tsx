@@ -131,6 +131,30 @@ export interface ProductModelReview {
     productDefinitionGeneratedAt?: string | null;
     latestDecisionCreatedAt?: string | null;
   };
+  productMechanics?: {
+    id: string;
+    product_code: string;
+    name: string;
+    type: string;
+    description: string;
+    confidence: number;
+    filing_sources: {
+      id: string;
+      document_hint: string;
+      page?: string | null;
+      snippet?: string | null;
+      confidence?: number | null;
+    }[];
+    dsl_refs: {
+      id: string;
+      file: string;
+      path: string;
+      description?: string | null;
+      valuePreview?: any;
+    }[];
+    upstream_ids: string[];
+    downstream_ids: string[];
+  }[];
   productDefinition?: {
     productCode?: string;
     filingId?: string;
@@ -2315,6 +2339,77 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
           })}
         </div>
       </section>
+
+      {review.productMechanics && review.productMechanics.length > 0 && (
+        <section className="card">
+          <h2>Product Mechanics (POC)</h2>
+          <p className="muted">
+            Curated view of key product mechanics for this product. Each mechanic links filings, semantics,
+            and DSL paths; this is the first step toward a Product Mechanics Graph.
+          </p>
+          <table className="kv-table">
+            <thead>
+              <tr>
+                <th>Mechanic</th>
+                <th>Type</th>
+                <th>Confidence</th>
+                <th>Filing evidence</th>
+                <th>DSL elements</th>
+              </tr>
+            </thead>
+            <tbody>
+              {review.productMechanics.map((m) => (
+                <tr key={m.id}>
+                  <td>
+                    <strong>{m.name}</strong>
+                    <br />
+                    <span className="muted" style={{ fontSize: "0.85rem" }}>
+                      {m.description}
+                    </span>
+                  </td>
+                  <td>{m.type}</td>
+                  <td>{(m.confidence * 100).toFixed(0)}%</td>
+                  <td>
+                    {m.filing_sources && m.filing_sources.length > 0 ? (
+                      <ul>
+                        {m.filing_sources.map((fs) => (
+                          <li key={fs.id}>
+                            <span>{fs.document_hint}</span>
+                            {fs.page && <span> ({fs.page})</span>}
+                            {fs.snippet && (
+                              <span className="muted"> – {fs.snippet}</span>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <span className="muted">No filing evidence recorded.</span>
+                    )}
+                  </td>
+                  <td>
+                    {m.dsl_refs && m.dsl_refs.length > 0 ? (
+                      <ul>
+                        {m.dsl_refs.map((dr) => (
+                          <li key={dr.id}>
+                            <code>{dr.file}</code>
+                            {": "}
+                            <code>{dr.path}</code>
+                            {dr.description && (
+                              <span className="muted"> – {dr.description}</span>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <span className="muted">No DSL links recorded.</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      )}
 
       <section className="card">
         <h2>Assumptions Requiring Approval (POC)</h2>

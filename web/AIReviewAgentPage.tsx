@@ -30,6 +30,7 @@ export const AIReviewAgentPage: React.FC = () => {
   const [products, setProducts] = useState<any[] | null>(null);
   const [uploadedDocs, setUploadedDocs] = useState<any[] | null>(null);
   const [initialProductCode, setInitialProductCode] = useState<string>("");
+  const [mechanics, setMechanics] = useState<any[] | null>(null);
 
   const normalisedCode = (productCode || "").trim();
   const normalisedFiling = (filingId || "").trim();
@@ -52,6 +53,30 @@ export const AIReviewAgentPage: React.FC = () => {
 
     void loadProducts();
   }, []);
+
+  useEffect(() => {
+    const loadMechanics = async () => {
+      const code = (productCode || "").trim().toUpperCase();
+      if (!code) {
+        setMechanics(null);
+        return;
+      }
+      try {
+        const res = await fetch(`/api/product-mechanics/${encodeURIComponent(code)}`);
+        if (!res.ok) {
+          setMechanics(null);
+          return;
+        }
+        const data = await res.json();
+        const list = Array.isArray(data?.mechanics) ? data.mechanics : [];
+        setMechanics(list.length > 0 ? list : null);
+      } catch {
+        setMechanics(null);
+      }
+    };
+
+    void loadMechanics();
+  }, [productCode]);
 
   const handleAutofillMetadata = async () => {
     if (!normalisedCode) {
@@ -653,6 +678,76 @@ export const AIReviewAgentPage: React.FC = () => {
             />
           </div>
         </div>
+      </section>
+
+      <section className="card">
+        <h2>2. Mechanics (Preview)</h2>
+        <p className="muted">
+          Curated mechanics for this product that connect filings, semantics, and DSL. For v0.1 this is
+          hand-maintained for P12TRF but represents the target "Product Mechanics" layer between filings
+          and DSL.
+        </p>
+        {mechanics && mechanics.length > 0 ? (
+          <table className="kv-table">
+            <thead>
+              <tr>
+                <th>Mechanic</th>
+                <th>Type</th>
+                <th>Confidence</th>
+                <th>Filing evidence</th>
+                <th>DSL elements</th>
+              </tr>
+            </thead>
+            <tbody>
+              {mechanics.map((m) => (
+                <tr key={m.id}>
+                  <td>
+                    <strong>{m.name}</strong>
+                    <br />
+                    <span className="muted" style={{ fontSize: "0.85rem" }}>
+                      {m.description}
+                    </span>
+                  </td>
+                  <td>{m.type}</td>
+                  <td>{(m.confidence * 100).toFixed(0)}%</td>
+                  <td>
+                    {m.filing_sources && m.filing_sources.length > 0 ? (
+                      <ul>
+                        {m.filing_sources.map((fs: any) => (
+                          <li key={fs.id}>
+                            <span>{fs.document_hint}</span>
+                            {fs.page && <span> ({fs.page})</span>}
+                            {fs.snippet && <span className="muted"> – {fs.snippet}</span>}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <span className="muted">No filing evidence recorded.</span>
+                    )}
+                  </td>
+                  <td>
+                    {m.dsl_refs && m.dsl_refs.length > 0 ? (
+                      <ul>
+                        {m.dsl_refs.map((dr: any) => (
+                          <li key={dr.id}>
+                            <code>{dr.file}</code>
+                            {": "}
+                            <code>{dr.path}</code>
+                            {dr.description && <span className="muted"> – {dr.description}</span>}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <span className="muted">No DSL links recorded.</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <p className="muted">No mechanics have been recorded for this product yet.</p>
+        )}
       </section>
 
       <section className="card">

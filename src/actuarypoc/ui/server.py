@@ -20,6 +20,7 @@ from actuarypoc.product_registry import get_product_definition
 from actuarypoc.storage.minio_client import ensure_bucket, get_minio_client, get_bucket_name
 from actuarypoc.config.assumptions import list_assumption_sets, approve_assumption_set
 from actuarypoc.dsl.policy_dsl import load_formula
+from actuarypoc.domain.product_mechanics import load_mechanics_for_product, mechanics_to_json
 from actuarypoc.projection.engine import ProjectionEngine
 from actuarypoc.projection.mortality import build_term23_surface
 from actuarypoc.projection.premium import PremiumLookupService, build_premium_table, load_premium_table_from_csv, select_face_band
@@ -3243,6 +3244,16 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
     # ProductDefinition validation.
     scenario_validation = _build_p12trf_scenario_validation(scen_and_rates["scenarios"])
 
+    # Advisory Product Mechanics Graph v0.1: for P12TRF we load a small
+    # curated mechanics set that links filings ↔ mechanics ↔ DSL. This is
+    # intentionally minimal and file-backed and should not break core PMR
+    # flows when unavailable.
+    try:
+        mechanics = load_mechanics_for_product(product_block["code"])
+        mechanics_payload = mechanics_to_json(mechanics)
+    except Exception:
+        mechanics_payload = []
+
     return {
         "product": product_block,
         "scope": scope,
@@ -3259,6 +3270,7 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
         "decisionHistory": decision_history,
         "decisionTimeline": decision_timeline,
         "reviewProgress": review_progress,
+        "productMechanics": mechanics_payload,
         "productDefinition": product_definition_summary,
         "productDefinitionBuild": product_definition_build,
         "productDefinitionValidation": product_definition_validation,
@@ -6150,6 +6162,28 @@ def api_product_scenarios_ai_generate(payload: ProductScenariosAIGenerateRequest
         raise HTTPException(status_code=500, detail=f"Failed to generate scenarios via OpenAI: {exc}") from exc
 
     return {"scenarios": scenarios}
+
+
+@app.get("/api/product-mechanics/{product_code}")
+def api_get_product_mechanics(product_code: str) -> Dict[str, Any]:
+    """Return ProductMechanic entries for a product (advisory only).
+
+    v0.1 supports a curated P12TRF mechanics file. For other products this
+    returns an empty mechanics list; callers should treat the response as a
+    best-effort preview, not a required contract.
+    """
+
+    code = (product_code or "").strip().upper()
+    if not code:
+        raise HTTPException(status_code=400, detail="product_code is required")
+
+    try:
+        mechanics = load_mechanics_for_product(code)
+        payload = mechanics_to_json(mechanics)
+    except Exception:
+        payload = []
+
+    return {"productCode": code, "mechanics": payload}
 
 
 def _build_product_review_payload(product_code: str) -> Dict[str, Any]:
