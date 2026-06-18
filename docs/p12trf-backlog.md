@@ -1,5 +1,12 @@
 # P12TRF Backlog
 
+> **Alignment note:** This backlog is scoped to the P12TRF slice but
+> should be read in the context of the
+> **Product Understanding Engine** vision in
+> `docs/vision/product-understanding-engine.md`. Items that deepen
+> product understanding from filings (mechanics, DSL, traceability)
+> should be prioritised over pure workflow or cosmetic work.
+
 ## P12TRF Product Model Review – MVP Validation
 
 Short validation note for the P12TRF Product Model Review MVP slice:

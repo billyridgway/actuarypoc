@@ -2,6 +2,11 @@
 
 > Status: **Draft**, grounded in current code (2026‑05‑29). Future / planned
 > components are explicitly labeled as such.
+>
+> **Strategic context:** This architecture sits under the long-lived
+> **Product Understanding Engine** vision documented in
+> `docs/vision/product-understanding-engine.md`. Roadmap and design
+> changes should be evaluated against that vision first.
 
 This document describes the current architecture of the Insurance
 Illustration Platform as implemented by the **ActuaryPOC** backend and the
