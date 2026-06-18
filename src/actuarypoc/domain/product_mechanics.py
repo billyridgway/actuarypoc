@@ -46,6 +46,12 @@ class ProductMechanic:
     filing_sources: List[FilingSource]
     dsl_refs: List[MechanicDslRef]
 
+    # Optional expectations for specific DSL paths, keyed by the same
+    # dotted path used in MechanicDslRef.path (e.g. "meta.policy_fee").
+    # When present, these expectations can be validated against the
+    # executable DSL.
+    expected: Optional[Dict[str, Any]] = None
+
     upstream_ids: List[str]
     downstream_ids: List[str]
 
@@ -131,6 +137,13 @@ def load_mechanics_for_product(product_code: str) -> List[ProductMechanic]:
             except Exception:
                 continue
 
+        expected_raw = raw.get("expected") if isinstance(raw, dict) else None
+        expected: Optional[Dict[str, Any]]
+        if isinstance(expected_raw, dict):
+            expected = expected_raw
+        else:
+            expected = None
+
         try:
             mech = ProductMechanic(
                 id=str(raw.get("id")),
@@ -140,6 +153,7 @@ def load_mechanics_for_product(product_code: str) -> List[ProductMechanic]:
                 description=str(raw.get("description")),
                 filing_sources=fs_list,
                 dsl_refs=dsl_list,
+                expected=expected,
                 upstream_ids=[str(x) for x in (raw.get("upstream_ids") or [])],
                 downstream_ids=[str(x) for x in (raw.get("downstream_ids") or [])],
                 confidence=float(raw.get("confidence", 0.8)),
@@ -160,3 +174,161 @@ def mechanics_to_json(mechanics: List[ProductMechanic]) -> List[Dict[str, Any]]:
     """
 
     return [asdict(m) for m in mechanics]
+
+
+def _resolve_dsl_path(formula: Any, path: str) -> Any:
+    """Best-effort resolve a dotted DSL path against a loaded formula.
+
+    v0.1 intentionally supports a very small subset of paths used by
+    mechanics expectations, primarily under ``meta.*``. Unknown or
+    unresolvable paths return a sentinel value ``_MISSING`` so callers
+    can distinguish "missing" from ``None``.
+    """
+
+    # Sentinel for missing values
+    _MISSING = object()
+
+    if not isinstance(path, str) or not path:
+        return _MISSING
+
+    # Meta paths: meta.foo or meta.foo.bar
+    if path.startswith("meta."):
+        meta = getattr(formula, "meta", None) or {}
+        if not isinstance(meta, dict):
+            return _MISSING
+        current: Any = meta
+        for part in path.split(".")[1:]:
+            if not isinstance(current, dict):
+                return _MISSING
+            if part not in current:
+                return _MISSING
+            current = current[part]
+        return current
+
+    # Flags or other fields can be added later; for now treat as missing.
+    return _MISSING
+
+
+def validate_mechanics_against_dsl(product_code: str) -> List[Dict[str, Any]]:
+    """Validate mechanics expectations against the current DSL.
+
+    This is **Mechanics Validation v0.1**: mechanics remain advisory but
+    act as a contract against executable DSL fields. The function is
+    product-agnostic; it relies on mechanics + DSL fixtures being
+    present for the given product_code.
+    """
+
+    from actuarypoc.dsl.policy_dsl import load_formula  # local import to avoid cycles
+
+    checks: List[Dict[str, Any]] = []
+    mechanics = load_mechanics_for_product(product_code)
+    if not mechanics:
+        return checks
+
+    # Pre-load formulas per DSL file to avoid repeated disk I/O.
+    formula_cache: Dict[str, Any] = {}
+
+    for mech in mechanics:
+        expected = mech.expected or {}
+        if not isinstance(expected, dict):
+            # Mechanic has no expectations; emit an informational check
+            # so UIs can show that validation is incomplete.
+            checks.append(
+                {
+                    "mechanicId": mech.id,
+                    "mechanicName": mech.name,
+                    "dslFile": None,
+                    "dslPath": None,
+                    "status": "mechanic_expected_missing",
+                    "expectedValue": None,
+                    "actualValue": None,
+                    "message": "Mechanic has DSL refs but no expected values configured.",
+                }
+            )
+            continue
+
+        for dsl_path, expected_value in expected.items():
+            # Find a DSL ref that matches this path so we know which file
+            # to load. When multiple refs share a path, we arbitrarily
+            # pick the first.
+            ref = None
+            for r in mech.dsl_refs:
+                if r.path == dsl_path:
+                    ref = r
+                    break
+
+            if ref is None:
+                checks.append(
+                    {
+                        "mechanicId": mech.id,
+                        "mechanicName": mech.name,
+                        "dslFile": None,
+                        "dslPath": dsl_path,
+                        "status": "dsl_missing",
+                        "expectedValue": expected_value,
+                        "actualValue": None,
+                        "message": "No DSL reference found for expected path on this mechanic.",
+                    }
+                )
+                continue
+
+            dsl_file = ref.file
+            try:
+                if dsl_file not in formula_cache:
+                    formula_cache[dsl_file] = load_formula(str(_PROJECT_ROOT / dsl_file))
+                formula = formula_cache[dsl_file]
+                actual_value = _resolve_dsl_path(formula, dsl_path)
+            except Exception as exc:  # defensive; should not break PMR
+                checks.append(
+                    {
+                        "mechanicId": mech.id,
+                        "mechanicName": mech.name,
+                        "dslFile": dsl_file,
+                        "dslPath": dsl_path,
+                        "status": "error",
+                        "expectedValue": expected_value,
+                        "actualValue": None,
+                        "message": f"Error while loading DSL or resolving path: {exc}",
+                    }
+                )
+                continue
+
+            _MISSING = object()
+            if actual_value is _MISSING:
+                checks.append(
+                    {
+                        "mechanicId": mech.id,
+                        "mechanicName": mech.name,
+                        "dslFile": dsl_file,
+                        "dslPath": dsl_path,
+                        "status": "dsl_missing",
+                        "expectedValue": expected_value,
+                        "actualValue": None,
+                        "message": "DSL path could not be resolved for this mechanic.",
+                    }
+                )
+                continue
+
+            # Shallow equality comparison is sufficient for v0.1 because
+            # expected values are shaped to match the DSL meta structures.
+            if actual_value == expected_value:
+                status = "ok"
+                message = "Mechanic expected value matches DSL."
+            else:
+                status = "mismatch"
+                message = "Mechanic expected value differs from DSL."
+
+            checks.append(
+                {
+                    "mechanicId": mech.id,
+                    "mechanicName": mech.name,
+                    "dslFile": dsl_file,
+                    "dslPath": dsl_path,
+                    "status": status,
+                    "expectedValue": expected_value,
+                    "actualValue": actual_value,
+                    "message": message,
+                }
+            )
+
+    return checks

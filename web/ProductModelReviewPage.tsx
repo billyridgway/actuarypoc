@@ -155,6 +155,19 @@ export interface ProductModelReview {
     upstream_ids: string[];
     downstream_ids: string[];
   }[];
+  mechanicsValidation?: {
+    productCode: string;
+    checks: {
+      mechanicId: string;
+      mechanicName: string;
+      dslFile: string | null;
+      dslPath: string | null;
+      status: string;
+      expectedValue?: any;
+      actualValue?: any;
+      message?: string;
+    }[];
+  } | null;
   productDefinition?: {
     productCode?: string;
     filingId?: string;
@@ -2406,6 +2419,66 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                       <span className="muted">No DSL links recorded.</span>
                     )}
                   </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      )}
+
+      {review.mechanicsValidation && review.mechanicsValidation.checks && review.mechanicsValidation.checks.length > 0 && (
+        <section className="card">
+          <h2>Mechanics vs DSL Consistency</h2>
+          <p className="muted">
+            Comparison between Product Mechanics expectations and the current executable DSL fields. This is
+            Mechanics Validation v0.1 and is advisory: mismatches are surfaced as review warnings, not blockers.
+          </p>
+          <table className="kv-table">
+            <thead>
+              <tr>
+                <th>Mechanic</th>
+                <th>DSL path</th>
+                <th>Status</th>
+                <th>Expected</th>
+                <th>Actual</th>
+                <th>Details</th>
+              </tr>
+            </thead>
+            <tbody>
+              {review.mechanicsValidation.checks.map((c) => (
+                <tr key={`${c.mechanicId || ""}:${c.dslPath || ""}`}>
+                  <td>{c.mechanicName || c.mechanicId}</td>
+                  <td>
+                    {c.dslFile && c.dslPath ? (
+                      <>
+                        <code>{c.dslFile}</code>
+                        {": "}
+                        <code>{c.dslPath}</code>
+                      </>
+                    ) : (
+                      <span className="muted">(no DSL mapping)</span>
+                    )}
+                  </td>
+                  <td>{c.status}</td>
+                  <td>
+                    {c.expectedValue !== undefined ? (
+                      <pre style={{ whiteSpace: "pre-wrap", margin: 0 }}>
+                        {JSON.stringify(c.expectedValue, null, 2)}
+                      </pre>
+                    ) : (
+                      <span className="muted">(none)</span>
+                    )}
+                  </td>
+                  <td>
+                    {c.actualValue !== undefined ? (
+                      <pre style={{ whiteSpace: "pre-wrap", margin: 0 }}>
+                        {JSON.stringify(c.actualValue, null, 2)}
+                      </pre>
+                    ) : (
+                      <span className="muted">(none)</span>
+                    )}
+                  </td>
+                  <td className="muted">{c.message || ""}</td>
                 </tr>
               ))}
             </tbody>

@@ -133,6 +133,13 @@
           "description": "Structured definition of face amount bands."
         }
       ],
+      "expected": {
+        "meta.face_bands": [
+          { "band": 1, "min": 0, "max": 999999 },
+          { "band": 2, "min": 1000000, "max": 2999999 },
+          { "band": 3, "min": 3000000, "max": null }
+        ]
+      },
       "upstream_ids": [
         "p12trf_face_amount"
       ],
@@ -310,6 +317,13 @@
           "description": "Policy fee charge applied in the projection engine."
         }
       ],
+      "expected": {
+        "meta.policy_fee": {
+          "min": 0,
+          "max": 120,
+          "default": 65
+        }
+      },
       "upstream_ids": [],
       "downstream_ids": [
         "p12trf_premium"

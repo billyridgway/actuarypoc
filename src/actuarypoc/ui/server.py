@@ -20,7 +20,11 @@ from actuarypoc.product_registry import get_product_definition
 from actuarypoc.storage.minio_client import ensure_bucket, get_minio_client, get_bucket_name
 from actuarypoc.config.assumptions import list_assumption_sets, approve_assumption_set
 from actuarypoc.dsl.policy_dsl import load_formula
-from actuarypoc.domain.product_mechanics import load_mechanics_for_product, mechanics_to_json
+from actuarypoc.domain.product_mechanics import (
+    load_mechanics_for_product,
+    mechanics_to_json,
+    validate_mechanics_against_dsl,
+)
 from actuarypoc.projection.engine import ProjectionEngine
 from actuarypoc.projection.mortality import build_term23_surface
 from actuarypoc.projection.premium import PremiumLookupService, build_premium_table, load_premium_table_from_csv, select_face_band
@@ -3252,8 +3256,10 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
     try:
         mechanics = load_mechanics_for_product(product_block["code"])
         mechanics_payload = mechanics_to_json(mechanics)
+        mechanics_checks = validate_mechanics_against_dsl(product_block["code"])
     except Exception:
         mechanics_payload = []
+        mechanics_checks = []
 
     return {
         "product": product_block,
@@ -3272,6 +3278,10 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
         "decisionTimeline": decision_timeline,
         "reviewProgress": review_progress,
         "productMechanics": mechanics_payload,
+        "mechanicsValidation": {
+            "productCode": product_block["code"],
+            "checks": mechanics_checks,
+        },
         "productDefinition": product_definition_summary,
         "productDefinitionBuild": product_definition_build,
         "productDefinitionValidation": product_definition_validation,
