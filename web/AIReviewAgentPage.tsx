@@ -1100,19 +1100,63 @@ export const AIReviewAgentPage: React.FC = () => {
             {assumptionDslPreview.mechanicAssumptions &&
               assumptionDslPreview.mechanicAssumptions.length > 0 && (
                 <div style={{ marginBottom: "0.75rem" }}>
-                  <h4>Mechanics-informed assumption placeholders</h4>
+                  <h4>Mechanics-informed extracted assumptions</h4>
                   <p className="muted">
-                    These are not executable DSL yet. They highlight which assumption areas need values,
-                    formulas, and tables, based on the approved Product Mechanics for this product.
+                    These assumptions are extracted from the filings using the approved Product Mechanics as
+                    anchors. They are not executable DSL yet.
                   </p>
-                  <ul>
-                    {assumptionDslPreview.mechanicAssumptions.map((ma: any) => (
-                      <li key={ma.mechanicId}>
-                        <strong>{ma.name}</strong>
-                        {ma.type && <span className="muted"> ({ma.type})</span>}: {ma.assumptionNotes}
-                      </li>
-                    ))}
-                  </ul>
+                  <table className="kv-table">
+                    <thead>
+                      <tr>
+                        <th>Mechanic</th>
+                        <th>Filing evidence</th>
+                        <th>Extracted assumptions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {assumptionDslPreview.mechanicAssumptions.map((ma: any) => (
+                        <tr key={ma.mechanicId}>
+                          <td>
+                            <strong>{ma.name}</strong>
+                            {ma.type && <span className="muted"> ({ma.type})</span>}
+                            {ma.description && (
+                              <>
+                                <br />
+                                <span className="muted" style={{ fontSize: "0.85rem" }}>
+                                  {ma.description}
+                                </span>
+                              </>
+                            )}
+                          </td>
+                          <td>
+                            {ma.filingSources && ma.filingSources.length > 0 ? (
+                              <ul>
+                                {ma.filingSources.map((fs: any, idx: number) => (
+                                  <li key={fs.id || `${idx}-${fs.document_hint}`}> 
+                                    <span>{fs.document_hint}</span>
+                                    {fs.page && <span> (p. {fs.page})</span>}
+                                  </li>
+                                ))}
+                              </ul>
+                            ) : (
+                              <span className="muted">No filing evidence recorded.</span>
+                            )}
+                          </td>
+                          <td>
+                            {ma.assumptions && ma.assumptions.length > 0 ? (
+                              <ul>
+                                {ma.assumptions.map((a: string, idx: number) => (
+                                  <li key={idx}>{a}</li>
+                                ))}
+                              </ul>
+                            ) : (
+                              <span className="muted">No assumptions extracted yet.</span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
               )}
 
