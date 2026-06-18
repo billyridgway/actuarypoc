@@ -57,20 +57,22 @@ class ProductMechanic:
 
     confidence: float = 0.8
 
+    # Provenance/status hints; for v0.1 these are primarily used by the
+    # mechanics discovery flow so that UIs can distinguish AI-extracted
+    # candidate mechanics from hand-curated ones.
+    source: Optional[str] = None  # e.g. "ai_extracted", "manual"
+    status: Optional[str] = None  # e.g. "candidate", "approved"
+
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _mechanics_fixture_path_for_product(product_code: str) -> Optional[Path]:
-    """Return the mechanics JSON fixture path for a given product.
+    """Return the local mechanics JSON fixture path for a product.
 
-    v0.1 uses a simple convention-only lookup:
-
-        examples/{product_code_lower}_mechanics.json
-
-    For example, P12TRF uses ``examples/p12trf_mechanics.json``. If no
-    mechanics file exists yet for a product, callers should treat that as
-    "not populated yet", not "unsupported".
+    This is primarily for the P12TRF reference fixture under
+    ``examples/p12trf_mechanics.json``. New products should prefer the
+    MinIO-backed approved mechanics registry instead of repo fixtures.
     """
 
     code = (product_code or "").strip()
@@ -81,22 +83,61 @@ def _mechanics_fixture_path_for_product(product_code: str) -> Optional[Path]:
 
 
 def load_mechanics_for_product(product_code: str) -> List[ProductMechanic]:
-    """Load ProductMechanic entries for a product from a JSON fixture.
+    """Load ProductMechanic entries for a product.
+
+    Resolution order (v0.1):
+
+    1. MinIO-backed approved mechanics registry at
+       ``mechanics/{product_code}/approved.json``.
+    2. Local examples fixture under
+       ``examples/{product_code_lower}_mechanics.json`` (primarily for
+       the P12TRF reference).
 
     Failures are treated as "no mechanics" rather than errors: this
     layer is advisory and should not break core flows.
     """
 
-    path = _mechanics_fixture_path_for_product(product_code)
-    if path is None or not path.exists():
+    code = (product_code or "").strip().upper()
+    if not code:
         return []
 
+    # 1. MinIO-backed approved registry
+    items: List[Dict[str, Any]] = []
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return []
+        from actuarypoc.storage.minio_client import get_minio_client, get_bucket_name
 
-    items = data.get("mechanics") or []
+        client = get_minio_client()
+        bucket = get_bucket_name()
+        object_name = f"mechanics/{code}/approved.json"
+        try:
+            resp = client.get_object(bucket, object_name)
+        except Exception:
+            resp = None
+        if resp is not None:
+            try:
+                payload = resp.read().decode("utf-8")
+                data = json.loads(payload)
+                items = data.get("mechanics") or []
+            finally:
+                try:
+                    resp.close()
+                    resp.release_conn()
+                except Exception:
+                    pass
+    except Exception:
+        items = []
+
+    # 2. Local fixture fallback when no approved mechanics exist.
+    if not items:
+        path = _mechanics_fixture_path_for_product(code)
+        if path is None or not path.exists():
+            return []
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        items = data.get("mechanics") or []
+
     mechanics: List[ProductMechanic] = []
 
     for raw in items:
@@ -157,6 +198,8 @@ def load_mechanics_for_product(product_code: str) -> List[ProductMechanic]:
                 upstream_ids=[str(x) for x in (raw.get("upstream_ids") or [])],
                 downstream_ids=[str(x) for x in (raw.get("downstream_ids") or [])],
                 confidence=float(raw.get("confidence", 0.8)),
+                source=str(raw.get("source")) if raw.get("source") is not None else None,
+                status=str(raw.get("status")) if raw.get("status") is not None else None,
             )
         except Exception:
             continue
@@ -174,6 +217,41 @@ def mechanics_to_json(mechanics: List[ProductMechanic]) -> List[Dict[str, Any]]:
     """
 
     return [asdict(m) for m in mechanics]
+
+
+def save_mechanics_to_minio(product_code: str, mechanics: List[ProductMechanic], *, kind: str = "approved") -> None:
+    """Persist a mechanics set for a product into MinIO.
+
+    ``kind`` is "approved" or "candidates"; for candidates we always
+    write to a ``latest.json`` object per product.
+    """
+
+    from actuarypoc.storage.minio_client import get_minio_client, get_bucket_name, ensure_bucket
+
+    code = (product_code or "").strip().upper()
+    if not code:
+        return
+
+    client = get_minio_client()
+    bucket = get_bucket_name()
+    ensure_bucket(client)
+
+    if kind == "approved":
+        object_name = f"mechanics/{code}/approved.json"
+    else:
+        object_name = f"mechanics/{code}/candidates/latest.json"
+
+    payload_obj = {"product_code": code, "mechanics": mechanics_to_json(mechanics)}
+    body = json.dumps(payload_obj, indent=2).encode("utf-8")
+    import io as _io
+
+    client.put_object(
+        bucket,
+        object_name,
+        _io.BytesIO(body),
+        length=len(body),
+        content_type="application/json",
+    )
 
 
 def _resolve_dsl_path(formula: Any, path: str) -> Any:

@@ -31,6 +31,8 @@ export const AIReviewAgentPage: React.FC = () => {
   const [uploadedDocs, setUploadedDocs] = useState<any[] | null>(null);
   const [initialProductCode, setInitialProductCode] = useState<string>("");
   const [mechanics, setMechanics] = useState<any[] | null>(null);
+  const [candidateMechanics, setCandidateMechanics] = useState<any[] | null>(null);
+  const [mechanicExclusions, setMechanicExclusions] = useState<Record<string, boolean>>({});
 
   const normalisedCode = (productCode || "").trim();
   const normalisedFiling = (filingId || "").trim();
@@ -59,6 +61,8 @@ export const AIReviewAgentPage: React.FC = () => {
       const code = (productCode || "").trim().toUpperCase();
       if (!code) {
         setMechanics(null);
+        setCandidateMechanics(null);
+        setMechanicExclusions({});
         return;
       }
       try {
@@ -77,6 +81,88 @@ export const AIReviewAgentPage: React.FC = () => {
 
     void loadMechanics();
   }, [productCode]);
+
+  const handleGenerateMechanics = async () => {
+    if (!normalisedCode) {
+      setError("Enter a product code before generating mechanics.");
+      return;
+    }
+    if (!metadataApproved) {
+      setError("Approve metadata first, then generate mechanics.");
+      return;
+    }
+
+    setError(null);
+    setLoading(true);
+    try {
+      const res = await fetch("/api/product-mechanics/ai-generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          productCode: normalisedCode,
+          filingId: normalisedFiling || undefined,
+        }),
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      const list = Array.isArray(data?.mechanics) ? data.mechanics : [];
+      setCandidateMechanics(list.length > 0 ? list : null);
+      setMechanicExclusions({});
+    } catch (e: any) {
+      setError(e?.message || "Failed to generate mechanics from filings.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleApproveMechanics = async () => {
+    if (!normalisedCode) {
+      setError("Enter a product code before approving mechanics.");
+      return;
+    }
+    if (!candidateMechanics || candidateMechanics.length === 0) {
+      setError("Generate mechanics once before approving.");
+      return;
+    }
+
+    const filtered = candidateMechanics.filter((m, idx) => {
+      const key = String(m.id || `${idx}-${m.name || ""}`);
+      return !mechanicExclusions[key];
+    });
+    if (filtered.length === 0) {
+      setError("At least one mechanic must be included before approval.");
+      return;
+    }
+
+    setError(null);
+    setLoading(true);
+    try {
+      const res = await fetch("/api/product-mechanics/approve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          productCode: normalisedCode,
+          mechanics: filtered,
+        }),
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      const approved = Array.isArray(data?.mechanics) ? data.mechanics : [];
+      setMechanics(approved.length > 0 ? approved : null);
+      setCandidateMechanics(null);
+      setMechanicExclusions({});
+    } catch (e: any) {
+      setError(e?.message || "Failed to approve mechanics set.");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const handleAutofillMetadata = async () => {
     if (!normalisedCode) {
@@ -681,12 +767,104 @@ export const AIReviewAgentPage: React.FC = () => {
       </section>
 
       <section className="card">
-        <h2>2. Mechanics (Preview)</h2>
+        <h2>2. Mechanics Discovery &amp; Review</h2>
         <p className="muted">
-          Curated mechanics for this product that connect filings, semantics, and DSL. For v0.1 the
-          mechanics dataset is currently populated for P12TRF as the first reference product, but the
-          underlying Product Mechanics model and APIs are product-agnostic.
+          Derive an initial Product Mechanics set directly from filings. The AI extractor proposes
+          candidate mechanics; you can review them, optionally exclude low-value entries, and then
+          approve a mechanics registry for this product. PMR and the Mechanics views will read from
+          the approved registry.
         </p>
+        <div className="form-grid">
+          <div className="form-row">
+            <button type="button" onClick={handleGenerateMechanics} disabled={loading}>
+              {loading ? "Working…" : "Generate mechanics from filings"}
+            </button>
+            <button
+              type="button"
+              onClick={handleApproveMechanics}
+              disabled={loading || !candidateMechanics || candidateMechanics.length === 0}
+              style={{ marginLeft: "0.5rem" }}
+           >
+              {loading ? "Working…" : "Approve mechanics set for product"}
+            </button>
+          </div>
+        </div>
+
+        {candidateMechanics && candidateMechanics.length > 0 && (
+          <>
+            <h3>Candidate mechanics (AI-extracted)</h3>
+            <p className="muted">
+              Each mechanic below comes from the filings and is marked as <code>source = ai_extracted</code>,
+              <code>status = candidate</code>. Uncheck any mechanics you want to exclude before approving
+              the set.
+            </p>
+            <table className="kv-table">
+              <thead>
+                <tr>
+                  <th>Include</th>
+                  <th>Mechanic</th>
+                  <th>Type</th>
+                  <th>Confidence</th>
+                  <th>Filing evidence</th>
+                </tr>
+              </thead>
+              <tbody>
+                {candidateMechanics.map((m, idx) => {
+                  const key = String(m.id || `${idx}-${m.name || ""}`);
+                  const excluded = !!mechanicExclusions[key];
+                  return (
+                    <tr key={key}>
+                      <td>
+                        <input
+                          type="checkbox"
+                          checked={!excluded}
+                          onChange={(e) => {
+                            const checked = e.target.checked;
+                            setMechanicExclusions((prev) => {
+                              const next = { ...prev };
+                              if (!checked) {
+                                next[key] = true;
+                              } else {
+                                delete next[key];
+                              }
+                              return next;
+                            });
+                          }}
+                        />
+                      </td>
+                      <td>
+                        <strong>{m.name}</strong>
+                        <br />
+                        <span className="muted" style={{ fontSize: "0.85rem" }}>
+                          {m.description}
+                        </span>
+                      </td>
+                      <td>{m.type}</td>
+                      <td>{typeof m.confidence === "number" ? `${(m.confidence * 100).toFixed(0)}%` : ""}</td>
+                      <td>
+                        {m.filing_sources && m.filing_sources.length > 0 ? (
+                          <ul>
+                            {m.filing_sources.map((fs: any) => (
+                              <li key={fs.id}>
+                                <span>{fs.document_hint}</span>
+                                {fs.page && <span> ({fs.page})</span>}
+                                {fs.snippet && <span className="muted"> – {fs.snippet}</span>}
+                              </li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <span className="muted">No filing evidence recorded.</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </>
+        )}
+
+        <h3>Approved mechanics (current registry)</h3>
         {mechanics && mechanics.length > 0 ? (
           <table className="kv-table">
             <thead>
@@ -709,7 +887,7 @@ export const AIReviewAgentPage: React.FC = () => {
                     </span>
                   </td>
                   <td>{m.type}</td>
-                  <td>{(m.confidence * 100).toFixed(0)}%</td>
+                  <td>{typeof m.confidence === "number" ? `${(m.confidence * 100).toFixed(0)}%` : ""}</td>
                   <td>
                     {m.filing_sources && m.filing_sources.length > 0 ? (
                       <ul>

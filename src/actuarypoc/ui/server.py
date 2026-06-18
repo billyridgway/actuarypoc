@@ -21,11 +21,15 @@ from actuarypoc.storage.minio_client import ensure_bucket, get_minio_client, get
 from actuarypoc.config.assumptions import list_assumption_sets, approve_assumption_set
 from actuarypoc.dsl.policy_dsl import load_formula
 from actuarypoc.domain.product_mechanics import (
+    FilingSource,
+    MechanicDslRef,
+    ProductMechanic,
     load_mechanics_for_product,
     mechanics_to_json,
     validate_mechanics_against_dsl,
     generate_dsl_fragments_from_mechanics,
     build_dsl_patch_preview_from_mechanics,
+    save_mechanics_to_minio,
 )
 from actuarypoc.projection.engine import ProjectionEngine
 from actuarypoc.projection.mortality import build_term23_surface
@@ -35,6 +39,7 @@ from actuarypoc.extract.assumptions_for_product import (
     generate_product_metadata_from_minio,
     generate_assumption_set_for_product,
 )
+from actuarypoc.extract.mechanics_for_product import generate_mechanics_for_product
 from actuarypoc.agents.pmr_ai import summarise_pmr, propose_decision
 from actuarypoc.agents.scenario_ai import generate_scenarios_for_product
 from actuarypoc.storage.postgres_client import (
@@ -439,6 +444,17 @@ class ProductScenariosAIGenerateRequest(BaseModel):  # type: ignore[misc]
     model: Optional[str] = None
     feedback: Optional[str] = None
     previous: Optional[List[Dict[str, Any]]] = None
+
+
+class ProductMechanicsAIGenerateRequest(BaseModel):  # type: ignore[misc]
+    productCode: str
+    filingId: Optional[str] = None
+    model: Optional[str] = None
+
+
+class ProductMechanicsApproveRequest(BaseModel):  # type: ignore[misc]
+    productCode: str
+    mechanics: List[Dict[str, Any]]
 
 
 class MechanicPatchApprovalRequest(BaseModel):  # type: ignore[misc]
@@ -6225,6 +6241,146 @@ def api_product_scenarios_ai_generate(payload: ProductScenariosAIGenerateRequest
         raise HTTPException(status_code=500, detail=f"Failed to generate scenarios via OpenAI: {exc}") from exc
 
     return {"scenarios": scenarios}
+
+
+@app.post("/api/product-mechanics/ai-generate")
+def api_product_mechanics_ai_generate(payload: ProductMechanicsAIGenerateRequest) -> Dict[str, Any]:
+    """Generate a draft mechanics set for a product using filings + OpenAI.
+
+    v0.1 reads filings from MinIO for the hinted product/filing, calls
+    the LLM-backed mechanics extractor, and by default persists the
+    result as a *candidate* mechanics set under
+    ``mechanics/{product_code}/candidates/latest.json``. The candidate
+    mechanics list is returned so the AI Review Agent can present it for
+    human review.
+    """
+
+    code = (payload.productCode or "").strip()
+    filing = (payload.filingId or "").strip() or None
+    model = (payload.model or "").strip() or None
+
+    if not code:
+        raise HTTPException(status_code=400, detail="productCode is required")
+
+    try:
+        mechanics = generate_mechanics_for_product(
+            product_code=code,
+            filing_id=filing,
+            model=model,
+            auto_persist_candidates=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Failed to generate mechanics via OpenAI: {exc}") from exc
+
+    return {"productCode": code, "mechanics": mechanics_to_json(mechanics)}
+
+
+@app.post("/api/product-mechanics/approve")
+def api_product_mechanics_approve(payload: ProductMechanicsApproveRequest) -> Dict[str, Any]:
+    """Approve a mechanics set for a product and persist it as the registry.
+
+    v0.1 keeps this intentionally simple:
+
+    - The caller supplies the mechanics list it wants to approve,
+      typically a filtered subset of the last AI-generated candidates.
+    - We normalise product_code, mark each mechanic as
+      ``status="approved"`` (preserving its original ``source`` where
+      present), and persist to MinIO under
+      ``mechanics/{product_code}/approved.json``.
+    - Subsequent PMR + Product Mechanics endpoints will read from this
+      approved registry via ``load_mechanics_for_product``.
+    """
+
+    code = (payload.productCode or "").strip()
+    if not code:
+        raise HTTPException(status_code=400, detail="productCode is required")
+
+    mechanics_raw = payload.mechanics or []
+    if not mechanics_raw:
+        raise HTTPException(status_code=400, detail="mechanics list must not be empty")
+
+    code_norm = code.strip().upper()
+
+    mechanics: List[ProductMechanic] = []
+    for raw in mechanics_raw:
+        if not isinstance(raw, dict):
+            continue
+
+        # Filing sources
+        fs_list: List[Any] = []
+        for fs in raw.get("filing_sources", []) or []:
+            if not isinstance(fs, dict):
+                continue
+            try:
+                fs_list.append(
+                    FilingSource(  # type: ignore[name-defined]
+                        id=str(fs.get("id")),
+                        document_hint=str(fs.get("document_hint")),
+                        page=fs.get("page"),
+                        snippet=fs.get("snippet"),
+                        confidence=float(fs.get("confidence", 0.8)),
+                    )
+                )
+            except Exception:
+                continue
+
+        # DSL refs (if any)
+        dsl_list: List[Any] = []
+        for dr in raw.get("dsl_refs", []) or []:
+            if not isinstance(dr, dict):
+                continue
+            try:
+                dsl_list.append(
+                    MechanicDslRef(  # type: ignore[name-defined]
+                        id=str(dr.get("id")),
+                        file=str(dr.get("file")),
+                        path=str(dr.get("path")),
+                        description=dr.get("description"),
+                        valuePreview=dr.get("valuePreview"),
+                    )
+                )
+            except Exception:
+                continue
+
+        expected_raw = raw.get("expected") if isinstance(raw, dict) else None
+        expected: Optional[Dict[str, Any]]
+        if isinstance(expected_raw, dict):
+            expected = expected_raw
+        else:
+            expected = None
+
+        source = raw.get("source") or "ai_extracted"
+
+        try:
+            mech = ProductMechanic(
+                id=str(raw.get("id")),
+                product_code=code_norm,
+                name=str(raw.get("name")),
+                type=str(raw.get("type")),
+                description=str(raw.get("description")),
+                filing_sources=fs_list,
+                dsl_refs=dsl_list,
+                expected=expected,
+                upstream_ids=[str(x) for x in (raw.get("upstream_ids") or [])],
+                downstream_ids=[str(x) for x in (raw.get("downstream_ids") or [])],
+                confidence=float(raw.get("confidence", 0.8)),
+                source=str(source),
+                status="approved",
+            )
+        except Exception:
+            continue
+
+        mechanics.append(mech)
+
+    if not mechanics:
+        raise HTTPException(status_code=400, detail="No valid mechanics could be parsed from payload")
+
+    try:
+        save_mechanics_to_minio(code_norm, mechanics, kind="approved")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Failed to persist approved mechanics: {exc}") from exc
+
+    return {"productCode": code_norm, "mechanics": mechanics_to_json(mechanics)}
 
 
 @app.get("/api/product-mechanics/{product_code}")
