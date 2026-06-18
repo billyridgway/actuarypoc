@@ -24,6 +24,7 @@ from actuarypoc.domain.product_mechanics import (
     load_mechanics_for_product,
     mechanics_to_json,
     validate_mechanics_against_dsl,
+    generate_dsl_fragments_from_mechanics,
 )
 from actuarypoc.projection.engine import ProjectionEngine
 from actuarypoc.projection.mortality import build_term23_surface
@@ -3257,9 +3258,17 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
         mechanics = load_mechanics_for_product(product_block["code"])
         mechanics_payload = mechanics_to_json(mechanics)
         mechanics_checks = validate_mechanics_against_dsl(product_block["code"])
+        # Mechanics-Generated DSL v0.1: preview tiny DSL fragments that
+        # could be driven from mechanics expectations. For v0.1 we limit
+        # this to meta.policy_fee.
+        mechanics_generated = generate_dsl_fragments_from_mechanics(
+            product_block["code"],
+            dsl_paths=["meta.policy_fee"],
+        )
     except Exception:
         mechanics_payload = []
         mechanics_checks = []
+        mechanics_generated = []
 
     return {
         "product": product_block,
@@ -3281,6 +3290,10 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
         "mechanicsValidation": {
             "productCode": product_block["code"],
             "checks": mechanics_checks,
+        },
+        "mechanicsGeneratedDsl": {
+            "productCode": product_block["code"],
+            "fragments": mechanics_generated,
         },
         "productDefinition": product_definition_summary,
         "productDefinitionBuild": product_definition_build,

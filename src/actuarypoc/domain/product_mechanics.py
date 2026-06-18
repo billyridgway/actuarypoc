@@ -332,3 +332,118 @@ def validate_mechanics_against_dsl(product_code: str) -> List[Dict[str, Any]]:
             )
 
     return checks
+
+
+def generate_dsl_fragments_from_mechanics(product_code: str, dsl_paths: List[str]) -> List[Dict[str, Any]]:
+    """Generate small DSL fragments from mechanics expectations.
+
+    Mechanics-Generated DSL v0.1 is intentionally tiny and advisory:
+
+    - For now it only supports paths where mechanics.expected[...] is
+      populated (e.g. ``meta.policy_fee`` for P12TRF).
+    - It does not modify DSL files or influence projections; it simply
+      returns a preview of what the DSL *would* look like if driven from
+      mechanics, alongside the current DSL value.
+
+    The function is product-agnostic: any product with a populated
+    mechanics fixture and expectations for the requested paths will
+    participate.
+    """
+
+    from actuarypoc.dsl.policy_dsl import load_formula  # local import to avoid cycles
+
+    fragments: List[Dict[str, Any]] = []
+    mechanics = load_mechanics_for_product(product_code)
+    if not mechanics or not dsl_paths:
+        return fragments
+
+    formula_cache: Dict[str, Any] = {}
+
+    for path in dsl_paths:
+        # Find a mechanic that carries an expected value for this path.
+        mech: Optional[ProductMechanic] = None
+        for m in mechanics:
+            if isinstance(m.expected, dict) and path in m.expected:
+                mech = m
+                break
+
+        if mech is None:
+            fragments.append(
+                {
+                    "dslPath": path,
+                    "sourceMechanicId": None,
+                    "sourceMechanicName": None,
+                    "generatedValue": None,
+                    "currentDslValue": None,
+                    "status": "mechanic_missing",
+                    "message": "No mechanic with expectations for this DSL path.",
+                }
+            )
+            continue
+
+        expected_value = mech.expected.get(path) if isinstance(mech.expected, dict) else None
+        if expected_value is None:
+            fragments.append(
+                {
+                    "dslPath": path,
+                    "sourceMechanicId": mech.id,
+                    "sourceMechanicName": mech.name,
+                    "generatedValue": None,
+                    "currentDslValue": None,
+                    "status": "expected_missing",
+                    "message": "Mechanic does not define an expected value for this DSL path.",
+                }
+            )
+            continue
+
+        # Identify a DSL file to compare against using the first matching
+        # DSL ref for this path.
+        ref = None
+        for r in mech.dsl_refs:
+            if r.path == path:
+                ref = r
+                break
+
+        current_value: Any = None
+        status: str
+        message: str
+
+        if ref is None:
+            status = "dsl_missing"
+            message = "No DSL reference recorded for this path; cannot compare against current DSL."
+        else:
+            dsl_file = ref.file
+            try:
+                if dsl_file not in formula_cache:
+                    formula_cache[dsl_file] = load_formula(str(_PROJECT_ROOT / dsl_file))
+                formula = formula_cache[dsl_file]
+                resolved = _resolve_dsl_path(formula, path)
+                _MISSING = object()
+                if resolved is _MISSING:
+                    status = "dsl_missing"
+                    message = "DSL path could not be resolved from the current formula."
+                else:
+                    current_value = resolved
+                    if current_value == expected_value:
+                        status = "matches_current_dsl"
+                        message = "Generated DSL fragment matches current DSL value."
+                    else:
+                        status = "differs_from_current_dsl"
+                        message = "Generated DSL fragment differs from current DSL value."
+            except Exception as exc:  # defensive; preview only
+                status = "error"
+                message = f"Error while loading DSL or resolving path: {exc}"
+
+        fragments.append(
+            {
+                "dslPath": path,
+                "sourceMechanicId": mech.id,
+                "sourceMechanicName": mech.name,
+                "generatedValue": expected_value,
+                "currentDslValue": current_value,
+                "status": status,
+                "message": message,
+            }
+        )
+
+    return fragments

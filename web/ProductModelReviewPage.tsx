@@ -168,6 +168,18 @@ export interface ProductModelReview {
       message?: string;
     }[];
   } | null;
+  mechanicsGeneratedDsl?: {
+    productCode: string;
+    fragments: {
+      dslPath: string;
+      sourceMechanicId: string | null;
+      sourceMechanicName: string | null;
+      generatedValue: any;
+      currentDslValue: any;
+      status: string;
+      message?: string;
+    }[];
+  } | null;
   productDefinition?: {
     productCode?: string;
     filingId?: string;
@@ -2479,6 +2491,61 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                     )}
                   </td>
                   <td className="muted">{c.message || ""}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      )}
+
+      {review.mechanicsGeneratedDsl && review.mechanicsGeneratedDsl.fragments && review.mechanicsGeneratedDsl.fragments.length > 0 && (
+        <section className="card">
+          <h2>Mechanics-Generated DSL Preview</h2>
+          <p className="muted">
+            Preview of small DSL fragments generated directly from Product Mechanics expectations. For v0.1 this is
+            limited to <code>meta.policy_fee</code>. This does not modify the DSL; it simply contrasts the generated
+            value with the current executable DSL.
+          </p>
+          <table className="kv-table">
+            <thead>
+              <tr>
+                <th>DSL path</th>
+                <th>Source mechanic</th>
+                <th>Status</th>
+                <th>Generated value (from mechanics)</th>
+                <th>Current DSL value</th>
+                <th>Details</th>
+              </tr>
+            </thead>
+            <tbody>
+              {review.mechanicsGeneratedDsl.fragments.map((f) => (
+                <tr key={f.dslPath}>
+                  <td>
+                    <code>{f.dslPath}</code>
+                  </td>
+                  <td>
+                    {f.sourceMechanicName || f.sourceMechanicId || <span className="muted">(none)</span>}
+                  </td>
+                  <td>{f.status}</td>
+                  <td>
+                    {f.generatedValue !== undefined ? (
+                      <pre style={{ whiteSpace: "pre-wrap", margin: 0 }}>
+                        {JSON.stringify(f.generatedValue, null, 2)}
+                      </pre>
+                    ) : (
+                      <span className="muted">(none)</span>
+                    )}
+                  </td>
+                  <td>
+                    {f.currentDslValue !== undefined ? (
+                      <pre style={{ whiteSpace: "pre-wrap", margin: 0 }}>
+                        {JSON.stringify(f.currentDslValue, null, 2)}
+                      </pre>
+                    ) : (
+                      <span className="muted">(none)</span>
+                    )}
+                  </td>
+                  <td className="muted">{f.message || ""}</td>
                 </tr>
               ))}
             </tbody>
