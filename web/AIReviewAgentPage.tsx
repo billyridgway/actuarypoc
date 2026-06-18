@@ -83,12 +83,21 @@ export const AIReviewAgentPage: React.FC = () => {
   }, [productCode]);
 
   const handleGenerateMechanics = async () => {
+    // Temporary debug logging to verify the handler is wired and see guard state.
+    // eslint-disable-next-line no-console
+    console.log("[AIReviewAgent] handleGenerateMechanics", {
+      productCode,
+      normalisedCode,
+      metadataApproved,
+      loading,
+    });
+
     if (!normalisedCode) {
       setError("Enter a product code before generating mechanics.");
       return;
     }
     if (!metadataApproved) {
-      setError("Approve metadata first, then generate mechanics.");
+      setError("Approve metadata before generating mechanics.");
       return;
     }
 
@@ -108,8 +117,23 @@ export const AIReviewAgentPage: React.FC = () => {
         throw new Error(text || `HTTP ${res.status}`);
       }
       const data = await res.json();
+      // eslint-disable-next-line no-console
+      console.log("[AIReviewAgent] mechanics response", data);
       const list = Array.isArray(data?.mechanics) ? data.mechanics : [];
-      setCandidateMechanics(list.length > 0 ? list : null);
+      if (!Array.isArray(data?.mechanics)) {
+        setCandidateMechanics(null);
+        setMechanicExclusions({});
+        setError("Mechanics endpoint returned an unexpected payload shape.");
+        return;
+      }
+      if (list.length === 0) {
+        setCandidateMechanics([]);
+        setMechanicExclusions({});
+        setError("Mechanics extractor ran but did not find any candidate mechanics in the filings.");
+        return;
+      }
+
+      setCandidateMechanics(list);
       setMechanicExclusions({});
     } catch (e: any) {
       setError(e?.message || "Failed to generate mechanics from filings.");
