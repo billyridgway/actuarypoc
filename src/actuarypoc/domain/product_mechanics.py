@@ -447,3 +447,117 @@ def generate_dsl_fragments_from_mechanics(product_code: str, dsl_paths: List[str
         )
 
     return fragments
+
+
+def build_dsl_patch_preview_from_mechanics(product_code: str, dsl_paths: List[str]) -> List[Dict[str, Any]]:
+    """Build a preview of DSL patches implied by mechanics expectations.
+
+    Mechanics-Generated DSL Patch Preview v0.1 is intentionally small and
+    advisory:
+
+    - For v0.1 we only expect ``meta.policy_fee`` in practice, but the
+      function is product-agnostic and accepts an arbitrary list of
+      ``dsl_paths``.
+    - It does *not* modify DSL files or affect projections. It simply
+      reports what a "replace" operation would look like for each path
+      based on mechanics expectations, compared to the current DSL.
+    """
+
+    from actuarypoc.dsl.policy_dsl import load_formula  # local import to avoid cycles
+
+    patches: List[Dict[str, Any]] = []
+    mechanics = load_mechanics_for_product(product_code)
+    if not mechanics or not dsl_paths:
+        return patches
+
+    formula_cache: Dict[str, Any] = {}
+
+    for path in dsl_paths:
+        mech: Optional[ProductMechanic] = None
+        for m in mechanics:
+            if isinstance(m.expected, dict) and path in m.expected:
+                mech = m
+                break
+
+        if mech is None:
+            patches.append(
+                {
+                    "dslPath": path,
+                    "sourceMechanicId": None,
+                    "sourceMechanicName": None,
+                    "operation": None,
+                    "currentValue": None,
+                    "proposedValue": None,
+                    "status": "mechanic_missing",
+                    "message": "No mechanic with expectations for this DSL path.",
+                }
+            )
+            continue
+
+        expected_value = mech.expected.get(path) if isinstance(mech.expected, dict) else None
+        if expected_value is None:
+            patches.append(
+                {
+                    "dslPath": path,
+                    "sourceMechanicId": mech.id,
+                    "sourceMechanicName": mech.name,
+                    "operation": None,
+                    "currentValue": None,
+                    "proposedValue": None,
+                    "status": "expected_missing",
+                    "message": "Mechanic does not define an expected value for this DSL path.",
+                }
+            )
+            continue
+
+        # Find DSL ref for this path to locate the DSL file.
+        ref = None
+        for r in mech.dsl_refs:
+            if r.path == path:
+                ref = r
+                break
+
+        current_value: Any = None
+        status: str
+        message: str
+
+        if ref is None:
+            status = "dsl_missing"
+            message = "No DSL reference recorded for this path; cannot build a concrete patch."
+        else:
+            dsl_file = ref.file
+            try:
+                if dsl_file not in formula_cache:
+                    formula_cache[dsl_file] = load_formula(str(_PROJECT_ROOT / dsl_file))
+                formula = formula_cache[dsl_file]
+                resolved = _resolve_dsl_path(formula, path)
+                _MISSING = object()
+                if resolved is _MISSING:
+                    status = "dsl_missing"
+                    message = "DSL path could not be resolved from the current formula."
+                else:
+                    current_value = resolved
+                    if current_value == expected_value:
+                        status = "no_change"
+                        message = "Applying the mechanics-derived patch would not change the current DSL value."
+                    else:
+                        status = "would_update"
+                        message = "Applying the mechanics-derived patch would update the current DSL value."
+            except Exception as exc:  # defensive
+                status = "error"
+                message = f"Error while loading DSL or resolving path: {exc}"
+
+        patches.append(
+            {
+                "dslPath": path,
+                "sourceMechanicId": mech.id,
+                "sourceMechanicName": mech.name,
+                "operation": "replace" if expected_value is not None else None,
+                "currentValue": current_value,
+                "proposedValue": expected_value,
+                "status": status,
+                "message": message,
+            }
+        )
+
+    return patches

@@ -180,6 +180,19 @@ export interface ProductModelReview {
       message?: string;
     }[];
   } | null;
+  mechanicsDslPatchPreview?: {
+    productCode: string;
+    patches: {
+      dslPath: string;
+      sourceMechanicId: string | null;
+      sourceMechanicName: string | null;
+      operation: string | null;
+      currentValue: any;
+      proposedValue: any;
+      status: string;
+      message?: string;
+    }[];
+  } | null;
   productDefinition?: {
     productCode?: string;
     filingId?: string;
@@ -2546,6 +2559,61 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
                     )}
                   </td>
                   <td className="muted">{f.message || ""}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      )}
+
+      {review.mechanicsDslPatchPreview && review.mechanicsDslPatchPreview.patches && review.mechanicsDslPatchPreview.patches.length > 0 && (
+        <section className="card">
+          <h2>Proposed DSL Patch Preview</h2>
+          <p className="muted">
+            Hypothetical patches to the executable DSL derived from Product Mechanics expectations. For v0.1 this is
+            limited to a single <code>meta.policy_fee</code> "replace" patch. No changes are applied automatically;
+            this view is for inspection only.
+          </p>
+          <table className="kv-table">
+            <thead>
+              <tr>
+                <th>DSL path</th>
+                <th>Source mechanic</th>
+                <th>Operation</th>
+                <th>Status</th>
+                <th>Current DSL value</th>
+                <th>Proposed DSL value</th>
+                <th>Details</th>
+              </tr>
+            </thead>
+            <tbody>
+              {review.mechanicsDslPatchPreview.patches.map((p) => (
+                <tr key={p.dslPath}>
+                  <td>
+                    <code>{p.dslPath}</code>
+                  </td>
+                  <td>{p.sourceMechanicName || p.sourceMechanicId || <span className="muted">(none)</span>}</td>
+                  <td>{p.operation || <span className="muted">(n/a)</span>}</td>
+                  <td>{p.status}</td>
+                  <td>
+                    {p.currentValue !== undefined ? (
+                      <pre style={{ whiteSpace: "pre-wrap", margin: 0 }}>
+                        {JSON.stringify(p.currentValue, null, 2)}
+                      </pre>
+                    ) : (
+                      <span className="muted">(none)</span>
+                    )}
+                  </td>
+                  <td>
+                    {p.proposedValue !== undefined ? (
+                      <pre style={{ whiteSpace: "pre-wrap", margin: 0 }}>
+                        {JSON.stringify(p.proposedValue, null, 2)}
+                      </pre>
+                    ) : (
+                      <span className="muted">(none)</span>
+                    )}
+                  </td>
+                  <td className="muted">{p.message || ""}</td>
                 </tr>
               ))}
             </tbody>

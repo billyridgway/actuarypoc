@@ -25,6 +25,7 @@ from actuarypoc.domain.product_mechanics import (
     mechanics_to_json,
     validate_mechanics_against_dsl,
     generate_dsl_fragments_from_mechanics,
+    build_dsl_patch_preview_from_mechanics,
 )
 from actuarypoc.projection.engine import ProjectionEngine
 from actuarypoc.projection.mortality import build_term23_surface
@@ -3265,10 +3266,17 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
             product_block["code"],
             dsl_paths=["meta.policy_fee"],
         )
+        # Mechanics-Generated DSL Patch Preview v0.1: show what a
+        # mechanics-derived patch would look like without applying it.
+        mechanics_patches = build_dsl_patch_preview_from_mechanics(
+            product_block["code"],
+            dsl_paths=["meta.policy_fee"],
+        )
     except Exception:
         mechanics_payload = []
         mechanics_checks = []
         mechanics_generated = []
+        mechanics_patches = []
 
     return {
         "product": product_block,
@@ -3294,6 +3302,10 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
         "mechanicsGeneratedDsl": {
             "productCode": product_block["code"],
             "fragments": mechanics_generated,
+        },
+        "mechanicsDslPatchPreview": {
+            "productCode": product_block["code"],
+            "patches": mechanics_patches,
         },
         "productDefinition": product_definition_summary,
         "productDefinitionBuild": product_definition_build,
