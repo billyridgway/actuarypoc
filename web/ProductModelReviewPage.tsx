@@ -540,6 +540,127 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
     };
   });
 
+  // ------------------------------------------------------------
+  // Product Understanding Gaps v0.1 – derive lightweight Known
+  // and Suspected gaps in product-language terms.
+  // ------------------------------------------------------------
+
+  type UnderstandingGap = {
+    productConcept: string;
+    whyItMatters: string;
+    evidence: string[];
+    currentRepresentation: string;
+    suggestedNextStep: string;
+    confidence: "High" | "Medium" | "Low";
+    suggestedOwner: string;
+  };
+
+  const knownGaps: UnderstandingGap[] = [];
+  const suspectedGaps: UnderstandingGap[] = [];
+
+  // Known Gap: Conversion Privilege represented but not exercised in scenarios.
+  if (mechanicsById["p12trf_conversion_privilege"]) {
+    const scenIds = mechanicScenarios["p12trf_conversion_privilege"] || [];
+    if (scenIds.length === 0) {
+      knownGaps.push({
+        productConcept: "Conversion Privilege",
+        whyItMatters:
+          "Conversion is a core policyholder option and often a regulatory focus; it affects how policyowners can transition to permanent coverage.",
+        evidence: [
+          "Policy form conversion provision (e.g. ICC12_P12TRF10_Policy_Form.pdf).",
+          "Mechanic p12trf_conversion_privilege exists in the mechanics set.",
+          "DSL flag flags.convertible is present in p12trf_term.yaml.",
+        ],
+        currentRepresentation:
+          "Conversion is present in filings, represented as a mechanic, and flagged in DSL, but no scenarios explicitly exercise conversion behaviour.",
+        suggestedNextStep:
+          "Define at least one scenario that explicitly tests conversion eligibility/behaviour, and consider adding a simple validation around conversion conditions.",
+        confidence: "High",
+        suggestedOwner: "Scenario Design",
+      });
+    }
+  }
+
+  // Known Gap: Maturity / Expiry behaviour has thin explicit testing.
+  if (mechanicsById["p12trf_maturity"]) {
+    const scenIds = mechanicScenarios["p12trf_maturity"] || [];
+    // Even when scenarios exist, we call this out as a gap because there
+    // is no explicit "end-of-term" scenario or validation.
+    knownGaps.push({
+      productConcept: "Maturity / Expiry behaviour",
+      whyItMatters:
+        "Maturity and end-of-term behaviour control when coverage ends and confirm that no cash values are created under the nonforfeiture exception.",
+      evidence: [
+        "Actuarial memo sections describing maturity/expiry and nonforfeiture exception.",
+        "Mechanic p12trf_maturity exists in the mechanics set.",
+        "DSL meta.maturity_age and flags.has_cash_value=false in p12trf_term.yaml.",
+      ],
+      currentRepresentation:
+        scenIds.length > 0
+          ? "Maturity is represented in mechanics and DSL, and scenarios exist, but none are explicitly designed as end-of-term tests and there is no focused maturity validation."
+          : "Maturity is represented in mechanics and DSL, but scenarios do not explicitly exercise end-of-term behaviour and there is no focused maturity validation.",
+      suggestedNextStep:
+        "Introduce a scenario and/or validation that explicitly exercises behaviour near maturity (e.g. last covered year, first uncovered year) and confirms no cash values.",
+      confidence: "High",
+      suggestedOwner: "Validation",
+    });
+  }
+
+  // Known Gap: Underwriting eligibility is only partially represented.
+  if (mechanicsById["p12trf_risk_class"]) {
+    knownGaps.push({
+      productConcept: "Underwriting eligibility boundaries",
+      whyItMatters:
+        "Underwriting restrictions determine who can buy the product and under what combinations; missing them can misrepresent real-world availability.",
+      evidence: [
+        "Underwriting sections in filings describing risk class availability and limits.",
+        "Mechanic p12trf_risk_class and related mappings exist in mechanics.",
+        "DSL meta.filed_risk_classes, meta.risk_class_mapping, and meta.mortality_risk_class_mapping.",
+      ],
+      currentRepresentation:
+        "Risk classes are normalised and mapped for pricing/mortality, but there is no explicit mechanic or validation for underwriting eligibility or disallowed combinations.",
+      suggestedNextStep:
+        "Clarify which underwriting restrictions should be enforced in the model, and add at least one negative test (e.g. disallowed age/risk-class/term combination) plus a corresponding validation.",
+      confidence: "High",
+      suggestedOwner: "Product Understanding",
+    });
+  }
+
+  // Suspected Gap: Riders (Waiver of Premium, Child Term, etc.).
+  // We treat this as a hypothesis: filings reference riders, but there
+  // are no dedicated rider mechanics or scenarios.
+  suspectedGaps.push({
+    productConcept: "Riders (Waiver of Premium, Child Term, etc.)",
+    whyItMatters:
+      "Optional riders can materially change benefits and charges; omitting them may misrepresent how the product behaves for many policyowners.",
+    evidence: [
+      "Rider endorsements and Statement of Variability sections referencing Waiver of Premium, Child Term, and other riders.",
+    ],
+    currentRepresentation:
+      "Riders are referenced in filings but are not represented as dedicated mechanics, have no structured DSL meta, and are not exercised by any scenarios.",
+    suggestedNextStep:
+      "Decide which riders are in-scope for this model. For in-scope riders, add mechanics and at least one scenario per rider, or explicitly document them as out-of-scope.",
+    confidence: "Medium",
+    suggestedOwner: "Filing Review",
+  });
+
+  // Suspected Gap: Additional underwriting restrictions beyond those
+  // captured by Risk Class mappings.
+  suspectedGaps.push({
+    productConcept: "Additional underwriting restrictions",
+    whyItMatters:
+      "Filings may include nuanced underwriting rules (e.g. certain classes not available at older ages or for high face amounts) that materially affect eligibility but are not yet explicit in the model.",
+    evidence: [
+      "Detailed underwriting narrative and tables in filings describing limits and exceptions.",
+    ],
+    currentRepresentation:
+      "Risk class mappings exist, but additional underwriting limits (e.g. age/face/risk-class interactions) are not captured as mechanics or DSL constraints, and there are no negative test scenarios.",
+    suggestedNextStep:
+      "Review underwriting sections to identify specific restrictions worth modelling, then either add mechanics and negative tests, or document them as intentionally out-of-scope.",
+    confidence: "Low",
+    suggestedOwner: "Product Understanding",
+  });
+
   // Simple, MVP-only Final Actuary Decision form state.
   const [reviewer, setReviewer] = React.useState("");
   const [decision, setDecision] = React.useState("");
@@ -2719,6 +2840,93 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
               ))}
             </tbody>
           </table>
+        </section>
+      )}
+
+      {(knownGaps.length > 0 || suspectedGaps.length > 0) && (
+        <section className="card">
+          <h2>Product Understanding Gaps</h2>
+          <p className="muted">
+            Product concepts that appear to be under-modelled, under-tested, or missing compared to the filings. This
+            section is intentionally product-focused: it is meant to help actuaries decide what to investigate next,
+            not to serve as a governance checklist.
+          </p>
+
+          {knownGaps.length > 0 && (
+            <>
+              <h3>Known Gaps (incompletely exercised modelled concepts)</h3>
+              <table className="kv-table">
+                <thead>
+                  <tr>
+                    <th>Product concept</th>
+                    <th>Why it matters</th>
+                    <th>Evidence</th>
+                    <th>Current representation</th>
+                    <th>Suggested next step</th>
+                    <th>Confidence</th>
+                    <th>Suggested owner</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {knownGaps.map((g, idx) => (
+                    <tr key={g.productConcept + idx}>
+                      <td>{g.productConcept}</td>
+                      <td className="muted">{g.whyItMatters}</td>
+                      <td>
+                        <ul>
+                          {g.evidence.map((e) => (
+                            <li key={e}>{e}</li>
+                          ))}
+                        </ul>
+                      </td>
+                      <td className="muted">{g.currentRepresentation}</td>
+                      <td className="muted">{g.suggestedNextStep}</td>
+                      <td>{g.confidence}</td>
+                      <td>{g.suggestedOwner}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </>
+          )}
+
+          {suspectedGaps.length > 0 && (
+            <>
+              <h3>Suspected Gaps (concepts that may not be modelled yet)</h3>
+              <table className="kv-table">
+                <thead>
+                  <tr>
+                    <th>Product concept</th>
+                    <th>Why it matters</th>
+                    <th>Evidence</th>
+                    <th>Current representation</th>
+                    <th>Suggested next step</th>
+                    <th>Confidence</th>
+                    <th>Suggested owner</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {suspectedGaps.map((g, idx) => (
+                    <tr key={g.productConcept + idx}>
+                      <td>{g.productConcept}</td>
+                      <td className="muted">{g.whyItMatters}</td>
+                      <td>
+                        <ul>
+                          {g.evidence.map((e) => (
+                            <li key={e}>{e}</li>
+                          ))}
+                        </ul>
+                      </td>
+                      <td className="muted">{g.currentRepresentation}</td>
+                      <td className="muted">{g.suggestedNextStep}</td>
+                      <td>{g.confidence}</td>
+                      <td>{g.suggestedOwner}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </>
+          )}
         </section>
       )}
 
