@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -43,8 +43,8 @@ class ProductMechanic:
     type: str  # e.g. "charge", "benefit", "structure", "feature"
     description: str
 
-    filing_sources: List[FilingSource]
-    dsl_refs: List[MechanicDslRef]
+    filing_sources: List[FilingSource] = field(default_factory=list)
+    dsl_refs: List[MechanicDslRef] = field(default_factory=list)
 
     # Optional expectations for specific DSL paths, keyed by the same
     # dotted path used in MechanicDslRef.path (e.g. "meta.policy_fee").
@@ -52,8 +52,8 @@ class ProductMechanic:
     # executable DSL.
     expected: Optional[Dict[str, Any]] = None
 
-    upstream_ids: List[str]
-    downstream_ids: List[str]
+    upstream_ids: List[str] = field(default_factory=list)
+    downstream_ids: List[str] = field(default_factory=list)
 
     confidence: float = 0.8
 
