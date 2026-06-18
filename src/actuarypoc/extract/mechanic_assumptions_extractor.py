@@ -20,7 +20,10 @@ import os
 from openai import OpenAI
 
 from actuarypoc.storage.minio_client import get_minio_client, get_bucket_name
-from actuarypoc.extract.assumptions_for_product import _download_minio_object  # type: ignore[attr-defined]
+from actuarypoc.extract.assumptions_for_product import (
+    _download_minio_object,  # type: ignore[attr-defined]
+    discover_docs_for_product,
+)
 from actuarypoc.extract.assumptions_extractor import read_document_text
 from tempfile import TemporaryDirectory
 
@@ -94,7 +97,31 @@ def extract_mechanic_assumptions(
     if not code_norm:
         raise ValueError("product_code is required")
 
-    # Build a compact mechanic context list for the LLM.
+    # Load full-text filings up front so we can expand short snippets
+    # into richer per-mechanic evidence instead of relying solely on
+    # the tiny ``filing_sources.snippet``.
+    doc_texts: Dict[str, str] = {}
+    try:
+        client_m = get_minio_client()
+        bucket = get_bucket_name()
+        doc_keys = discover_docs_for_product(product_code=code_norm)
+        if doc_keys:
+            with TemporaryDirectory(prefix="mech_docs_") as tmpdir_str:
+                from pathlib import Path as _Path
+
+                tmpdir = _Path(tmpdir_str)
+                for key in doc_keys:
+                    try:
+                        local = _download_minio_object(bucket, key, tmpdir)  # type: ignore[misc]
+                        text = read_document_text(str(local))
+                        doc_texts[key] = text or ""
+                    except Exception:
+                        continue
+    except Exception:
+        doc_texts = {}
+
+    # Build a compact mechanic context list for the LLM, including
+    # expanded evidence per mechanic when possible.
     mechanic_contexts: List[Dict[str, Any]] = []
     for m in mechanics:
         if not isinstance(m, dict):
@@ -110,20 +137,68 @@ def extract_mechanic_assumptions(
             "description": m.get("description"),
             "product_code": code_norm,
         }
+
         fs_list: List[Dict[str, Any]] = []
+        expanded_chunks: List[str] = []
         for fs in m.get("filing_sources", []) or []:
             if not isinstance(fs, dict):
                 continue
-            fs_list.append(
-                {
-                    "id": fs.get("id"),
-                    "document_hint": fs.get("document_hint"),
-                    "page": fs.get("page"),
-                    "snippet": fs.get("snippet"),
-                }
-            )
+            snippet = fs.get("snippet") or ""
+            page = fs.get("page") or ""
+            hint = (fs.get("document_hint") or "").lower()
+            fs_entry = {
+                "id": fs.get("id"),
+                "document_hint": fs.get("document_hint"),
+                "page": page,
+                "snippet": snippet,
+            }
+            fs_list.append(fs_entry)
+
+            # Try to expand this snippet within the underlying filing
+            # documents: prefer docs whose object path contains the
+            # document_hint, then fall back to any doc that contains
+            # the snippet text.
+            snippet_key = (snippet or "").strip()
+            if not snippet_key:
+                continue
+
+            best_match: Optional[str] = None
+            for key, text in doc_texts.items():
+                low_key = key.lower()
+                if hint and hint not in low_key:
+                    continue
+                if snippet_key in text:
+                    best_match = key
+                    break
+            if best_match is None:
+                for key, text in doc_texts.items():
+                    if snippet_key in text:
+                        best_match = key
+                        break
+
+            if best_match is not None:
+                text = doc_texts.get(best_match, "")
+                idx = text.find(snippet_key)
+                if idx != -1:
+                    window = 1200
+                    start = max(0, idx - window)
+                    end = min(len(text), idx + len(snippet_key) + window)
+                    expanded = text[start:end].strip()
+                    if expanded:
+                        label = f"[EVIDENCE: {best_match} p.{page or '?'}]\n"
+                        expanded_chunks.append(label + expanded + "\n\n")
+
         if fs_list:
             ctx["filing_sources"] = fs_list
+
+        if expanded_chunks:
+            # Trim per-mechanic expanded evidence to keep prompts
+            # bounded while still providing richer context than the raw
+            # snippet alone.
+            expanded_combined = "".join(expanded_chunks)
+            max_chars = 4000
+            ctx["expanded_evidence"] = expanded_combined[:max_chars]
+
         mechanic_contexts.append(ctx)
 
     if not mechanic_contexts:
