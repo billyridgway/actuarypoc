@@ -1149,50 +1149,136 @@ export const AIReviewAgentPage: React.FC = () => {
                         <th>Mechanic</th>
                         <th>Filing evidence</th>
                         <th>Extracted assumptions</th>
+                        <th>Gaps &amp; action</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {assumptionDslPreview.mechanicAssumptions.map((ma: any) => (
-                        <tr key={ma.mechanicId}>
-                          <td>
-                            <strong>{ma.name}</strong>
-                            {ma.type && <span className="muted"> ({ma.type})</span>}
-                            {ma.description && (
-                              <>
-                                <br />
-                                <span className="muted" style={{ fontSize: "0.85rem" }}>
-                                  {ma.description}
-                                </span>
-                              </>
-                            )}
-                          </td>
-                          <td>
-                            {ma.filingSources && ma.filingSources.length > 0 ? (
-                              <ul>
-                                {ma.filingSources.map((fs: any, idx: number) => (
-                                  <li key={fs.id || `${idx}-${fs.document_hint}`}> 
-                                    <span>{fs.document_hint}</span>
-                                    {fs.page && <span> (p. {fs.page})</span>}
-                                  </li>
-                                ))}
-                              </ul>
-                            ) : (
-                              <span className="muted">No filing evidence recorded.</span>
-                            )}
-                          </td>
-                          <td>
-                            {ma.assumptions && ma.assumptions.length > 0 ? (
-                              <ul>
-                                {ma.assumptions.map((a: string, idx: number) => (
-                                  <li key={idx}>{a}</li>
-                                ))}
-                              </ul>
-                            ) : (
-                              <span className="muted">No assumptions extracted yet.</span>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
+                      {assumptionDslPreview.mechanicAssumptions.map((ma: any) => {
+                        const name = (ma.name || "").toLowerCase();
+                        const mtype = (ma.type || "").toLowerCase();
+                        const assumptions: string[] = Array.isArray(ma.assumptions)
+                          ? ma.assumptions
+                          : [];
+                        const hasAssumptions = assumptions.length > 0;
+
+                        let gaps: string[] = [];
+                        let action = "Review whether additional support is needed for this mechanic.";
+
+                        if (name.includes("cost of insurance") || name.includes("coi")) {
+                          gaps = [
+                            "Actual COI rate table and banding.",
+                            "Monthly deduction timing.",
+                            "Net amount at risk basis.",
+                          ];
+                          action =
+                            "Potential missing support: upload a COI rate table or pricing workbook if these details are not already captured.";
+                        } else if (name.includes("surrender")) {
+                          gaps = [
+                            "Full surrender charge schedule.",
+                            "Duration and calculation basis.",
+                          ];
+                          action =
+                            "Potential missing support: upload a surrender charge schedule or actuarial support file.";
+                        } else if (name.includes("interest") || name.includes("credit")) {
+                          gaps = [
+                            "Current credited rate assumptions.",
+                            "Order of interest crediting relative to deductions.",
+                          ];
+                          action =
+                            "Potential missing support: upload interest crediting support or an actuarial assumption memo.";
+                        } else if (
+                          name.includes("policy fee") ||
+                          name.includes("administrative") ||
+                          name.includes("admin")
+                        ) {
+                          gaps = [
+                            "Exact amount.",
+                            "Frequency.",
+                            "Timing in monthly processing.",
+                          ];
+                          action =
+                            "Potential missing support: upload an expense, policy fee, or admin charge schedule.";
+                        } else if (name.includes("death benefit")) {
+                          gaps = [
+                            "Death benefit option definitions.",
+                            "Net amount at risk basis.",
+                            "Effect of loans or withdrawals.",
+                          ];
+                          action =
+                            "Potential missing support: upload policy specifications or benefit calculation support.";
+                        } else if (name.includes("cash surrender value") || name.includes("cash value")) {
+                          gaps = [
+                            "Calculation formula.",
+                            "Relationship between policy value and surrender charges.",
+                            "Loan/withdrawal treatment if applicable.",
+                          ];
+                          action =
+                            "Potential missing support: upload cash value or surrender value calculation support.";
+                        } else if (!hasAssumptions) {
+                          gaps = [
+                            "Detailed values, formulas, schedules, or tables may still be missing.",
+                          ];
+                          action =
+                            "Potential missing support: upload actuarial support material for this mechanic.";
+                        }
+
+                        return (
+                          <tr key={ma.mechanicId}>
+                            <td>
+                              <strong>{ma.name}</strong>
+                              {ma.type && <span className="muted"> ({ma.type})</span>}
+                              {ma.description && (
+                                <>
+                                  <br />
+                                  <span className="muted" style={{ fontSize: "0.85rem" }}>
+                                    {ma.description}
+                                  </span>
+                                </>
+                              )}
+                            </td>
+                            <td>
+                              {ma.filingSources && ma.filingSources.length > 0 ? (
+                                <ul>
+                                  {ma.filingSources.map((fs: any, idx: number) => (
+                                    <li key={fs.id || `${idx}-${fs.document_hint}`}>
+                                      <span>{fs.document_hint}</span>
+                                      {fs.page && <span> (p. {fs.page})</span>}
+                                    </li>
+                                  ))}
+                                </ul>
+                              ) : (
+                                <span className="muted">No filing evidence recorded.</span>
+                              )}
+                            </td>
+                            <td>
+                              {hasAssumptions ? (
+                                <ul>
+                                  {assumptions.map((a: string, idx: number) => (
+                                    <li key={idx}>{a}</li>
+                                  ))}
+                                </ul>
+                              ) : (
+                                <span className="muted">No assumptions extracted yet.</span>
+                              )}
+                            </td>
+                            <td>
+                              {gaps.length > 0 ? (
+                                <>
+                                  <span className="muted">Review whether additional support is needed for:</span>
+                                  <ul>
+                                    {gaps.map((g, idx) => (
+                                      <li key={idx}>{g}</li>
+                                    ))}
+                                  </ul>
+                                  <span className="muted">{action}</span>
+                                </>
+                              ) : (
+                                <span className="muted">No obvious gaps detected from current extraction.</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
