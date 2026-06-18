@@ -458,6 +458,88 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
   const [patchSubmitting, setPatchSubmitting] = React.useState<{ [path: string]: boolean }>({});
   const [patchError, setPatchError] = React.useState<string | null>(null);
 
+  // Mechanics + scenario coverage mapping (lightweight heuristics for P12TRF).
+  const mechanics = review.productMechanics || [];
+  const mechanicsById: { [id: string]: (typeof mechanics)[number] } = {};
+  mechanics.forEach((m) => {
+    mechanicsById[m.id] = m;
+  });
+
+  const scenarioMechanics: { [id: string]: string[] } = {};
+  const mechanicScenarios: { [id: string]: string[] } = {};
+
+  scenarios.forEach((s) => {
+    const ids: string[] = [];
+    const inp = s.inputs || {};
+    const add = (id: string) => {
+      if (!mechanicsById[id]) return;
+      if (!ids.includes(id)) ids.push(id);
+    };
+
+    if (inp.age !== undefined && inp.age !== null) add("p12trf_issue_age");
+    if (inp.riskClass) add("p12trf_risk_class");
+    if (inp.faceAmount && typeof inp.faceAmount === "number" && inp.faceAmount > 0) {
+      add("p12trf_face_amount");
+      add("p12trf_face_band");
+    }
+    if (inp.premiumMode) add("p12trf_premium_mode");
+    if (inp.termYears && typeof inp.termYears === "number" && inp.termYears > 0) {
+      add("p12trf_level_term_period");
+    }
+
+    // Core mechanics we consider exercised by any term scenario.
+    ["p12trf_premium", "p12trf_death_benefit", "p12trf_maturity", "p12trf_policy_fee"].forEach(add);
+
+    scenarioMechanics[s.id] = ids;
+    ids.forEach((mid) => {
+      if (!mechanicScenarios[mid]) mechanicScenarios[mid] = [];
+      mechanicScenarios[mid].push(s.id);
+    });
+  });
+
+  // Simple, P12TRF-specific narrative of what each mechanic affects.
+  const mechanicEffects: { [id: string]: string[] } = {
+    p12trf_issue_age: ["Eligibility for level term periods", "Premium rate selection"],
+    p12trf_risk_class: ["Premium rate selection", "Mortality assumptions"],
+    p12trf_face_amount: ["Magnitude of death benefit", "Interaction with face bands"],
+    p12trf_face_band: ["Which premium/mortality band applies"],
+    p12trf_premium_mode: ["Payment frequency and modalization of rates"],
+    p12trf_level_term_period: ["Length of level premiums and death benefit coverage"],
+    p12trf_premium: ["Total premium paid over the level term"],
+    p12trf_policy_fee: ["Per-policy fee component of premium"],
+    p12trf_death_benefit: ["Benefit paid on death during the level term"],
+    p12trf_maturity: ["When coverage ultimately expires; no cash value"],
+    p12trf_conversion_privilege: ["Right to convert to a permanent plan under certain conditions"],
+  } as any;
+
+  // Infrastructure summaries per mechanic (validation / generated DSL / patch).
+  const validationByMechanic: { [id: string]: { ok: number; mismatch: number; total: number } } = {};
+  (review.mechanicsValidation?.checks || []).forEach((c) => {
+    const mid = c.mechanicId as string | undefined;
+    if (!mid) return;
+    const entry = (validationByMechanic[mid] = validationByMechanic[mid] || { ok: 0, mismatch: 0, total: 0 });
+    entry.total += 1;
+    if (c.status === "ok") entry.ok += 1;
+    if (c.status === "mismatch") entry.mismatch += 1;
+  });
+
+  const generatedByMechanic: { [id: string]: string } = {};
+  (review.mechanicsGeneratedDsl?.fragments || []).forEach((f) => {
+    const mid = (f.sourceMechanicId || "") as string;
+    if (!mid) return;
+    generatedByMechanic[mid] = f.status;
+  });
+
+  const patchByMechanic: { [id: string]: { status: string; approvalStatus?: string } } = {};
+  (review.mechanicsDslPatchPreview?.patches || []).forEach((p) => {
+    const mid = (p.sourceMechanicId || "") as string;
+    if (!mid) return;
+    patchByMechanic[mid] = {
+      status: p.status,
+      approvalStatus: (p as any).approvalStatus,
+    };
+  });
+
   // Simple, MVP-only Final Actuary Decision form state.
   const [reviewer, setReviewer] = React.useState("");
   const [decision, setDecision] = React.useState("");
@@ -2368,126 +2450,161 @@ export const ProductModelReviewPage: React.FC<ProductModelReviewPageProps> = ({ 
         </table>
       </section>
 
-      <section className="card">
-        <h2>Step 2 – Review Scenario Evidence (POC)</h2>
-        <p className="muted">
-          Review how the model behaves under a small set of test scenarios. Confirm that the inputs and projected
-          behavior match your expectations for this filing.
-        </p>
-        <div className="scenario-grid">
-          {scenarios.map((s) => {
-            const inp = normaliseInputs(s.inputs || {});
-            const faceDisplay =
-              typeof inp.faceAmount === "number" ? inp.faceAmount.toLocaleString() : String(inp.faceAmount);
-
-            return (
-              <div
-                key={s.id}
-                className={
-                  "scenario-card" + (selectedScenario && selectedScenario.id === s.id ? " scenario-card--selected" : "")
-                }
-                onClick={() => setSelectedScenarioId(s.id)}
-              >
-                <h3>
-                  {s.id} – {s.name}
-                </h3>
-                <p>
-                  <strong>Inputs:</strong> Age {inp.age}, {inp.sex}, {inp.smokerClass}, term {inp.termYears} years, face {faceDisplay} ({inp.premiumMode} premium)
-                </p>
-                <p>
-                  <strong>Purpose:</strong> {s.purpose || "(not recorded)"}
-                </p>
-                <p>
-                  <strong>Expected behavior:</strong>
-                </p>
-                <ul>
-                  {s.expectedBehavior.map((b, idx) => (
-                    <li key={idx}>{b}</li>
-                  ))}
-                </ul>
-                <p>
-                  <strong>Model behavior (summary):</strong> {s.modelBehaviorSummary}
-                </p>
-                <p>
-                  <strong>Result:</strong> {s.status.toUpperCase()}
-                </p>
-              </div>
-            );
-          })}
-        </div>
-      </section>
-
       {review.productMechanics && review.productMechanics.length > 0 && (
-        <section className="card">
-          <h2>Product Mechanics</h2>
-          <p className="muted">
-            Curated view of key product mechanics for this product. Each mechanic links filings, semantics,
-            and DSL paths; this is the first step toward a reusable Product Mechanics Graph abstraction.
-            The first populated mechanics dataset is P12TRF, but the underlying model and APIs are
-            intended to be product-agnostic.
-          </p>
-          <table className="kv-table">
-            <thead>
-              <tr>
-                <th>Mechanic</th>
-                <th>Type</th>
-                <th>Confidence</th>
-                <th>Filing evidence</th>
-                <th>DSL elements</th>
-              </tr>
-            </thead>
-            <tbody>
-              {review.productMechanics.map((m) => (
-                <tr key={m.id}>
-                  <td>
-                    <strong>{m.name}</strong>
-                    <br />
-                    <span className="muted" style={{ fontSize: "0.85rem" }}>
-                      {m.description}
-                    </span>
-                  </td>
-                  <td>{m.type}</td>
-                  <td>{(m.confidence * 100).toFixed(0)}%</td>
-                  <td>
-                    {m.filing_sources && m.filing_sources.length > 0 ? (
-                      <ul>
-                        {m.filing_sources.map((fs) => (
-                          <li key={fs.id}>
-                            <span>{fs.document_hint}</span>
-                            {fs.page && <span> ({fs.page})</span>}
-                            {fs.snippet && (
-                              <span className="muted"> – {fs.snippet}</span>
-                            )}
-                          </li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <span className="muted">No filing evidence recorded.</span>
-                    )}
-                  </td>
-                  <td>
-                    {m.dsl_refs && m.dsl_refs.length > 0 ? (
-                      <ul>
-                        {m.dsl_refs.map((dr) => (
-                          <li key={dr.id}>
-                            <code>{dr.file}</code>
-                            {": "}
-                            <code>{dr.path}</code>
-                            {dr.description && (
-                              <span className="muted"> – {dr.description}</span>
-                            )}
-                          </li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <span className="muted">No DSL links recorded.</span>
-                    )}
-                  </td>
+        <>
+          <section className="card">
+            <h2>How This Product Works</h2>
+            <p className="muted">
+              High-level narrative assembled from the Product Mechanics for this product. This is intentionally
+              P12TRF-focused for v0.1 and is meant to give actuaries a fast mental model before diving into DSL
+              or projections.
+            </p>
+            <ol>
+              <li>A customer applies at an eligible <strong>Issue Age</strong>.</li>
+              <li>The customer is assigned a <strong>Risk Class</strong>.</li>
+              <li>The customer selects a <strong>Face Amount</strong>, which determines the applicable <strong>Face Band</strong>.</li>
+              <li>The customer selects a <strong>Level Term Period</strong> (e.g. 10/15/20/30 years).</li>
+              <li>
+                <strong>Premiums</strong> are determined using Issue Age, Risk Class, Face Band, and Level Term Period, plus a
+                <strong> Monthly Policy Fee</strong> when applicable.
+              </li>
+              <li>The policy provides a <strong>Death Benefit</strong> during the level term period.</li>
+              <li>The policy may be <strong>Convertible</strong> to a permanent plan under certain conditions.</li>
+              <li>
+                Coverage ultimately expires at <strong>Maturity</strong> (term to age 95), and the product has <strong>no cash
+                value</strong> under the nonforfeiture exception.
+              </li>
+            </ol>
+          </section>
+
+          <section className="card">
+            <h2>Product Mechanics Review</h2>
+            <p className="muted">
+              Mechanics-first view of the product. Each mechanic captures a key product concept, its filing evidence,
+              what it affects, which scenarios exercise it, and how it is implemented in DSL. Implementation details
+              are intentionally secondary to product meaning.
+            </p>
+            <table className="kv-table">
+              <thead>
+                <tr>
+                  <th>Mechanic</th>
+                  <th>Behaviour & scenarios</th>
+                  <th>Implementation details</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </section>
+              </thead>
+              <tbody>
+                {review.productMechanics.map((m) => {
+                  const effected = mechanicEffects[m.id] || [];
+                  const scenIds = mechanicScenarios[m.id] || [];
+                  const scenLabels = scenIds.length > 0 ? scenIds.join(", ") : "(none)";
+
+                  const v = validationByMechanic[m.id];
+                  let validationSummary = "No validation configured.";
+                  if (v && v.total > 0) {
+                    if (v.mismatch > 0) validationSummary = `Validation configured; ${v.mismatch} mismatch(es).`;
+                    else if (v.ok > 0) validationSummary = "Validation configured; all checks OK.";
+                    else validationSummary = "Validation checks present but inconclusive.";
+                  }
+
+                  const genStatus = generatedByMechanic[m.id];
+                  let generatedSummary = "No generated DSL fragment.";
+                  if (genStatus === "matches_current_dsl") generatedSummary = "Generated fragment matches current DSL.";
+                  else if (genStatus === "differs_from_current_dsl") generatedSummary = "Generated fragment differs from current DSL.";
+
+                  const patchInfo = patchByMechanic[m.id];
+                  let patchSummary = "No mechanics-derived patch.";
+                  if (patchInfo) {
+                    const base = patchInfo.status === "no_change"
+                      ? "Proposed patch would not change DSL."
+                      : patchInfo.status === "would_update"
+                        ? "Proposed patch would update DSL."
+                        : `Patch status: ${patchInfo.status}.`;
+                    if (patchInfo.approvalStatus) {
+                      patchSummary = `${base} Approval: ${patchInfo.approvalStatus}.`;
+                    } else {
+                      patchSummary = base;
+                    }
+                  }
+
+                  return (
+                    <tr key={m.id}>
+                      <td>
+                        <strong>{m.name}</strong>
+                        <br />
+                        <span className="muted" style={{ fontSize: "0.85rem" }}>
+                          {m.description}
+                        </span>
+                        <div style={{ marginTop: "0.5rem" }}>
+                          <strong>Filing evidence:</strong>
+                          {m.filing_sources && m.filing_sources.length > 0 ? (
+                            <ul>
+                              {m.filing_sources.map((fs) => (
+                                <li key={fs.id}>
+                                  <span>{fs.document_hint}</span>
+                                  {fs.page && <span> ({fs.page})</span>}
+                                  {fs.snippet && <span className="muted"> – {fs.snippet}</span>}
+                                </li>
+                              ))}
+                            </ul>
+                          ) : (
+                            <span className="muted"> No filing evidence recorded.</span>
+                          )}
+                        </div>
+                      </td>
+                      <td>
+                        <div>
+                          <strong>What it affects:</strong>
+                          {effected.length > 0 ? (
+                            <ul>
+                              {effected.map((txt) => (
+                                <li key={txt}>{txt}</li>
+                              ))}
+                            </ul>
+                          ) : (
+                            <span className="muted"> (not documented yet)</span>
+                          )}
+                        </div>
+                        <div style={{ marginTop: "0.5rem" }}>
+                          <strong>Scenarios exercising this mechanic:</strong> {scenLabels}
+                        </div>
+                      </td>
+                      <td>
+                        <div>
+                          <strong>DSL mappings:</strong>
+                          {m.dsl_refs && m.dsl_refs.length > 0 ? (
+                            <ul>
+                              {m.dsl_refs.map((dr) => (
+                                <li key={dr.id}>
+                                  <code>{dr.file}</code>
+                                  {": "}
+                                  <code>{dr.path}</code>
+                                  {dr.description && (
+                                    <span className="muted"> – {dr.description}</span>
+                                  )}
+                                </li>
+                              ))}
+                            </ul>
+                          ) : (
+                            <span className="muted"> No DSL links recorded.</span>
+                          )}
+                        </div>
+                        <div style={{ marginTop: "0.5rem" }}>
+                          <strong>Validation:</strong> <span className="muted">{validationSummary}</span>
+                        </div>
+                        <div style={{ marginTop: "0.5rem" }}>
+                          <strong>Generated DSL:</strong> <span className="muted">{generatedSummary}</span>
+                        </div>
+                        <div style={{ marginTop: "0.5rem" }}>
+                          <strong>Patch / approval:</strong> <span className="muted">{patchSummary}</span>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </section>
+        </>
       )}
 
       {review.mechanicsValidation && review.mechanicsValidation.checks && review.mechanicsValidation.checks.length > 0 && (
