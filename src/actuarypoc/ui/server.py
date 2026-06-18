@@ -6064,7 +6064,58 @@ def api_product_assumptions_ai_generate(payload: ProductAssumptionsAIGenerateReq
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"Failed to generate AssumptionSet via OpenAI: {exc}") from exc
 
-    return {"assumptionSet": asn.to_dict()}
+    # Best-effort DSL inspection so the AI Review Agent UI can show
+    # *actual* assumptions (risk class mappings, face bands, etc.)
+    # instead of only the registry JSON shell. This is advisory only
+    # and should never block assumption extraction.
+    dsl_preview: Dict[str, Any] = {}
+    try:
+        dsl_rel = (getattr(asn, "dsl_file", "") or "").strip()
+    except Exception:
+        dsl_rel = ""
+
+    if dsl_rel:
+        try:
+            base = Path(__file__).resolve().parents[1]
+            dsl_path = base / "dsl" / "examples" / dsl_rel
+            if dsl_path.exists():
+                formula = load_formula(str(dsl_path))
+
+                meta_section = getattr(formula, "meta", None)
+                meta_dict: Dict[str, Any] = meta_section if isinstance(meta_section, dict) else {}
+
+                charges_preview: List[Dict[str, Any]] = []
+                for ch in getattr(formula, "charges", []) or []:
+                    charges_preview.append(
+                        {
+                            "name": getattr(ch, "name", None),
+                            "formula": getattr(ch, "formula", None),
+                            "description": getattr(ch, "description", None),
+                            "optional": bool(getattr(ch, "optional", False)),
+                        }
+                    )
+
+                rates_preview: List[Dict[str, Any]] = []
+                for rate in getattr(formula, "credit_rates", []) or []:
+                    rates_preview.append(
+                        {
+                            "rate_type": getattr(rate, "rate_type", None),
+                            "expression": getattr(rate, "expression", None),
+                            "description": getattr(rate, "description", None),
+                        }
+                    )
+
+                dsl_preview = {
+                    "dslFile": dsl_rel,
+                    "meta": meta_dict,
+                    "charges": charges_preview,
+                    "creditRates": rates_preview,
+                }
+        except Exception:
+            # DSL inspection is best-effort only.
+            dsl_preview = {}
+
+    return {"assumptionSet": asn.to_dict(), "dslPreview": dsl_preview}
 
 
 @app.post("/api/product-scenarios/ai-generate")

@@ -11,6 +11,7 @@ export const AIReviewAgentPage: React.FC = () => {
   const [metadataFeedback, setMetadataFeedback] = useState<string>("");
 
   const [assumptionSetJson, setAssumptionSetJson] = useState<string | null>(null);
+  const [assumptionDslPreview, setAssumptionDslPreview] = useState<any | null>(null);
   const [assumptionsApproved, setAssumptionsApproved] = useState<boolean>(false);
   const [assumptionsFeedback, setAssumptionsFeedback] = useState<string>("");
   const [scenarios, setScenarios] = useState<any[] | null>(null);
@@ -207,6 +208,7 @@ export const AIReviewAgentPage: React.FC = () => {
       }
       const data = await res.json();
       setAssumptionSetJson(JSON.stringify(data.assumptionSet, null, 2));
+      setAssumptionDslPreview(data.dslPreview ?? null);
       setAssumptionsApproved(false);
     } catch (e: any) {
       setError(e?.message || "Failed to generate assumptions from filings.");
@@ -336,6 +338,7 @@ export const AIReviewAgentPage: React.FC = () => {
       }
       const data = await res.json();
       setAssumptionSetJson(JSON.stringify(data.assumptionSet, null, 2));
+      setAssumptionDslPreview(data.dslPreview ?? null);
       setAssumptionsApproved(false);
     } catch (e: any) {
       setError(e?.message || "Failed to retry assumptions with feedback.");
@@ -681,6 +684,131 @@ export const AIReviewAgentPage: React.FC = () => {
             </button>
           </div>
         </div>
+
+        {assumptionDslPreview && (
+          <section style={{ marginTop: "1rem" }}>
+            <h3>DSL-backed assumptions</h3>
+            <p className="muted">
+              Preview derived from <code>{assumptionDslPreview.dslFile}</code>. This is what the engine will
+              actually use.
+            </p>
+
+            {assumptionDslPreview.meta && assumptionDslPreview.meta.risk_class_mapping && (
+              <div style={{ marginBottom: "0.75rem" }}>
+                <h4>Risk class mapping</h4>
+                <table className="kv-table">
+                  <thead>
+                    <tr>
+                      <th>Filed label</th>
+                      <th>Engine label</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {Object.entries(assumptionDslPreview.meta.risk_class_mapping).map(([raw, norm]) => (
+                      <tr key={raw}>
+                        <td>{raw}</td>
+                        <td>{String(norm)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {assumptionDslPreview.meta && assumptionDslPreview.meta.mortality_risk_class_mapping && (
+              <div style={{ marginBottom: "0.75rem" }}>
+                <h4>Mortality risk class mapping</h4>
+                <table className="kv-table">
+                  <thead>
+                    <tr>
+                      <th>Engine risk class</th>
+                      <th>Mortality table class</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {Object.entries(assumptionDslPreview.meta.mortality_risk_class_mapping).map(([rc, mt]) => (
+                      <tr key={rc}>
+                        <td>{rc}</td>
+                        <td>{String(mt)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {assumptionDslPreview.meta && Array.isArray(assumptionDslPreview.meta.face_bands) && (
+              <div style={{ marginBottom: "0.75rem" }}>
+                <h4>Face amount bands</h4>
+                <table className="kv-table">
+                  <thead>
+                    <tr>
+                      <th>Band</th>
+                      <th>Min</th>
+                      <th>Max</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {assumptionDslPreview.meta.face_bands.map((b: any, idx: number) => (
+                      <tr key={b.band ?? idx}>
+                        <td>{b.band ?? idx + 1}</td>
+                        <td>{b.min ?? "(none)"}</td>
+                        <td>{b.max ?? "(none)"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {assumptionDslPreview.meta && assumptionDslPreview.meta.policy_fee && (
+              <div style={{ marginBottom: "0.75rem" }}>
+                <h4>Policy fee assumption</h4>
+                <p className="muted">
+                  Min {assumptionDslPreview.meta.policy_fee.min ?? "?"}, max {" "}
+                  {assumptionDslPreview.meta.policy_fee.max ?? "?"}, default {" "}
+                  {assumptionDslPreview.meta.policy_fee.default ?? "?"}.
+                </p>
+              </div>
+            )}
+
+            {assumptionDslPreview.charges && assumptionDslPreview.charges.length > 0 && (
+              <div style={{ marginBottom: "0.75rem" }}>
+                <h4>Charges (from DSL)</h4>
+                <ul>
+                  {assumptionDslPreview.charges.map((ch: any, idx: number) => (
+                    <li key={ch.name || idx}>
+                      <strong>{ch.name || "(unnamed)"}</strong>: {ch.formula || "(no formula)"}
+                      {ch.description && <span> – {ch.description}</span>}
+                      {ch.optional && <span> (optional)</span>}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {assumptionDslPreview.creditRates && assumptionDslPreview.creditRates.length > 0 && (
+              <div style={{ marginBottom: "0.75rem" }}>
+                <h4>Credit / discount rates (from DSL)</h4>
+                <ul>
+                  {assumptionDslPreview.creditRates.map((r: any, idx: number) => (
+                    <li key={r.rate_type || idx}>
+                      <strong>{r.rate_type || "rate"}</strong>: {r.expression || "(no expression)"}
+                      {r.description && <span> – {r.description}</span>}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {!assumptionDslPreview.meta &&
+              (!assumptionDslPreview.charges || assumptionDslPreview.charges.length === 0) &&
+              (!assumptionDslPreview.creditRates || assumptionDslPreview.creditRates.length === 0) && (
+                <p className="muted">No DSL-backed assumptions were found for this AssumptionSet.</p>
+              )}
+          </section>
+        )}
+
         {assumptionSetJson && (
           <pre className="code-block" style={{ maxHeight: "20rem", overflow: "auto" }}>
             {assumptionSetJson}
