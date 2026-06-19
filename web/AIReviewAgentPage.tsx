@@ -20,6 +20,7 @@ export const AIReviewAgentPage: React.FC = () => {
   const [pmrSummary, setPmrSummary] = useState<any | null>(null);
   const [pmrDecision, setPmrDecision] = useState<any | null>(null);
   const [pmrApproved, setPmrApproved] = useState<boolean>(false);
+  const [pmrApprovalMessage, setPmrApprovalMessage] = useState<string | null>(null);
   const [pmrFeedback, setPmrFeedback] = useState<string>("");
   const [illustrationResult, setIllustrationResult] = useState<any | null>(null);
   const [selectedScenarioIndex, setSelectedScenarioIndex] = useState<number>(0);
@@ -546,6 +547,7 @@ export const AIReviewAgentPage: React.FC = () => {
       setPmrSummary(data.aiSummary || null);
       setPmrDecision(data.aiDecision || null);
       setPmrApproved(false);
+      setPmrApprovalMessage(null);
     } catch (e: any) {
       setError(e?.message || "Failed to run PMR AI agents.");
     } finally {
@@ -645,6 +647,7 @@ export const AIReviewAgentPage: React.FC = () => {
       setPmrSummary(data.aiSummary || null);
       setPmrDecision(data.aiDecision || null);
       setPmrApproved(false);
+      setPmrApprovalMessage(null);
     } catch (e: any) {
       setError(e?.message || "Failed to retry PMR agents with feedback.");
     } finally {
@@ -1636,6 +1639,7 @@ export const AIReviewAgentPage: React.FC = () => {
 
                 setError(null);
                 setPmrApproved(false);
+                setPmrApprovalMessage(null);
                 try {
                   const payload: any = {
                     reviewer: "ai_review_agent",
@@ -1670,18 +1674,23 @@ export const AIReviewAgentPage: React.FC = () => {
                   const ts = data && data.created_at ? ` Saved at ${data.created_at}.` : "";
                   const who = data && data.reviewer ? ` (reviewer: ${data.reviewer}).` : "";
                   setPmrApproved(true);
-                  setRegistrationMessage(msgBase + ts + who);
+                  setPmrApprovalMessage(msgBase + ts + who);
                 } catch (e: any) {
                   setError(e?.message || "Failed to record PMR AI suggestion approval.");
                 }
               }}
-              disabled={loading || !pmrDecision}
+              disabled={loading || !pmrDecision || pmrApproved}
               style={{ marginLeft: "0.5rem" }}
             >
-              Mark PMR AI suggestion as approved
+              {pmrApproved ? "PMR AI suggestion approved" : "Mark PMR AI suggestion as approved"}
             </button>
           </div>
         </div>
+        {pmrApprovalMessage && (
+          <p className="muted" style={{ marginTop: "0.5rem" }}>
+            {pmrApprovalMessage}
+          </p>
+        )}
         {pmrSummary && (
           <div className="pmr-ai-summary">
             <h3>AI Summary</h3>
