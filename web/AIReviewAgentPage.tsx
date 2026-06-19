@@ -1685,7 +1685,28 @@ export const AIReviewAgentPage: React.FC = () => {
       </section>
 
       <section className="card">
-        <h2>6. Illustration Projection (Final)</h2>
+        <h2>6. Register Product</h2>
+        <p className="muted">
+          Registering adds this product to <strong>Known Products</strong> so the review can be resumed later without
+          re-uploading filings. Registration does <strong>not</strong> approve the executable model or mark projections
+          as production-ready.
+        </p>
+        <div className="form-grid">
+          <div className="form-row">
+            <button type="button" onClick={handleRegisterProduct} disabled={loading || !normalisedCode.trim()}>
+              {loading ? "Working…" : "Register product in Known Products"}
+            </button>
+          </div>
+        </div>
+        {registrationMessage && (
+          <p className="muted" style={{ marginTop: "0.5rem" }}>
+            {registrationMessage}
+          </p>
+        )}
+      </section>
+
+      <section className="card">
+        <h2>7. Illustration Projection (Final)</h2>
         <p className="muted">
           Generate an illustration-like projection for one of the approved scenarios, using the current product
           configuration and assumptions.
@@ -1781,79 +1802,6 @@ export const AIReviewAgentPage: React.FC = () => {
               </tbody>
             </table>
           </>
-        )}
-      </section>
-
-      <section className="card">
-        <h2>5. PMR AI Summary & Decision (Stage 4)</h2>
-        <p className="muted">
-          Run AI agents over the Product Model Review snapshot for this product. This consumes scenarios, mechanics,
-          assumptions, and known gaps to propose a narrative summary and a draft decision, but does not write any
-          approvals.
-        </p>
-        <div className="form-grid">
-          <div className="form-row">
-            <button type="button" onClick={handleRunPmrAgents} disabled={loading || !assumptionsApproved || !scenariosApproved}>
-              {loading ? "Working…" : "Run PMR agents"}
-            </button>
-            <button
-              type="button"
-              onClick={handleRetryPmrWithFeedback}
-              disabled={loading || !pmrSummary}
-              style={{ marginLeft: "0.5rem" }}
-            >
-              {loading ? "Working…" : "Reject & retry with feedback"}
-            </button>
-          </div>
-        </div>
-        {pmrSummary && (
-          <section style={{ marginTop: "1rem" }}>
-            <h3>PMR AI Summary</h3>
-            <pre className="code-block" style={{ maxHeight: "16rem", overflow: "auto" }}>
-              {JSON.stringify(pmrSummary, null, 2)}
-            </pre>
-          </section>
-        )}
-        {pmrDecision && (
-          <section style={{ marginTop: "1rem" }}>
-            <h3>PMR AI Decision Suggestion</h3>
-            <pre className="code-block" style={{ maxHeight: "16rem", overflow: "auto" }}>
-              {JSON.stringify(pmrDecision, null, 2)}
-            </pre>
-          </section>
-        )}
-        <div className="form-grid" style={{ marginTop: "1rem" }}>
-          <div className="form-row">
-            <label htmlFor="pmr-feedback">Feedback (for retries)</label>
-            <textarea
-              id="pmr-feedback"
-              value={pmrFeedback}
-              onChange={(e) => setPmrFeedback(e.target.value)}
-              placeholder="Explain what is wrong or missing in the PMR summary/decision."
-              rows={3}
-            />
-          </div>
-        </div>
-      </section>
-
-      <section className="card">
-        <h2>6. Register Product</h2>
-        <p className="muted">
-          Registering adds this product to <strong>Known Products</strong> so the review can be resumed later without
-          re-uploading filings. Registration does <strong>not</strong> approve the executable model or mark projections
-          as production-ready.
-        </p>
-        <div className="form-grid">
-          <div className="form-row">
-            <button type="button" onClick={handleRegisterProduct} disabled={loading || !normalisedCode.trim()}>
-              {loading ? "Working…" : "Register product in Known Products"}
-            </button>
-          </div>
-        </div>
-        {registrationMessage && (
-          <p className="muted" style={{ marginTop: "0.5rem" }}>
-            {registrationMessage}
-          </p>
         )}
       </section>
     </div>
