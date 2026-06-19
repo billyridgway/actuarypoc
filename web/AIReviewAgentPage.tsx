@@ -554,6 +554,14 @@ export const AIReviewAgentPage: React.FC = () => {
   };
 
   const handleGenerateIllustration = async () => {
+    const projectionSupported = normalisedCode.trim().toUpperCase() === "P12TRF";
+    if (!projectionSupported) {
+      // For non-P12TRF products we surface an explicit unavailable state
+      // in the UI instead of letting the user click and discover via a
+      // generic error that projections are not yet wired.
+      setError(null);
+      return;
+    }
     const code = normalisedCode.trim();
     if (!code) {
       setError("Enter a product code before generating an illustration.");
@@ -672,6 +680,8 @@ export const AIReviewAgentPage: React.FC = () => {
       setLoading(false);
     }
   };
+
+  const projectionSupported = normalisedCode.trim().toUpperCase() === "P12TRF";
 
   return (
     <div className="run-detail-page">
@@ -1729,11 +1739,21 @@ export const AIReviewAgentPage: React.FC = () => {
             </select>
           </div>
           <div className="form-row">
-            <button type="button" onClick={handleGenerateIllustration} disabled={loading}>
+            <button
+              type="button"
+              onClick={handleGenerateIllustration}
+              disabled={loading || !projectionSupported}
+            >
               {loading ? "Working…" : "Generate illustration for selected scenario"}
             </button>
           </div>
         </div>
+        {!projectionSupported && (
+          <p className="muted" style={{ marginTop: "0.5rem" }}>
+            Illustration projection is not available yet for this product. Product understanding is ready for DSL
+            authoring, but no executable DSL/projection model has been implemented.
+          </p>
+        )}
         {illustrationResult && (
           <>
             {illustrationResult.projection?.metrics && (
