@@ -5644,13 +5644,28 @@ def api_product_model_review_decision(product_code: str, payload: ProductModelRe
     validation_snapshot_hash: Optional[str] = None
 
     # For now the richer context (including snapshot persistence) is
-    # only implemented for P12TRF; other products keep the simpler
-    # decision record. Decisions are always stored using an
-    # upper-cased product_code so that last-decision lookups remain
-    # consistent regardless of the casing used at the API boundary.
+    # only implemented for P12TRF *and only for full trust-surface
+    # approval flows*. Lightweight, product-understanding decisions
+    # such as "proceed_to_dsl_authoring" do not require ProductDefinition
+    # artefacts or MinIO and therefore skip the snapshot block even
+    # for P12TRF. Other products keep the simpler decision record.
+    # Decisions are always stored using an upper-cased product_code so
+    # that last-decision lookups remain consistent regardless of the
+    # casing used at the API boundary.
     scenario_validation_snapshot: Optional[Dict[str, Any]] = None
     code_norm = product_code.strip().upper()
-    if code_norm == "P12TRF":
+    # Decisions that represent full trust-surface approval and therefore
+    # should include a snapshot of ProductDefinition and validation
+    # artefacts. DSL-authoring and understanding-only decisions do not
+    # need this heavy snapshot and are allowed even when ProductDefinition
+    # assets are missing or MinIO is unavailable.
+    heavy_snapshot_decisions = {
+        "approve_for_poc",
+        "approve_with_exclusions",
+        "request_changes",
+        "reject",
+    }
+    if code_norm == "P12TRF" and decision in heavy_snapshot_decisions:
         try:
             pmr = api_product_model_review_p12trf()
             review_meta = pmr.get("reviewMeta") or {}
