@@ -5653,6 +5653,10 @@ def api_product_model_review_decision(product_code: str, payload: ProductModelRe
     # that last-decision lookups remain consistent regardless of the
     # casing used at the API boundary.
     scenario_validation_snapshot: Optional[Dict[str, Any]] = None
+    scenario_validation_status: Optional[str] = None
+    scenario_validation_pass_count: Optional[int] = None
+    scenario_validation_warning_count: Optional[int] = None
+    scenario_validation_fail_count: Optional[int] = None
     code_norm = product_code.strip().upper()
     # Decisions that represent full trust-surface approval and therefore
     # should include a snapshot of ProductDefinition and validation
