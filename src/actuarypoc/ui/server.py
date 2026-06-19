@@ -18,7 +18,11 @@ from actuarypoc.connectors.base import CSVConnector
 from actuarypoc.domain.product_definition_v1 import ProductDefinitionLineage, ProductDefinitionV1
 from actuarypoc.product_registry import get_product_definition
 from actuarypoc.storage.minio_client import ensure_bucket, get_minio_client, get_bucket_name
-from actuarypoc.config.assumptions import list_assumption_sets, approve_assumption_set
+from actuarypoc.config.assumptions import (
+    list_assumption_sets,
+    approve_assumption_set,
+    get_current_assumption_for_product,
+)
 from actuarypoc.dsl.policy_dsl import load_formula
 from actuarypoc.domain.product_mechanics import (
     FilingSource,
@@ -406,6 +410,12 @@ class ProductReviewDraftRequest(BaseModel):  # type: ignore[misc]
     product_code: str
     product_type: str
     filing_id: Optional[str] = None
+
+
+class ProductReviewAssumptionDiscoveryRequest(BaseModel):  # type: ignore[misc]
+    assumptionSetId: Optional[str] = None
+    status: Optional[str] = None  # e.g. "not_started" | "in_progress" | "complete" | "unknown"
+    mechanicAssumptions: Optional[List[Dict[str, Any]]] = None
 
 
 class ProductReviewMetadataSuggestionRequest(BaseModel):  # type: ignore[misc]
@@ -2815,7 +2825,10 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
     scen_and_rates = _build_p12trf_scenarios_and_rates()
 
     # Assumptions and gaps remain mostly static POC hints for now but are
-    # clearly labeled as such.
+    # clearly labeled as such. A separate mechanics-informed discovery
+    # block is attached later when available from the Product Review
+    # metadata so that downstream AI agents can see non-executable
+    # assumption discovery output.
     assumptions = {
         "filed": [],
         "aiProposed": [
@@ -2836,6 +2849,12 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
                 "humanApproval": "pending",
             },
         ],
+    }
+
+    mechanics_informed: Dict[str, Any] = {
+        "status": "not_started",
+        "assumptionSetId": None,
+        "mechanicAssumptions": [],
     }
 
     gaps = {
@@ -2879,12 +2898,29 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
         rec = get_product_review(product_block["code"])
         meta = (rec or {}).get("metadata") or {}
         filing_id: Optional[str] = None
+        review_state: Dict[str, Any] = {}
         if isinstance(meta, dict):
             rs = meta.get("review") or {}
             if isinstance(rs, dict):
+                review_state = rs
                 filing_id = rs.get("filing_id")
                 review_meta["currentGeneration"] = rs.get("current_generation")
                 review_meta["generatedAt"] = rs.get("generated_at")
+
+                # Mechanics-informed assumption discovery snapshot (when
+                # present in the Product Review metadata). This captures
+                # non-DSL assumption discovery so the PMR and AI summary
+                # can avoid claiming that "no assumptions" exist when
+                # mechanics-informed assumptions have been extracted.
+                ad = review_state.get("assumption_discovery")
+                if isinstance(ad, dict):
+                    status = ad.get("status") or mechanics_informed["status"]
+                    mechanics_informed["status"] = status
+                    if ad.get("assumption_set_id") is not None:
+                        mechanics_informed["assumptionSetId"] = ad.get("assumption_set_id")
+                    mach = ad.get("mechanic_assumptions")
+                    if isinstance(mach, list):
+                        mechanics_informed["mechanicAssumptions"] = mach
         review_meta["filingId"] = filing_id
 
         # Attach scenario-level metadata (purpose, dimensions, source)
@@ -3153,6 +3189,17 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
         # is not configured.
         pass
 
+    # When no explicit assumption_set_id was recorded in the discovery
+    # block, fall back to the current approved AssumptionSet for this
+    # product (when one exists) so the PMR snapshot still reflects which
+    # executable assumptions the engine would use.
+    try:
+        current_asn = get_current_assumption_for_product(product_block["code"])
+    except Exception:
+        current_asn = None
+    if current_asn is not None and not mechanics_informed.get("assumptionSetId"):
+        mechanics_informed["assumptionSetId"] = current_asn.id
+
     # ProductDefinition validation (best-effort, not hidden behind the
     # broader Postgres try/except). When a ProductDefinition exists we
     # always return a non-null validation object, even if a runtime error
@@ -3328,7 +3375,7 @@ def api_product_model_review_p12trf() -> Dict[str, Any]:
         "traceability": traceability,
         "rates": scen_and_rates["rates"],
         "scenarios": scen_and_rates["scenarios"],
-        "assumptions": assumptions,
+        "assumptions": {**assumptions, "mechanicsInformed": mechanics_informed},
         "gaps": gaps,
         "reviewMeta": review_meta,
         "reviewFreshness": review_freshness,
@@ -3628,7 +3675,46 @@ def api_product_model_review_generic(product_code: str) -> Dict[str, Any]:
     # Minimal, generic shells for sections that the UI expects.
     traceability = {"rules": []}
     rates = {"cellsChecked": 0, "cellsMatched": 0, "exceptions": [], "spotChecks": []}
-    assumptions = {"filed": [], "aiProposed": []}
+
+    # Assumptions block for generic PMR builders. In addition to the
+    # historical filed/aiProposed shells, we surface a
+    # mechanics-informed discovery snapshot (when present in the Product
+    # Review metadata) so downstream AI agents can see that
+    # assumptions have been discovered even when they are not yet
+    # implemented as executable DSL.
+    assumptions: Dict[str, Any] = {"filed": [], "aiProposed": []}
+
+    mechanics_informed: Dict[str, Any] = {
+        "status": "not_started",
+        "assumptionSetId": None,
+        "mechanicAssumptions": [],
+    }
+
+    try:
+        ad = review_state.get("assumption_discovery") if isinstance(review_state, dict) else None
+    except Exception:
+        ad = None
+    if isinstance(ad, dict):
+        status = ad.get("status") or mechanics_informed["status"]
+        mechanics_informed["status"] = status
+        if ad.get("assumption_set_id") is not None:
+            mechanics_informed["assumptionSetId"] = ad.get("assumption_set_id")
+        mach = ad.get("mechanic_assumptions")
+        if isinstance(mach, list):
+            mechanics_informed["mechanicAssumptions"] = mach
+
+    # Fallback: if we have a current approved AssumptionSet for this
+    # product but no explicit assumption_set_id in the discovery block,
+    # surface that id so the PMR snapshot still knows which executable
+    # assumptions the engine would use.
+    try:
+        current_asn = get_current_assumption_for_product(code)
+    except Exception:
+        current_asn = None
+    if current_asn is not None and not mechanics_informed.get("assumptionSetId"):
+        mechanics_informed["assumptionSetId"] = current_asn.id
+
+    assumptions["mechanicsInformed"] = mechanics_informed
     gaps = {"missingFeatures": [], "ambiguousLanguage": []}
     review_freshness = {
         "status": "unknown",
@@ -3639,6 +3725,43 @@ def api_product_model_review_generic(product_code: str) -> Dict[str, Any]:
         "productDefinitionGeneratedAt": None,
         "latestDecisionCreatedAt": None,
     }
+
+    # Advisory Product Mechanics Graph v0.1 for generic products: when a
+    # mechanics registry exists for this product we surface it alongside
+    # the PMR so AI layers and UIs can see how filings and DSL connect,
+    # even when no product-specific PMR builder is implemented.
+    try:
+        mechanics = load_mechanics_for_product(code)
+        mechanics_payload = mechanics_to_json(mechanics)
+        mechanics_checks = validate_mechanics_against_dsl(code)
+        mechanics_generated = generate_dsl_fragments_from_mechanics(
+            code,
+            dsl_paths=["meta.policy_fee"],
+        )
+        mechanics_patches = build_dsl_patch_preview_from_mechanics(
+            code,
+            dsl_paths=["meta.policy_fee"],
+        )
+        approvals = list_mechanic_patch_approvals(code) or []
+        approvals_by_path: Dict[str, Dict[str, Any]] = {}
+        for row in approvals:
+            path = str(row.get("dsl_path") or "")
+            if path and path not in approvals_by_path:
+                approvals_by_path[path] = row
+        for patch in mechanics_patches:
+            path = str(patch.get("dslPath") or "")
+            info = approvals_by_path.get(path)
+            if not info:
+                continue
+            patch["approvalStatus"] = info.get("patch_status")
+            patch["approvalReviewer"] = info.get("reviewer")
+            patch["approvalReviewedAt"] = info.get("reviewed_at")
+            patch["approvalComments"] = info.get("comments")
+    except Exception:
+        mechanics_payload = []
+        mechanics_checks = []
+        mechanics_generated = []
+        mechanics_patches = []
 
     return {
         "product": product_block,
@@ -3662,6 +3785,19 @@ def api_product_model_review_generic(product_code: str) -> Dict[str, Any]:
         "productDefinitionValidation": None,
         "scenarioValidation": None,
         "decisionTimeline": None,
+        "productMechanics": mechanics_payload,
+        "mechanicsValidation": {
+            "productCode": product_block["code"],
+            "checks": mechanics_checks,
+        },
+        "mechanicsGeneratedDsl": {
+            "productCode": product_block["code"],
+            "fragments": mechanics_generated,
+        },
+        "mechanicsDslPatchPreview": {
+            "productCode": product_block["code"],
+            "patches": mechanics_patches,
+        },
     }
 
 
@@ -6121,6 +6257,70 @@ def api_product_review_metadata_suggest(payload: ProductReviewMetadataSuggestion
         raise HTTPException(status_code=500, detail=f"Failed to derive metadata from filings: {exc}") from exc
 
     return meta
+
+
+@app.post("/api/product-review/{product_code}/assumption-discovery")
+def api_product_review_assumption_discovery(product_code: str, payload: ProductReviewAssumptionDiscoveryRequest) -> Dict[str, Any]:
+    """Persist mechanics-informed assumption discovery for a Product Review.
+
+    This endpoint is used by the AI Review Agent once Stage 2 assumptions
+    have been reviewed/approved. It records a lightweight, non-executable
+    snapshot of mechanics-informed assumptions and discovery status in the
+    Product Review metadata so that the PMR builder and AI summary can
+    reflect that assumptions *do* exist even before DSL is wired.
+    """
+
+    code = (product_code or "").strip().upper()
+    if not code:
+        raise HTTPException(status_code=400, detail="product_code is required")
+
+    existing = get_product_review(code) or {}
+    meta = existing.get("metadata") or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    review_state = meta.get("review") or {}
+    if not isinstance(review_state, dict):
+        review_state = {}
+
+    discovery = dict(review_state.get("assumption_discovery") or {})
+    status = (payload.status or "").strip() or discovery.get("status") or "complete"
+    discovery["status"] = status
+    if payload.assumptionSetId is not None:
+        discovery["assumption_set_id"] = payload.assumptionSetId
+    elif "assumption_set_id" not in discovery:
+        discovery["assumption_set_id"] = None
+
+    if payload.mechanicAssumptions is not None:
+        # Store only JSON-serialisable mechanics-informed assumptions;
+        # callers remain responsible for any richer UI decoration.
+        if isinstance(payload.mechanicAssumptions, list):
+            discovery["mechanic_assumptions"] = list(payload.mechanicAssumptions)
+        else:
+            discovery["mechanic_assumptions"] = []
+
+    discovery["updated_at"] = datetime.utcnow().isoformat() + "Z"
+
+    review_state = dict(review_state)
+    review_state["assumption_discovery"] = discovery
+    review_state.setdefault("status", "draft")
+
+    # Preserve basic product strings when available.
+    product_name = meta.get("name") or code
+    product_type = meta.get("type") or ""
+    carrier = existing.get("carrier") or ""
+
+    rec = upsert_product_review_draft(
+        product_id=code,
+        carrier=carrier,
+        product_name=product_name,
+        product_type=product_type,
+        review_metadata=review_state,
+    )
+    if rec is None:
+        raise HTTPException(status_code=500, detail="Failed to persist assumption discovery state")
+
+    # Return the updated Product Review view for convenience.
+    return _build_product_review_payload(code)
 
 
 @app.post("/api/product-assumptions/ai-generate")

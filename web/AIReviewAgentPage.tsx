@@ -787,6 +787,29 @@ export const AIReviewAgentPage: React.FC = () => {
                   }
                   setInitialProductCode(newCode);
                   setMetadataApproved(true);
+
+                  // Ensure a Product Review draft exists for this product
+                  // so later stages (assumptions, scenarios, PMR) have a
+                  // single persisted review state to write into.
+                  try {
+                    const draftRes = await fetch("/api/product-review/draft", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({
+                        carrier_name: carrierName || "",
+                        product_name: productName || newCode,
+                        product_code: newCode,
+                        product_type: productType || "",
+                        filing_id: filingId || undefined,
+                      }),
+                    });
+                    if (!draftRes.ok) {
+                      const text = await draftRes.text();
+                      throw new Error(text || `HTTP ${draftRes.status}`);
+                    }
+                  } catch (e: any) {
+                    setError(e?.message || "Failed to create/update Product Review draft from metadata.");
+                  }
                 } catch (e: any) {
                   setError(e?.message || "Failed to finalise metadata and migrate documents.");
                 } finally {
@@ -1007,7 +1030,72 @@ export const AIReviewAgentPage: React.FC = () => {
             </button>
             <button
               type="button"
-              onClick={() => setAssumptionsApproved(true)}
+              onClick={async () => {
+                const code = normalisedCode.trim();
+                if (!code) {
+                  setError("Enter a product code before approving assumptions.");
+                  return;
+                }
+                if (!assumptionSetJson) {
+                  setError("Generate an AssumptionSet once before approving.");
+                  return;
+                }
+
+                setError(null);
+                setLoading(true);
+                try {
+                  // Parse the current AssumptionSet JSON to discover its id.
+                  let setId: string | null = null;
+                  try {
+                    const parsed = JSON.parse(assumptionSetJson);
+                    if (parsed && typeof parsed.id === "string") {
+                      setId = parsed.id;
+                    }
+                  } catch {
+                    setId = null;
+                  }
+
+                  // 1) Approve the AssumptionSet itself when we know its id.
+                  if (setId) {
+                    const resApprove = await fetch(
+                      `/api/assumptions/${encodeURIComponent(setId)}/approve?approved_by=ai_review_agent`,
+                      { method: "POST" },
+                    );
+                    if (!resApprove.ok) {
+                      const text = await resApprove.text();
+                      throw new Error(text || `HTTP ${resApprove.status}`);
+                    }
+                  }
+
+                  // 2) Persist mechanics-informed assumption discovery to the Product Review.
+                  const discoveryPayload: any = {
+                    assumptionSetId: setId || undefined,
+                    status: "complete",
+                  };
+                  if (assumptionDslPreview && Array.isArray(assumptionDslPreview.mechanicAssumptions)) {
+                    discoveryPayload.mechanicAssumptions = assumptionDslPreview.mechanicAssumptions;
+                  }
+
+                  const resDiscovery = await fetch(
+                    `/api/product-review/${encodeURIComponent(code)}/assumption-discovery`,
+                    {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify(discoveryPayload),
+                    },
+                  );
+                  if (!resDiscovery.ok) {
+                    const text = await resDiscovery.text();
+                    throw new Error(text || `HTTP ${resDiscovery.status}`);
+                  }
+
+                  setAssumptionsApproved(true);
+                } catch (e: any) {
+                  setError(e?.message || "Failed to persist assumption discovery state.");
+                } finally {
+                  setLoading(false);
+                }
+              }}
               disabled={loading}
               style={{ marginLeft: "0.5rem" }}
             >
@@ -1358,7 +1446,67 @@ export const AIReviewAgentPage: React.FC = () => {
             </button>
             <button
               type="button"
-              onClick={() => setScenariosApproved(true)}
+              onClick={async () => {
+                const code = normalisedCode.trim();
+                if (!code) {
+                  setError("Enter a product code before approving scenarios.");
+                  return;
+                }
+                if (!scenarios || scenarios.length === 0) {
+                  setError("Generate scenarios once before approving.");
+                  return;
+                }
+
+                const payload = {
+                  scenarios: scenarios.map((s) => {
+                    const inputs: any = (s as any).inputs || s;
+                    return {
+                      id: (s as any).id ?? null,
+                      name: (s as any).name ?? null,
+                      age: inputs.age ?? null,
+                      sex: inputs.sex ?? null,
+                      smokerClass: inputs.smokerClass ?? null,
+                      riskClass: inputs.riskClass ?? null,
+                      faceAmount: inputs.faceAmount ?? null,
+                      levelPeriod: inputs.levelPeriod ?? inputs.termYears ?? null,
+                      premiumMode: inputs.premiumMode ?? null,
+                      modalPremium: inputs.modalPremium ?? null,
+                      initialDeposit: inputs.initialDeposit ?? null,
+                      faceBand: inputs.faceBand ?? null,
+                      purpose: (s as any).purpose ?? inputs.purpose ?? null,
+                      dimensionsExercised:
+                        (s as any).dimensionsExercised ?? inputs.dimensionsExercised ?? null,
+                      source: (s as any).source ?? inputs.source ?? "ai_extracted",
+                    };
+                  }),
+                };
+
+                setError(null);
+                setLoading(true);
+                try {
+                  const res = await fetch(
+                    `/api/product-review/${encodeURIComponent(code)}/scenarios`,
+                    {
+                      method: "PUT",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify(payload),
+                    },
+                  );
+                  if (!res.ok) {
+                    const text = await res.text();
+                    throw new Error(text || `HTTP ${res.status}`);
+                  }
+                  const data = await res.json();
+                  if (Array.isArray(data?.scenarios)) {
+                    setScenarios(data.scenarios as any);
+                  }
+                  setScenariosApproved(true);
+                } catch (e: any) {
+                  setError(e?.message || "Failed to persist scenarios to Product Review.");
+                } finally {
+                  setLoading(false);
+                }
+              }}
               disabled={loading}
               style={{ marginLeft: "0.5rem" }}
             >
