@@ -526,6 +526,12 @@ _ALLOWED_PMR_DECISIONS = {
     "approve_with_exclusions",
     "request_changes",
     "reject",
+    # Product-understanding oriented decisions for products that do
+    # not yet have an executable DSL / projection model.
+    "proceed_to_dsl_authoring",
+    "proceed_with_caveats",
+    "request_more_understanding",
+    "defer",
 }
 
 

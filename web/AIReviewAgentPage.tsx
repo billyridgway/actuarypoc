@@ -1623,8 +1623,59 @@ export const AIReviewAgentPage: React.FC = () => {
             </button>
             <button
               type="button"
-              onClick={() => setPmrApproved(true)}
-              disabled={loading}
+              onClick={async () => {
+                const code = normalisedCode.trim();
+                if (!code) {
+                  setError("Enter a product code before approving the PMR AI suggestion.");
+                  return;
+                }
+                if (!pmrDecision || !pmrDecision.suggested_decision) {
+                  setError("Run the PMR AI summary & suggestion before approving.");
+                  return;
+                }
+
+                setError(null);
+                setPmrApproved(false);
+                try {
+                  const payload: any = {
+                    reviewer: "ai_review_agent",
+                    decision: pmrDecision.suggested_decision,
+                    exclusions: pmrDecision.suggested_exclusions || undefined,
+                  };
+                  if (Array.isArray(pmrDecision.rationale) && pmrDecision.rationale.length > 0) {
+                    payload.comments = pmrDecision.rationale.join(" • ");
+                  }
+
+                  const res = await fetch(
+                    `/api/product-model-review/${encodeURIComponent(code)}/decision`,
+                    {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify(payload),
+                    },
+                  );
+                  if (!res.ok) {
+                    const text = await res.text();
+                    throw new Error(text || `HTTP ${res.status}`);
+                  }
+                  const data = (await res.json()) as {
+                    decision?: string;
+                    created_at?: string;
+                    reviewer?: string | null;
+                  };
+
+                  const msgBase = data && data.decision
+                    ? `PMR AI suggestion approved: ${data.decision}.`
+                    : "PMR AI suggestion approved.";
+                  const ts = data && data.created_at ? ` Saved at ${data.created_at}.` : "";
+                  const who = data && data.reviewer ? ` (reviewer: ${data.reviewer}).` : "";
+                  setPmrApproved(true);
+                  setRegistrationMessage(msgBase + ts + who);
+                } catch (e: any) {
+                  setError(e?.message || "Failed to record PMR AI suggestion approval.");
+                }
+              }}
+              disabled={loading || !pmrDecision}
               style={{ marginLeft: "0.5rem" }}
             >
               Mark PMR AI suggestion as approved
