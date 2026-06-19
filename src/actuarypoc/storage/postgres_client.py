@@ -515,6 +515,104 @@ def get_product_review(product_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def register_product_catalog(product_id: str, catalog: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Attach or update catalog metadata for a product.
+
+    This marks a product as "known" to the system so that it can appear in
+    the product catalog / Known Products dropdown without implying that the
+    executable model is production‑ready.
+    """
+
+    ensure_schema()
+    try:
+        with _conn() as conn:
+            if conn is None:
+                return None
+            with conn.cursor() as cur:
+                # Load existing metadata so we can safely merge the
+                # catalog block without clobbering review state.
+                cur.execute(
+                    """
+                    SELECT carrier, metadata
+                      FROM products
+                     WHERE product_id = %s
+                    """,
+                    (product_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                carrier, meta = row[0], row[1]
+                if not isinstance(meta, dict):
+                    meta = {}
+                meta = dict(meta)
+                meta["catalog"] = catalog
+
+                cur.execute(
+                    """
+                    UPDATE products
+                       SET metadata = %s::jsonb,
+                           version = COALESCE(version, 0) + 1
+                     WHERE product_id = %s
+                 RETURNING product_id, carrier, version, metadata, created_at
+                    """,
+                    (json.dumps(meta), product_id),
+                )
+                row2 = cur.fetchone()
+                if not row2:
+                    return None
+                return {
+                    "product_id": row2[0],
+                    "carrier": row2[1],
+                    "version": row2[2],
+                    "metadata": row2[3],
+                    "created_at": row2[4],
+                }
+    except Exception as exc:  # noqa: BLE001
+        _note_failure(exc)
+        return None
+
+
+def list_registered_products() -> List[Dict[str, Any]]:
+    """Return products whose catalog.status is 'registered'.
+
+    This is used to populate the Known Products dropdown with products
+    that have saved review state and filings, regardless of model
+    implementation completeness.
+    """
+
+    ensure_schema()
+    try:
+        with _conn() as conn:
+            if conn is None:
+                return []
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT product_id, carrier, version, metadata, created_at
+                      FROM products
+                     WHERE metadata -> 'catalog' ->> 'status' = 'registered'
+                    ORDER BY product_id
+                    """,
+                )
+                rows = cur.fetchall() or []
+                results: List[Dict[str, Any]] = []
+                for row in rows:
+                    results.append(
+                        {
+                            "product_id": row[0],
+                            "carrier": row[1],
+                            "version": row[2],
+                            "metadata": row[3],
+                            "created_at": row[4],
+                        }
+                    )
+                return results
+    except Exception as exc:  # noqa: BLE001
+        _note_failure(exc)
+        return []
+
+
 def record_document_upload(
     *,
     product_id: str,

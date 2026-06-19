@@ -62,6 +62,8 @@ from actuarypoc.storage.postgres_client import (
     list_mechanic_patch_approvals,
     update_product_model_review_bundle,
     upsert_product_review_draft,
+    register_product_catalog,
+    list_registered_products,
 )
 
 try:  # FastAPI can be configured with either Pydantic v1 or v2
@@ -466,6 +468,11 @@ class ProductMechanicsAIGenerateRequest(BaseModel):  # type: ignore[misc]
 class ProductMechanicsApproveRequest(BaseModel):  # type: ignore[misc]
     productCode: str
     mechanics: List[Dict[str, Any]]
+
+
+class ProductRegistrationRequest(BaseModel):  # type: ignore[misc]
+    reviewer: Optional[str] = None
+    notes: Optional[str] = None
 
 
 class MechanicPatchApprovalRequest(BaseModel):  # type: ignore[misc]
@@ -2290,6 +2297,7 @@ def api_products() -> Dict[str, Any]:
     """
 
     products: List[Dict[str, Any]] = []
+    seen_codes: set[str] = set()
 
     pmr: Optional[Dict[str, Any]] = None
     try:
@@ -2311,6 +2319,8 @@ def api_products() -> Dict[str, Any]:
             review_endpoint = f"/api/product-model-review/{code_norm}"
         else:
             review_endpoint = None
+
+        seen_codes.add(code_norm)
 
         if code_norm == "P12TRF" and status == "implemented" and pmr is not None:
             product_block = pmr.get("product") or {}
@@ -2352,6 +2362,77 @@ def api_products() -> Dict[str, Any]:
                     "bundlePath": None,
                 }
             )
+
+    # Dynamically registered products from the Product Review drafts. These
+    # represent products that are "known" to the system (filings uploaded,
+    # review state captured) even if their executable model is not yet
+    # complete. They appear in the Known Products dropdown so a review can
+    # be resumed without re-uploading documents.
+    try:
+        registered = list_registered_products()
+    except Exception:
+        registered = []
+
+    for row in registered:
+        code = str(row.get("product_id") or "").strip().upper()
+        if not code or code in seen_codes:
+            continue
+
+        carrier = row.get("carrier") or ""
+        meta = row.get("metadata") or {}
+        if not isinstance(meta, dict):
+            meta = {}
+        review_state = meta.get("review") or {}
+        if not isinstance(review_state, dict):
+            review_state = {}
+        catalog = meta.get("catalog") or {}
+        if not isinstance(catalog, dict):
+            catalog = {}
+
+        product_name = meta.get("name") or code
+        product_type = meta.get("type") or ""
+
+        # Implementation status is advisory only; we do not require DSL or
+        # a projection engine for registration. When no ProductDefinition
+        # exists for this product code we flag that as "no_dsl"; otherwise
+        # we treat the model as present-but-not-fully-exercised.
+        try:
+            pd = get_product_definition(code)
+        except Exception:
+            pd = None
+        if pd is None:
+            implementation_status = "no_dsl"
+        else:
+            implementation_status = "not_executable"
+
+        builder = _get_product_model_review_builder(code)
+        builder_registered = builder is not None
+
+        products.append(
+            {
+                "productCode": code,
+                "productName": product_name,
+                "productType": product_type,
+                "carrier": carrier,
+                "status": "registered",
+                "reviewEndpoint": f"/api/product-model-review/{code}",
+                "builderRegistered": builder_registered,
+                "filingId": review_state.get("filing_id"),
+                "latestGeneration": review_state.get("current_generation"),
+                "latestDecisionId": None,
+                "latestDecision": None,
+                "latestRiskStatus": None,
+                "reviewFreshnessStatus": None,
+                "bundlePath": None,
+                "implementationStatus": implementation_status,
+                "catalog": {
+                    "status": catalog.get("status"),
+                    "registeredAt": catalog.get("registeredAt"),
+                    "registeredBy": catalog.get("registeredBy"),
+                    "source": catalog.get("source"),
+                },
+            }
+        )
 
     return {"products": products}
 
@@ -6257,6 +6338,89 @@ def api_product_review_metadata_suggest(payload: ProductReviewMetadataSuggestion
         raise HTTPException(status_code=500, detail=f"Failed to derive metadata from filings: {exc}") from exc
 
     return meta
+
+
+@app.post("/api/products/{product_code}/register")
+def api_product_register(product_code: str, payload: ProductRegistrationRequest) -> Dict[str, Any]:
+    """Register a product in the Known Products catalog.
+
+    Registration means the product is known to the system (filings and
+    review state are saved) and can be resumed later without re-uploading
+    documents. It does *not* imply that the executable model or PMR has
+    been fully approved.
+    """
+
+    code = (product_code or "").strip().upper()
+    if not code:
+        raise HTTPException(status_code=400, detail="product_code is required")
+
+    existing = get_product_review(code)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="No Product Review draft found for this product.")
+
+    meta = existing.get("metadata") or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    review_state = meta.get("review") or {}
+    if not isinstance(review_state, dict):
+        review_state = {}
+
+    product_name = meta.get("name") or code
+    product_type = meta.get("type") or None
+
+    # Lightweight precondition: metadata must at least have a name/code
+    # and a type so that the catalog entry is meaningful.
+    if not product_name or not product_type:
+        raise HTTPException(status_code=400, detail="Product metadata (name/type) is incomplete for registration.")
+
+    # Advisory signals – missing pieces should not block registration but
+    # are surfaced back to the caller as warnings so a human can see what
+    # still needs work.
+    warnings: List[str] = []
+
+    # Prefer mechanics exist, but do not require executable DSL.
+    try:
+        mechanics = load_mechanics_for_product(code)
+        if not mechanics:
+            warnings.append("No approved Product Mechanics were found for this product.")
+    except Exception:
+        warnings.append("Product Mechanics could not be loaded (MinIO or mechanics registry unavailable).")
+
+    # Prefer mechanics-informed assumption discovery exists.
+    assumption_discovery = review_state.get("assumption_discovery") or {}
+    if not assumption_discovery:
+        warnings.append("Mechanics-informed assumption discovery has not been saved for this product.")
+
+    # Prefer scenarios exist.
+    scenarios = review_state.get("scenarios") or []
+    if not scenarios:
+        warnings.append("No scenarios are currently saved for this product.")
+
+    from datetime import datetime as _dt
+
+    catalog = {
+        "status": "registered",
+        "registeredAt": _dt.utcnow().isoformat() + "Z",
+        "registeredBy": (payload.reviewer or "ai_review_agent").strip() or "ai_review_agent",
+        "source": "ai_review_agent",
+        "notes": (payload.notes or "Mechanics/assumptions/scenarios saved; model implementation may be incomplete."),
+    }
+    if warnings:
+        catalog["warnings"] = warnings
+
+    rec = register_product_catalog(code, catalog)
+    if rec is None:
+        raise HTTPException(status_code=500, detail="Failed to persist product registration")
+
+    # Return a lightweight view of the registered product for convenience.
+    return {
+        "productCode": code,
+        "productName": product_name,
+        "productType": product_type,
+        "carrier": rec.get("carrier") or existing.get("carrier") or "",
+        "catalog": catalog,
+        "warnings": warnings,
+    }
 
 
 @app.post("/api/product-review/{product_code}/assumption-discovery")
