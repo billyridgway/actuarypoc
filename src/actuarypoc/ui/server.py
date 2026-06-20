@@ -5518,18 +5518,32 @@ def build_promise_ul_illustration(product_code: str, request: Dict[str, Any]) ->
 
     premium_mode_raw = (request.get("premiumMode") or "ANNUAL").strip().upper() or "ANNUAL"
 
-    # Placeholder annual premium: a simple fraction of face so that cash
-    # value growth and COI charges produce a sensible shape. This is not
-    # filed or calibrated and is surfaced as a warning below.
-    annual_premium = face_amount * 0.03
+    # Placeholder annual premium: either annualised from an explicit
+    # modal premium in the request, or inferred as a simple fraction of
+    # face so that cash value growth and COI charges produce a sensible
+    # shape. This is not filed or calibrated and is surfaced as a
+    # warning below.
+    modal_premium_raw = request.get("modalPremium")
+    try:
+        modal_premium_input = float(modal_premium_raw) if modal_premium_raw is not None else None
+    except (TypeError, ValueError):
+        modal_premium_input = None
+
     if premium_mode_raw in {"MONTHLY", "M"}:
-        modal_premium = annual_premium / 12.0
+        freq = 12.0
     elif premium_mode_raw in {"QUARTERLY", "Q"}:
-        modal_premium = annual_premium / 4.0
+        freq = 4.0
     elif premium_mode_raw in {"SEMIANNUAL", "SA", "SEMI-ANNUAL"}:
-        modal_premium = annual_premium / 2.0
+        freq = 2.0
     else:
-        modal_premium = annual_premium
+        freq = 1.0
+
+    if modal_premium_input is not None and modal_premium_input > 0:
+        modal_premium = modal_premium_input
+        annual_premium = modal_premium * freq
+    else:
+        annual_premium = face_amount * 0.03
+        modal_premium = annual_premium / freq if freq > 0 else annual_premium
 
     # Mechanics-informed placeholders from current Promise UL understanding.
     guaranteed_rate = 0.02  # 2% guaranteed minimum annual interest.
@@ -5550,13 +5564,16 @@ def build_promise_ul_illustration(product_code: str, request: Dict[str, Any]) ->
     for year in range(1, horizon_years + 1):
         attained_age = age_norm + year - 1
 
-        # Level modal premium each policy year.
-        premium = modal_premium
-        cumulative_premium += premium
+        # Level premium each projection year. The internal accumulation
+        # uses the *annual* premium so that IRR-style metrics line up
+        # with year-based horizons, while we still surface the modal
+        # premium for UI transparency.
+        premium_annual = annual_premium
+        cumulative_premium += premium_annual
 
         # Simple annual crediting: apply guaranteed rate on beginning
         # policy value plus current-year premium.
-        base = policy_value + premium
+        base = policy_value + premium_annual
         guaranteed_interest = base * guaranteed_rate
 
         # COI charge as a flat fraction of face. This greatly
@@ -5588,7 +5605,13 @@ def build_promise_ul_illustration(product_code: str, request: Dict[str, Any]) ->
             {
                 "year": year,
                 "attainedAge": attained_age,
-                "premium": premium,
+                "premiumMode": premium_mode_raw,
+                "modalPremium": modal_premium,
+                "annualPremium": annual_premium,
+                # Backwards-compatible fields: interpret "premium" and
+                # "cumulativePremium" as *annual* figures for this
+                # annualised projection.
+                "premium": premium_annual,
                 "cumulativePremium": cumulative_premium,
                 "guaranteedInterest": guaranteed_interest,
                 "coiCharge": coi_charge,

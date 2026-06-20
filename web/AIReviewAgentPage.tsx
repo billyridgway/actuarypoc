@@ -581,6 +581,10 @@ export const AIReviewAgentPage: React.FC = () => {
       smokerClass: inputs.smokerClass || null,
       faceAmount: inputs.faceAmount ?? null,
       premiumMode: inputs.premiumMode || null,
+      // When present, pass through the scenario's modal premium so the
+      // backend can correctly annualise it instead of inferring solely
+      // from face amount.
+      modalPremium: inputs.modalPremium ?? null,
     };
 
     setError(null);
@@ -1871,8 +1875,10 @@ export const AIReviewAgentPage: React.FC = () => {
                 <tr>
                   <th>Year</th>
                   <th>Attained age</th>
-                  <th>Premium</th>
-                  <th>Cumulative premium</th>
+                  <th>Premium mode</th>
+                  <th>Modal premium</th>
+                  <th>Annual premium</th>
+                  <th>Cumulative premium (annual)</th>
                   <th>Death benefit</th>
                   <th>Cash value</th>
                   <th>Surrender value</th>
@@ -1886,7 +1892,9 @@ export const AIReviewAgentPage: React.FC = () => {
                     <tr key={idx}>
                       <td>{r.year}</td>
                       <td>{r.attainedAge ?? ""}</td>
-                      <td>{r.premium ?? ""}</td>
+                      <td>{r.premiumMode ?? ""}</td>
+                      <td>{r.modalPremium ?? ""}</td>
+                      <td>{r.annualPremium ?? r.premium ?? ""}</td>
                       <td>{r.cumulativePremium ?? ""}</td>
                       <td>{r.deathBenefit ?? ""}</td>
                       <td>{r.cashValue ?? ""}</td>
