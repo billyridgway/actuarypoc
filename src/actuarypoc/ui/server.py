@@ -7,6 +7,7 @@ import json
 import logging
 import zipfile
 from hashlib import sha256
+import math
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -5715,6 +5716,116 @@ def load_ul_runtime_config(product_code: str) -> UlRuntimeConfig:
     )
 
 
+def validate_ul_runtime_config(config: UlRuntimeConfig, horizon_years: int) -> List[str]:
+    """Best-effort validation of UL runtime config consistency.
+
+    Returns a list of warning messages describing any inconsistencies
+    between the rich per-year config structures and the legacy scalar
+    fields. This is intended for debug/diagnostics only and must not
+    affect projection behaviour.
+    """
+
+    warnings: List[str] = []
+
+    # Helper for float comparison.
+    def _isclose(a: float, b: float) -> bool:
+        return math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-9)
+
+    # Crediting: guaranteed rate curves vs scalar.
+    cred = config.crediting
+    if cred is None or not isinstance(cred.guaranteed_rates, list):
+        warnings.append(
+            "UL config: crediting.guaranteed_rates is missing; engine will fall back to scalar guaranteed_rate."
+        )
+    else:
+        if len(cred.guaranteed_rates) != horizon_years:
+            warnings.append(
+                f"UL config: crediting.guaranteed_rates has length {len(cred.guaranteed_rates)} "
+                f"(expected {horizon_years})."
+            )
+        if cred.guaranteed_rates:
+            first = cred.guaranteed_rates[0]
+            if not _isclose(first, config.guaranteed_rate):
+                warnings.append(
+                    "UL config: first guaranteed rate in crediting.guaranteed_rates "
+                    f"({first}) differs from scalar guaranteed_rate ({config.guaranteed_rate})."
+                )
+
+    # COI: per-year vs scalar.
+    coi_cfg = config.coi
+    if coi_cfg is None or not isinstance(coi_cfg.coi_rates, list):
+        warnings.append(
+            "UL config: coi.coi_rates is missing; engine will fall back to scalar coi_rate_flat."
+        )
+    else:
+        if len(coi_cfg.coi_rates) != horizon_years:
+            warnings.append(
+                f"UL config: coi.coi_rates has length {len(coi_cfg.coi_rates)} (expected {horizon_years})."
+            )
+        if coi_cfg.coi_rates:
+            first = coi_cfg.coi_rates[0]
+            if not _isclose(first, config.coi_rate_flat):
+                warnings.append(
+                    "UL config: first COI rate in coi.coi_rates "
+                    f"({first}) differs from scalar coi_rate_flat ({config.coi_rate_flat})."
+                )
+
+    # Surrender: per-year schedule vs scalar surrender_period_years/max_surrender_pct.
+    surr_cfg = config.surrender
+    if surr_cfg is None or not isinstance(surr_cfg.surrender_pct_of_face, list):
+        warnings.append(
+            "UL config: surrender.surrender_pct_of_face is missing; engine will fall back to scalar "
+            "surrender_period_years/max_surrender_pct."
+        )
+    else:
+        if len(surr_cfg.surrender_pct_of_face) != horizon_years:
+            warnings.append(
+                "UL config: surrender.surrender_pct_of_face has length "
+                f"{len(surr_cfg.surrender_pct_of_face)} (expected {horizon_years})."
+            )
+        # Only attempt a shape check when the lengths match.
+        if len(surr_cfg.surrender_pct_of_face) == horizon_years:
+            expected: List[float] = []
+            for year in range(1, horizon_years + 1):
+                if year <= config.surrender_period_years:
+                    remaining = config.surrender_period_years - year + 1
+                    pct = config.max_surrender_pct * (remaining / config.surrender_period_years)
+                else:
+                    pct = 0.0
+                expected.append(pct)
+
+            if any(
+                not _isclose(actual, exp)
+                for actual, exp in zip(surr_cfg.surrender_pct_of_face, expected)
+            ):
+                warnings.append(
+                    "UL config: surrender.surrender_pct_of_face does not match the linear schedule implied by "
+                    "surrender_period_years/max_surrender_pct; engine is still using the scalar schedule."
+                )
+
+    # Fees: per-year vs scalar.
+    fees_cfg = config.fees
+    if fees_cfg is None or not isinstance(fees_cfg.policy_fee_annual, list):
+        warnings.append(
+            "UL config: fees.policy_fee_annual is missing; engine will fall back to scalar policy_fee_annual."
+        )
+    else:
+        if len(fees_cfg.policy_fee_annual) != horizon_years:
+            warnings.append(
+                "UL config: fees.policy_fee_annual has length "
+                f"{len(fees_cfg.policy_fee_annual)} (expected {horizon_years})."
+            )
+        if fees_cfg.policy_fee_annual:
+            first = fees_cfg.policy_fee_annual[0]
+            if not _isclose(first, config.policy_fee_annual):
+                warnings.append(
+                    "UL config: first policy fee in fees.policy_fee_annual "
+                    f"({first}) differs from scalar policy_fee_annual ({config.policy_fee_annual})."
+                )
+
+    return warnings
+
+
 def _run_ul_projection(
     *, request: Dict[str, Any], config: UlRuntimeConfig, horizon_years: int = 30
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -5917,13 +6028,19 @@ def build_promise_ul_illustration(product_code: str, request: Dict[str, Any]) ->
 
     cfg = load_ul_runtime_config(product_code)
 
-    projection, normalised_request = _run_ul_projection(request=request, config=cfg, horizon_years=30)
+    horizon_years = 30
+    projection, normalised_request = _run_ul_projection(request=request, config=cfg, horizon_years=horizon_years)
 
     warnings = [
         "COI rates are placeholder (flat 40 bps of face amount) because the actual COI rate table is not yet uploaded.",
         "Surrender charges use a simple declining schedule over 19 years because the full schedule is not yet uploaded.",
         "No policy or admin fees are applied; treat this as a simplified product-understanding projection, not a filed-rate or illustration-compliant result.",
     ]
+
+    # Append any non-fatal config validation warnings so that future
+    # inconsistencies between the scalar and per-year config surfaces
+    # are visible in the UI without affecting behaviour.
+    warnings.extend(validate_ul_runtime_config(cfg, horizon_years=horizon_years))
 
     notes = [
         "Draft projection based on extracted mechanics and assumptions.",
