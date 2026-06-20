@@ -5173,9 +5173,6 @@ def build_p12trf_illustration(product_code: str, request: Dict[str, Any]) -> Dic
 
 
 _ILLUSTRATION_PROVIDERS["P12TRF"] = build_p12trf_illustration
-# Promise UL (ICC18 P18PR UL) – draft mechanics-informed illustration
-_ILLUSTRATION_PROVIDERS["ICC18 P18PR UL"] = build_promise_ul_illustration
-_ILLUSTRATION_PROVIDERS["ICC18P18PRUL"] = build_promise_ul_illustration
 
 
 def build_generic_term_illustration(product_code: str, request: Dict[str, Any]) -> Dict[str, Any]:
@@ -5638,6 +5635,11 @@ def build_promise_ul_illustration(product_code: str, request: Dict[str, Any]) ->
         "warnings": warnings,
         "notes": notes,
     }
+
+
+# Promise UL (ICC18 P18PR UL) – draft mechanics-informed illustration
+_ILLUSTRATION_PROVIDERS["ICC18 P18PR UL"] = build_promise_ul_illustration
+_ILLUSTRATION_PROVIDERS["ICC18P18PRUL"] = build_promise_ul_illustration
 
 
 @app.post("/api/product-model-review/p12trf/evidence/seed")
