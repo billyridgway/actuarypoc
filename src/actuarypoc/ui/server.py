@@ -5625,12 +5625,56 @@ def build_promise_ul_illustration(product_code: str, request: Dict[str, Any]) ->
             }
         )
 
+    # Draft summary metrics geared towards product understanding rather
+    # than pricing or illustration compliance.
+    break_even_cash: Optional[int] = None
+    break_even_surrender: Optional[int] = None
+    final_cash: Optional[float] = None
+    final_surrender: Optional[float] = None
+    final_nar: Optional[float] = None
+
+    for r in rows:
+        year_val = r.get("year")
+        cash_val = r.get("cashValue")
+        surr_val = r.get("surrenderValue")
+        cum_prem = r.get("cumulativePremium")
+
+        if (
+            break_even_cash is None
+            and isinstance(year_val, int)
+            and isinstance(cash_val, (int, float))
+            and isinstance(cum_prem, (int, float))
+            and cash_val >= cum_prem
+        ):
+            break_even_cash = year_val
+
+        if (
+            break_even_surrender is None
+            and isinstance(year_val, int)
+            and isinstance(surr_val, (int, float))
+            and isinstance(cum_prem, (int, float))
+            and surr_val >= cum_prem
+        ):
+            break_even_surrender = year_val
+
+    if rows:
+        last = rows[-1]
+        final_cash = last.get("cashValue") if isinstance(last.get("cashValue"), (int, float)) else None
+        final_surrender = last.get("surrenderValue") if isinstance(last.get("surrenderValue"), (int, float)) else None
+        final_nar = last.get("netAmountAtRisk") if isinstance(last.get("netAmountAtRisk"), (int, float)) else None
+
     projection = {
         "years": years,
         "rows": rows,
         "metrics": {
             # Rough summary hooks; these can be refined later.
             "maximumYear": horizon_years,
+            # Draft Promise UL-specific metrics.
+            "breakEvenYearCash": break_even_cash,
+            "breakEvenYearSurrender": break_even_surrender,
+            "finalCashValue": final_cash,
+            "finalSurrenderValue": final_surrender,
+            "finalNetAmountAtRisk": final_nar,
         },
     }
 

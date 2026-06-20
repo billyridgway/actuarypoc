@@ -1,5 +1,17 @@
 import React, { useEffect, useState } from "react";
 
+const formatCurrency = (value: any): string => {
+  if (value === null || value === undefined) return "";
+  const num = Number(value);
+  if (!Number.isFinite(num)) return String(value);
+  return num.toLocaleString("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+};
+
 export const AIReviewAgentPage: React.FC = () => {
   const [productCode, setProductCode] = useState<string>("");
   const [filingId, setFilingId] = useState<string>("");
@@ -1840,8 +1852,28 @@ export const AIReviewAgentPage: React.FC = () => {
               <table className="kv-table">
                 <tbody>
                   <tr>
-                    <th>Break-even year</th>
-                    <td>{illustrationResult.projection.metrics.breakEvenYear ?? "(none)"}</td>
+                    <th>Break-even year (surrender ≥ cumulative premium)</th>
+                    <td>
+                      {illustrationResult.projection.metrics.breakEvenYearSurrender ??
+                        illustrationResult.projection.metrics.breakEvenYear ??
+                        "(none)"}
+                    </td>
+                  </tr>
+                  <tr>
+                    <th>Break-even year (cash value ≥ cumulative premium)</th>
+                    <td>{illustrationResult.projection.metrics.breakEvenYearCash ?? "(none)"}</td>
+                  </tr>
+                  <tr>
+                    <th>Final cash value</th>
+                    <td>{formatCurrency(illustrationResult.projection.metrics.finalCashValue)}</td>
+                  </tr>
+                  <tr>
+                    <th>Final surrender value</th>
+                    <td>{formatCurrency(illustrationResult.projection.metrics.finalSurrenderValue)}</td>
+                  </tr>
+                  <tr>
+                    <th>Final net amount at risk</th>
+                    <td>{formatCurrency(illustrationResult.projection.metrics.finalNetAmountAtRisk)}</td>
                   </tr>
                   <tr>
                     <th>IRR (to year 10)</th>
@@ -1878,10 +1910,13 @@ export const AIReviewAgentPage: React.FC = () => {
                   <th>Premium mode</th>
                   <th>Modal premium</th>
                   <th>Annual premium</th>
-                  <th>Cumulative premium (annual)</th>
-                  <th>Death benefit</th>
-                  <th>Cash value</th>
+                  <th>Cumulative premium</th>
+                  <th>Guaranteed interest</th>
+                  <th>COI charge</th>
+                  <th>Policy value / cash value</th>
+                  <th>Surrender charge</th>
                   <th>Surrender value</th>
+                  <th>Death benefit</th>
                   <th>Net amount at risk</th>
                   <th>Status</th>
                 </tr>
@@ -1893,13 +1928,16 @@ export const AIReviewAgentPage: React.FC = () => {
                       <td>{r.year}</td>
                       <td>{r.attainedAge ?? ""}</td>
                       <td>{r.premiumMode ?? ""}</td>
-                      <td>{r.modalPremium ?? ""}</td>
-                      <td>{r.annualPremium ?? r.premium ?? ""}</td>
-                      <td>{r.cumulativePremium ?? ""}</td>
-                      <td>{r.deathBenefit ?? ""}</td>
-                      <td>{r.cashValue ?? ""}</td>
-                      <td>{r.surrenderValue ?? ""}</td>
-                      <td>{r.netAmountAtRisk ?? ""}</td>
+                      <td>{formatCurrency(r.modalPremium)}</td>
+                      <td>{formatCurrency(r.annualPremium ?? r.premium)}</td>
+                      <td>{formatCurrency(r.cumulativePremium)}</td>
+                      <td>{formatCurrency(r.guaranteedInterest)}</td>
+                      <td>{formatCurrency(r.coiCharge)}</td>
+                      <td>{formatCurrency(r.policyValue ?? r.cashValue)}</td>
+                      <td>{formatCurrency(r.surrenderCharge)}</td>
+                      <td>{formatCurrency(r.surrenderValue)}</td>
+                      <td>{formatCurrency(r.deathBenefit)}</td>
+                      <td>{formatCurrency(r.netAmountAtRisk)}</td>
                       <td>{r.status ?? ""}</td>
                     </tr>
                   ))}
