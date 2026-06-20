@@ -3613,6 +3613,31 @@ def _is_ul_product_type(product_type: str) -> bool:
     return norm in ul_labels
 
 
+def _is_term_product_type(product_type: str) -> bool:
+    """Normalise a product type string and test whether it is term-compatible.
+
+    This recognises a conservative set of labels for level term life
+    products; everything else is treated as non-term for illustration
+    routing purposes.
+    """
+
+    raw = (product_type or "").strip()
+    if not raw:
+        return False
+
+    norm = re.sub(r"[\s_-]+", " ", raw).strip().upper()
+
+    term_labels = {
+        "TERM",
+        "TERM LIFE",
+        "LEVEL TERM",
+        "LEVEL TERM LIFE",
+        "LIFE TERM",
+    }
+
+    return norm in term_labels
+
+
 def _build_projection_inputs_and_table_from_summary(data: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """Derive scenario-like inputs and a compact projection table from a
     projection summary JSON object.
@@ -4234,8 +4259,16 @@ def api_product_illustration(product_code: str, payload: IllustrationRequest) ->
         product_type = _get_product_type(code_norm)
         if _is_ul_product_type(product_type):
             provider = build_ul_illustration_for_product
-        else:
+        elif _is_term_product_type(product_type):
             provider = build_generic_term_illustration
+        else:
+            raise HTTPException(
+                status_code=501,
+                detail=(
+                    "Illustration projection is not configured for product type "
+                    f"'{(product_type or 'unknown')}'."
+                ),
+            )
 
     try:
         request_dict = payload.dict()  # type: ignore[call-arg]
