@@ -5508,6 +5508,26 @@ class UlRuntimeConfig:
     policy_fee_annual: float = 0.0
 
 
+def load_ul_runtime_config(product_code: str) -> UlRuntimeConfig:
+    """Temporary UL runtime config loader.
+
+    For now this returns the same placeholder assumptions for all
+    products. Promise UL is the first validation product; future work
+    will source these values from Mechanics Discovery and Assumption
+    Discovery instead of hard-coding them here.
+    """
+
+    # NOTE: behaviour must remain identical to the previous inline
+    # configuration in ``build_promise_ul_illustration``.
+    return UlRuntimeConfig(
+        guaranteed_rate=0.02,  # 2% guaranteed minimum annual interest.
+        coi_rate_flat=0.004,  # flat 40 bps of face per year.
+        surrender_period_years=19,
+        max_surrender_pct=0.10,  # 10% of face in early durations, declining.
+        policy_fee_annual=0.0,
+    )
+
+
 def _run_ul_projection(
     *, request: Dict[str, Any], config: UlRuntimeConfig, horizon_years: int = 30
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -5708,13 +5728,7 @@ def build_promise_ul_illustration(product_code: str, request: Dict[str, Any]) ->
 
     code_norm = (product_code or "").strip().upper()
 
-    cfg = UlRuntimeConfig(
-        guaranteed_rate=0.02,  # 2% guaranteed minimum annual interest.
-        coi_rate_flat=0.004,  # flat 40 bps of face per year.
-        surrender_period_years=19,
-        max_surrender_pct=0.10,  # 10% of face in early durations, declining.
-        policy_fee_annual=0.0,
-    )
+    cfg = load_ul_runtime_config(product_code)
 
     projection, normalised_request = _run_ul_projection(request=request, config=cfg, horizon_years=30)
 
