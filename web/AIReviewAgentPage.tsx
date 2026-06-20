@@ -12,6 +12,32 @@ const formatCurrency = (value: any): string => {
   });
 };
 
+const formatAssumptionValue = (name: any, value: any): string => {
+  if (value === null || value === undefined) return "";
+  const rawName = String(name || "");
+  const lowName = rawName.toLowerCase();
+  const num = Number(value);
+
+  // Non-numeric or NaN → return as-is.
+  if (!Number.isFinite(num)) return String(value);
+
+  // Rates: display 0–1 as percentages.
+  if (lowName.includes("rate")) {
+    if (num >= 0 && num <= 1) {
+      return `${(num * 100).toFixed(2)}%`;
+    }
+    return `${num.toFixed(2)}%`;
+  }
+
+  // Fees: display as currency.
+  if (lowName.includes("fee")) {
+    return formatCurrency(num);
+  }
+
+  // Default: plain number.
+  return String(num);
+};
+
 export const AIReviewAgentPage: React.FC = () => {
   const [productCode, setProductCode] = useState<string>("");
   const [filingId, setFilingId] = useState<string>("");
@@ -1865,7 +1891,7 @@ export const AIReviewAgentPage: React.FC = () => {
                         // eslint-disable-next-line react/no-array-index-key
                         <tr key={idx}>
                           <td>{a.name ?? ""}</td>
-                          <td>{a.value ?? ""}</td>
+                          <td>{formatAssumptionValue(a.name, a.value)}</td>
                           <td>{a.source ?? ""}</td>
                         </tr>
                       ))}
