@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime
 import io
 import json
@@ -8,7 +8,7 @@ import logging
 import zipfile
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, HTTPException, Query, UploadFile, File, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -5492,16 +5492,32 @@ def build_generic_term_illustration(product_code: str, request: Dict[str, Any]) 
     }
 
 
-def build_promise_ul_illustration(product_code: str, request: Dict[str, Any]) -> Dict[str, Any]:
-    """Draft, mechanics-informed illustration for Promise UL.
+@dataclass
+class UlRuntimeConfig:
+    """Minimal runtime config for UL-style draft illustrations.
 
-    This is intentionally rough and exists to give a product-understanding
-    view of how policy value, surrender value, and death benefit evolve
-    under extracted mechanics and assumptions. It does *not* use the core
-    projection engine or DSL and is not filed-rate compliant.
+    This is intentionally small for the Promise UL POC. It is a stepping
+    stone toward a mechanics/assumption-backed generic UL engine rather
+    than a final configuration surface.
     """
 
-    code_norm = (product_code or "").strip().upper()
+    guaranteed_rate: float
+    coi_rate_flat: float
+    surrender_period_years: int
+    max_surrender_pct: float
+    policy_fee_annual: float = 0.0
+
+
+def _run_ul_projection(
+    *, request: Dict[str, Any], config: UlRuntimeConfig, horizon_years: int = 30
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Core UL-style projection loop used by Promise UL.
+
+    This helper is intentionally generic-looking but currently wired only
+    for the Promise UL draft path. It preserves existing behaviour
+    exactly: same request normalisation, same placeholder assumptions,
+    same row/metric shapes.
+    """
 
     # Normalise core request fields with conservative defaults.
     age_req = request.get("age")
@@ -5522,7 +5538,7 @@ def build_promise_ul_illustration(product_code: str, request: Dict[str, Any]) ->
     # modal premium in the request, or inferred as a simple fraction of
     # face so that cash value growth and COI charges produce a sensible
     # shape. This is not filed or calibrated and is surfaced as a
-    # warning below.
+    # warning by the caller.
     modal_premium_raw = request.get("modalPremium")
     try:
         modal_premium_input = float(modal_premium_raw) if modal_premium_raw is not None else None
@@ -5545,17 +5561,11 @@ def build_promise_ul_illustration(product_code: str, request: Dict[str, Any]) ->
         annual_premium = face_amount * 0.03
         modal_premium = annual_premium / freq if freq > 0 else annual_premium
 
-    # Mechanics-informed placeholders from current Promise UL understanding.
-    guaranteed_rate = 0.02  # 2% guaranteed minimum annual interest.
-    surrender_period_years = 19
-    max_surrender_pct = 0.10  # 10% of face in early durations, declining.
+    guaranteed_rate = config.guaranteed_rate
+    surrender_period_years = config.surrender_period_years
+    max_surrender_pct = config.max_surrender_pct
+    coi_rate = config.coi_rate_flat
 
-    # Very rough COI: flat 40 bps of face per year. In reality this should
-    # vary by age, gender, risk class, etc., but those tables are not yet
-    # wired.
-    coi_rate = 0.004
-
-    horizon_years = 30
     rows: List[Dict[str, Any]] = []
     years: List[int] = []
     policy_value: float = 0.0
@@ -5582,7 +5592,7 @@ def build_promise_ul_illustration(product_code: str, request: Dict[str, Any]) ->
         coi_charge = face_amount * coi_rate
 
         # Update policy value at end of year.
-        policy_value = base + guaranteed_interest - coi_charge
+        policy_value = base + guaranteed_interest - coi_charge - config.policy_fee_annual
         if policy_value < 0.0:
             policy_value = 0.0
 
@@ -5669,7 +5679,7 @@ def build_promise_ul_illustration(product_code: str, request: Dict[str, Any]) ->
         "metrics": {
             # Rough summary hooks; these can be refined later.
             "maximumYear": horizon_years,
-            # Draft Promise UL-specific metrics.
+            # Draft Promise UL-style metrics.
             "breakEvenYearCash": break_even_cash,
             "breakEvenYearSurrender": break_even_surrender,
             "finalCashValue": final_cash,
@@ -5677,6 +5687,36 @@ def build_promise_ul_illustration(product_code: str, request: Dict[str, Any]) ->
             "finalNetAmountAtRisk": final_nar,
         },
     }
+
+    normalised_request = {
+        "age": age_norm,
+        "faceAmount": face_amount,
+        "premiumMode": premium_mode_raw,
+    }
+
+    return projection, normalised_request
+
+
+def build_promise_ul_illustration(product_code: str, request: Dict[str, Any]) -> Dict[str, Any]:
+    """Draft, mechanics-informed illustration for Promise UL.
+
+    This is intentionally rough and exists to give a product-understanding
+    view of how policy value, surrender value, and death benefit evolve
+    under extracted mechanics and assumptions. It does *not* use the core
+    projection engine or DSL and is not filed-rate compliant.
+    """
+
+    code_norm = (product_code or "").strip().upper()
+
+    cfg = UlRuntimeConfig(
+        guaranteed_rate=0.02,  # 2% guaranteed minimum annual interest.
+        coi_rate_flat=0.004,  # flat 40 bps of face per year.
+        surrender_period_years=19,
+        max_surrender_pct=0.10,  # 10% of face in early durations, declining.
+        policy_fee_annual=0.0,
+    )
+
+    projection, normalised_request = _run_ul_projection(request=request, config=cfg, horizon_years=30)
 
     warnings = [
         "COI rates are placeholder (flat 40 bps of face amount) because the actual COI rate table is not yet uploaded.",
@@ -5692,11 +5732,7 @@ def build_promise_ul_illustration(product_code: str, request: Dict[str, Any]) ->
     return {
         "productCode": code_norm,
         "productName": "Promise UL",
-        "request": {
-            "age": age_norm,
-            "faceAmount": face_amount,
-            "premiumMode": premium_mode_raw,
-        },
+        "request": normalised_request,
         "templateScenarioId": None,
         "projection": projection,
         "warnings": warnings,
