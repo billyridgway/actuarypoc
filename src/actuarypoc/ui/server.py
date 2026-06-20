@@ -5173,6 +5173,9 @@ def build_p12trf_illustration(product_code: str, request: Dict[str, Any]) -> Dic
 
 
 _ILLUSTRATION_PROVIDERS["P12TRF"] = build_p12trf_illustration
+# Promise UL (ICC18 P18PR UL) – draft mechanics-informed illustration
+_ILLUSTRATION_PROVIDERS["ICC18 P18PR UL"] = build_promise_ul_illustration
+_ILLUSTRATION_PROVIDERS["ICC18P18PRUL"] = build_promise_ul_illustration
 
 
 def build_generic_term_illustration(product_code: str, request: Dict[str, Any]) -> Dict[str, Any]:
@@ -5489,6 +5492,151 @@ def build_generic_term_illustration(product_code: str, request: Dict[str, Any]) 
                 },
             },
         },
+    }
+
+
+def build_promise_ul_illustration(product_code: str, request: Dict[str, Any]) -> Dict[str, Any]:
+    """Draft, mechanics-informed illustration for Promise UL.
+
+    This is intentionally rough and exists to give a product-understanding
+    view of how policy value, surrender value, and death benefit evolve
+    under extracted mechanics and assumptions. It does *not* use the core
+    projection engine or DSL and is not filed-rate compliant.
+    """
+
+    code_norm = (product_code or "").strip().upper()
+
+    # Normalise core request fields with conservative defaults.
+    age_req = request.get("age")
+    try:
+        age_norm = int(age_req) if age_req is not None else 45
+    except (TypeError, ValueError):
+        age_norm = 45
+
+    face_req = request.get("faceAmount")
+    try:
+        face_amount = float(face_req) if face_req is not None else 100_000.0
+    except (TypeError, ValueError):
+        face_amount = 100_000.0
+
+    premium_mode_raw = (request.get("premiumMode") or "ANNUAL").strip().upper() or "ANNUAL"
+
+    # Placeholder annual premium: a simple fraction of face so that cash
+    # value growth and COI charges produce a sensible shape. This is not
+    # filed or calibrated and is surfaced as a warning below.
+    annual_premium = face_amount * 0.03
+    if premium_mode_raw in {"MONTHLY", "M"}:
+        modal_premium = annual_premium / 12.0
+    elif premium_mode_raw in {"QUARTERLY", "Q"}:
+        modal_premium = annual_premium / 4.0
+    elif premium_mode_raw in {"SEMIANNUAL", "SA", "SEMI-ANNUAL"}:
+        modal_premium = annual_premium / 2.0
+    else:
+        modal_premium = annual_premium
+
+    # Mechanics-informed placeholders from current Promise UL understanding.
+    guaranteed_rate = 0.02  # 2% guaranteed minimum annual interest.
+    surrender_period_years = 19
+    max_surrender_pct = 0.10  # 10% of face in early durations, declining.
+
+    # Very rough COI: flat 40 bps of face per year. In reality this should
+    # vary by age, gender, risk class, etc., but those tables are not yet
+    # wired.
+    coi_rate = 0.004
+
+    horizon_years = 30
+    rows: List[Dict[str, Any]] = []
+    years: List[int] = []
+    policy_value: float = 0.0
+    cumulative_premium: float = 0.0
+
+    for year in range(1, horizon_years + 1):
+        attained_age = age_norm + year - 1
+
+        # Level modal premium each policy year.
+        premium = modal_premium
+        cumulative_premium += premium
+
+        # Simple annual crediting: apply guaranteed rate on beginning
+        # policy value plus current-year premium.
+        base = policy_value + premium
+        guaranteed_interest = base * guaranteed_rate
+
+        # COI charge as a flat fraction of face. This greatly
+        # oversimplifies true UL COI behaviour but gives a
+        # product-understanding curve.
+        coi_charge = face_amount * coi_rate
+
+        # Update policy value at end of year.
+        policy_value = base + guaranteed_interest - coi_charge
+        if policy_value < 0.0:
+            policy_value = 0.0
+
+        # Placeholder surrender charge schedule: linear decline from
+        # max_surrender_pct of face down to 0 over the surrender period.
+        if year <= surrender_period_years:
+            remaining = surrender_period_years - year + 1
+            surrender_pct = max_surrender_pct * (remaining / surrender_period_years)
+            surrender_charge = face_amount * surrender_pct
+        else:
+            surrender_charge = 0.0
+
+        cash_value = policy_value
+        surrender_value = max(cash_value - surrender_charge, 0.0)
+        death_benefit = face_amount
+        net_amount_at_risk = max(death_benefit - cash_value, 0.0)
+
+        years.append(year)
+        rows.append(
+            {
+                "year": year,
+                "attainedAge": attained_age,
+                "premium": premium,
+                "cumulativePremium": cumulative_premium,
+                "guaranteedInterest": guaranteed_interest,
+                "coiCharge": coi_charge,
+                "policyValue": policy_value,
+                "cashValue": cash_value,
+                "surrenderCharge": surrender_charge,
+                "surrenderValue": surrender_value,
+                "deathBenefit": death_benefit,
+                "netAmountAtRisk": net_amount_at_risk,
+                "status": None,
+            }
+        )
+
+    projection = {
+        "years": years,
+        "rows": rows,
+        "metrics": {
+            # Rough summary hooks; these can be refined later.
+            "maximumYear": horizon_years,
+        },
+    }
+
+    warnings = [
+        "COI rates are placeholder (flat 40 bps of face amount) because the actual COI rate table is not yet uploaded.",
+        "Surrender charges use a simple declining schedule over 19 years because the full schedule is not yet uploaded.",
+        "No policy or admin fees are applied; treat this as a simplified product-understanding projection, not a filed-rate or illustration-compliant result.",
+    ]
+
+    notes = [
+        "Draft projection based on extracted mechanics and assumptions.",
+        "This is not yet backed by an approved executable DSL/projection model.",
+    ]
+
+    return {
+        "productCode": code_norm,
+        "productName": "Promise UL",
+        "request": {
+            "age": age_norm,
+            "faceAmount": face_amount,
+            "premiumMode": premium_mode_raw,
+        },
+        "templateScenarioId": None,
+        "projection": projection,
+        "warnings": warnings,
+        "notes": notes,
     }
 
 

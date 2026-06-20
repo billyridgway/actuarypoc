@@ -556,14 +556,6 @@ export const AIReviewAgentPage: React.FC = () => {
   };
 
   const handleGenerateIllustration = async () => {
-    const projectionSupported = normalisedCode.trim().toUpperCase() === "P12TRF";
-    if (!projectionSupported) {
-      // For non-P12TRF products we surface an explicit unavailable state
-      // in the UI instead of letting the user click and discover via a
-      // generic error that projections are not yet wired.
-      setError(null);
-      return;
-    }
     const code = normalisedCode.trim();
     if (!code) {
       setError("Enter a product code before generating an illustration.");
@@ -684,7 +676,15 @@ export const AIReviewAgentPage: React.FC = () => {
     }
   };
 
-  const projectionSupported = normalisedCode.trim().toUpperCase() === "P12TRF";
+  const projectionSupported = (() => {
+    const code = normalisedCode.trim().toUpperCase();
+    // P12TRF uses the full engine-backed illustration path.
+    if (code === "P12TRF") return true;
+    // Promise UL / ICC18 P18PR UL uses a draft, mechanics-informed illustration
+    // that does not depend on an executable DSL.
+    if (code === "ICC18 P18PR UL" || code === "ICC18P18PRUL") return true;
+    return false;
+  })();
 
   return (
     <div className="run-detail-page">
@@ -1810,12 +1810,28 @@ export const AIReviewAgentPage: React.FC = () => {
         </div>
         {!projectionSupported && (
           <p className="muted" style={{ marginTop: "0.5rem" }}>
-            Illustration projection is not available yet for this product. Product understanding is ready for DSL
-            authoring, but no executable DSL/projection model has been implemented.
+            Illustration projection is not available yet for this product. Product understanding may be ready for DSL
+            authoring, but no illustration path has been wired for this product code.
           </p>
         )}
         {illustrationResult && (
           <>
+            {Array.isArray(illustrationResult.warnings) && illustrationResult.warnings.length > 0 && (
+              <section className="card" style={{ marginTop: "0.5rem" }}>
+                <h4>Projection warnings</h4>
+                <ul>
+                  {illustrationResult.warnings.map((w: string, idx: number) => (
+                    // eslint-disable-next-line react/no-array-index-key
+                    <li key={idx}>{w}</li>
+                  ))}
+                </ul>
+              </section>
+            )}
+            {Array.isArray(illustrationResult.notes) && illustrationResult.notes.length > 0 && (
+              <p className="muted" style={{ marginTop: "0.5rem" }}>
+                {illustrationResult.notes.join(" ")}
+              </p>
+            )}
             {illustrationResult.projection?.metrics && (
               <table className="kv-table">
                 <tbody>
