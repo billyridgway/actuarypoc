@@ -38,6 +38,20 @@ const formatAssumptionValue = (name: any, value: any): string => {
   return String(num);
 };
 
+const isUlProductType = (productType: any): boolean => {
+  const raw = (productType ?? "").toString().trim();
+  if (!raw) return false;
+  const norm = raw.replace(/[\s_-]+/g, " ").trim().toUpperCase();
+  const ulLabels = new Set<string>([
+    "UL",
+    "UNIVERSAL LIFE",
+    "FLEXIBLE PREMIUM ADJUSTABLE LIFE",
+    "FLEXIBLE PREMIUM ADJUSTABLE",
+    "FLEXIBLE PREMIUM ADJUSTABLE LIFE INSURANCE",
+  ]);
+  return ulLabels.has(norm);
+};
+
 export const AIReviewAgentPage: React.FC = () => {
   const [productCode, setProductCode] = useState<string>("");
   const [filingId, setFilingId] = useState<string>("");
@@ -721,11 +735,11 @@ export const AIReviewAgentPage: React.FC = () => {
   const projectionSupported = (() => {
     const code = normalisedCode.trim().toUpperCase();
     const productMeta = products?.find((p) => (p.productCode || "").toUpperCase() === code);
-    const productType = (productMeta?.productType || "").toString().trim().toUpperCase();
+    const productType = productMeta?.productType || "";
     // P12TRF uses the full engine-backed illustration path.
     if (code === "P12TRF") return true;
     // Any UL-typed product uses the shared UL illustration provider.
-    if (productType === "UL") return true;
+    if (isUlProductType(productType)) return true;
     // Promise UL / ICC18 P18PR UL uses a draft, mechanics-informed illustration
     // that does not depend on an executable DSL.
     if (code === "ICC18 P18PR UL" || code === "ICC18P18PRUL") return true;

@@ -3585,6 +3585,34 @@ def _get_product_type(product_code: str) -> str:
     return str(product_type or "")
 
 
+def _is_ul_product_type(product_type: str) -> bool:
+    """Normalise a product type string and test whether it is UL-compatible.
+
+    This is intentionally conservative: we recognise a small set of
+    known UL-style labels and treat everything else as non-UL until the
+    product registry or mechanics explicitly say otherwise.
+    """
+
+    raw = (product_type or "").strip()
+    if not raw:
+        return False
+
+    # Collapse whitespace/underscores/hyphens into single spaces and
+    # normalise to upper case so that minor formatting differences do
+    # not affect routing.
+    norm = re.sub(r"[\s_-]+", " ", raw).strip().upper()
+
+    ul_labels = {
+        "UL",
+        "UNIVERSAL LIFE",
+        "FLEXIBLE PREMIUM ADJUSTABLE LIFE",
+        "FLEXIBLE PREMIUM ADJUSTABLE",
+        "FLEXIBLE PREMIUM ADJUSTABLE LIFE INSURANCE",
+    }
+
+    return norm in ul_labels
+
+
 def _build_projection_inputs_and_table_from_summary(data: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """Derive scenario-like inputs and a compact projection table from a
     projection summary JSON object.
@@ -4203,8 +4231,8 @@ def api_product_illustration(product_code: str, payload: IllustrationRequest) ->
     # else.
     provider = _get_illustration_provider(code_norm)
     if provider is None:
-        product_type = (_get_product_type(code_norm) or "").strip().upper()
-        if product_type == "UL":
+        product_type = _get_product_type(code_norm)
+        if _is_ul_product_type(product_type):
             provider = build_ul_illustration_for_product
         else:
             provider = build_generic_term_illustration
