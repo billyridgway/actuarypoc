@@ -5512,15 +5512,115 @@ def load_ul_runtime_config(product_code: str) -> UlRuntimeConfig:
     """Temporary UL runtime config loader.
 
     For now this returns the same placeholder assumptions for all
-    products. Promise UL is the first validation product; future work
-    will source these values from Mechanics Discovery and Assumption
-    Discovery instead of hard-coding them here.
+    products, but it attempts to source the guaranteed minimum interest
+    rate from the current approved AssumptionSet DSL when available.
+    Promise UL is the first validation product; future work will move
+    more parameters (COI tables, surrender schedules, fees) into
+    mechanics/assumption-backed configuration.
     """
 
-    # NOTE: behaviour must remain identical to the previous inline
-    # configuration in ``build_promise_ul_illustration``.
+    # Start from the existing Promise UL placeholder values so behaviour
+    # remains identical when no assumptions are available.
+    default_guaranteed = 0.02
+    guaranteed_rate = default_guaranteed
+
+    logger = logging.getLogger(__name__)
+
+    try:
+        asn = get_current_assumption_for_product(product_code)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.info(
+            "UL config: failed to load current AssumptionSet for %s (%r); "
+            "using fallback guaranteed rate %.6f",
+            product_code,
+            exc,
+            default_guaranteed,
+        )
+        asn = None
+
+    if asn is not None:
+        try:
+            dsl_file = asn.dsl_file
+            dsl_path = Path(dsl_file)
+            if not dsl_path.is_absolute():
+                # The registry stores dsl_file relative to the DSL
+                # examples directory under src/actuarypoc/dsl/examples.
+                dsl_path = (
+                    _PROJECT_ROOT
+                    / "src"
+                    / "actuarypoc"
+                    / "dsl"
+                    / "examples"
+                    / dsl_file
+                )
+
+            # Reuse the existing DSL loader so we don't need a parallel
+            # YAML parser here.
+            formula = load_formula(str(dsl_path))
+
+            rate: Optional[float] = None
+            # First preference: an explicit guaranteed credit_rate.
+            for cr in getattr(formula, "credit_rates", []) or []:
+                rate_type = getattr(cr, "rate_type", None)
+                expr = getattr(cr, "expression", None)
+                if rate_type != "guaranteed" or not expr:
+                    continue
+                try:
+                    rate = float(str(expr))
+                except Exception:
+                    rate = None
+                if rate is not None:
+                    break
+
+            # Fallback: meta.guaranteed_minimum_rate when present.
+            if rate is None and getattr(formula, "meta", None):
+                raw = formula.meta.get("guaranteed_minimum_rate")
+                try:
+                    rate = float(str(raw)) if raw is not None else None
+                except Exception:
+                    rate = None
+
+            if rate is not None:
+                guaranteed_rate = rate
+                logger.info(
+                    "UL config: loaded guaranteed rate %.6f from AssumptionSet %s (%s)",
+                    guaranteed_rate,
+                    asn.id,
+                    dsl_path,
+                )
+            else:
+                logger.info(
+                    "UL config: no explicit guaranteed rate found in AssumptionSet %s (%s); "
+                    "using fallback %.6f",
+                    asn.id,
+                    dsl_path,
+                    default_guaranteed,
+                )
+        except FileNotFoundError:
+            logger.info(
+                "UL config: DSL file %s for product %s not found; using fallback guaranteed rate %.6f",
+                getattr(asn, "dsl_file", "(unknown)"),
+                product_code,
+                default_guaranteed,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.info(
+                "UL config: error loading guaranteed rate from AssumptionSet %s for %s (%r); "
+                "using fallback %.6f",
+                asn.id,
+                product_code,
+                exc,
+                default_guaranteed,
+            )
+    else:
+        logger.info(
+            "UL config: no current AssumptionSet for %s; using fallback guaranteed rate %.6f",
+            product_code,
+            default_guaranteed,
+        )
+
     return UlRuntimeConfig(
-        guaranteed_rate=0.02,  # 2% guaranteed minimum annual interest.
+        guaranteed_rate=guaranteed_rate,
         coi_rate_flat=0.004,  # flat 40 bps of face per year.
         surrender_period_years=19,
         max_surrender_pct=0.10,  # 10% of face in early durations, declining.
