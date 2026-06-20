@@ -5,6 +5,7 @@ from datetime import datetime
 import io
 import json
 import logging
+import re
 import zipfile
 from hashlib import sha256
 import math
@@ -5573,105 +5574,189 @@ def load_ul_runtime_config(product_code: str) -> UlRuntimeConfig:
     mechanics/assumption-backed configuration.
     """
 
+    logger = logging.getLogger(__name__)
     # Start from the existing Promise UL placeholder values so behaviour
     # remains identical when no assumptions are available.
     default_guaranteed = 0.02
     guaranteed_rate = default_guaranteed
 
-    logger = logging.getLogger(__name__)
-
+    # ------------------------------------------------------------------
+    # 1) Mechanic-assumptions (structured assumption discovery)
+    # ------------------------------------------------------------------
+    used_structured = False
     try:
-        asn = get_current_assumption_for_product(product_code)
+        rec = get_product_review(product_code)
     except Exception as exc:  # pragma: no cover - defensive
         logger.info(
-            "UL config: failed to load current AssumptionSet for %s (%r); "
-            "using fallback guaranteed rate %.6f",
+            "UL config: failed to load Product Review for %s (%r); "
+            "skipping assumption_discovery for guaranteed rate",
             product_code,
             exc,
-            default_guaranteed,
         )
-        asn = None
+        rec = None
 
-    if asn is not None:
+    if isinstance(rec, dict):
         try:
-            dsl_file = asn.dsl_file
-            dsl_path = Path(dsl_file)
-            if not dsl_path.is_absolute():
-                # The registry stores dsl_file relative to the DSL
-                # examples directory under src/actuarypoc/dsl/examples.
-                dsl_path = (
-                    _PROJECT_ROOT
-                    / "src"
-                    / "actuarypoc"
-                    / "dsl"
-                    / "examples"
-                    / dsl_file
-                )
-
-            # Reuse the existing DSL loader so we don't need a parallel
-            # YAML parser here.
-            formula = load_formula(str(dsl_path))
-
-            rate: Optional[float] = None
-            # First preference: an explicit guaranteed credit_rate.
-            for cr in getattr(formula, "credit_rates", []) or []:
-                rate_type = getattr(cr, "rate_type", None)
-                expr = getattr(cr, "expression", None)
-                if rate_type != "guaranteed" or not expr:
-                    continue
-                try:
-                    rate = float(str(expr))
-                except Exception:
-                    rate = None
-                if rate is not None:
-                    break
-
-            # Fallback: meta.guaranteed_minimum_rate when present.
-            if rate is None and getattr(formula, "meta", None):
-                raw = formula.meta.get("guaranteed_minimum_rate")
-                try:
-                    rate = float(str(raw)) if raw is not None else None
-                except Exception:
-                    rate = None
-
-            if rate is not None:
-                guaranteed_rate = rate
-                logger.info(
-                    "UL config: loaded guaranteed rate %.6f from AssumptionSet %s (%s)",
-                    guaranteed_rate,
-                    asn.id,
-                    dsl_path,
-                )
-            else:
-                logger.info(
-                    "UL config: no explicit guaranteed rate found in AssumptionSet %s (%s); "
-                    "using fallback %.6f",
-                    asn.id,
-                    dsl_path,
-                    default_guaranteed,
-                )
-        except FileNotFoundError:
-            logger.info(
-                "UL config: DSL file %s for product %s not found; using fallback guaranteed rate %.6f",
-                getattr(asn, "dsl_file", "(unknown)"),
-                product_code,
-                default_guaranteed,
-            )
+            meta = rec.get("metadata") or {}
+            review_state = meta.get("review") or {}
+            ad = review_state.get("assumption_discovery") if isinstance(review_state, dict) else None
+            mech_assumps = ad.get("mechanic_assumptions") if isinstance(ad, dict) else None
         except Exception as exc:  # pragma: no cover - defensive
             logger.info(
-                "UL config: error loading guaranteed rate from AssumptionSet %s for %s (%r); "
-                "using fallback %.6f",
-                asn.id,
+                "UL config: error reading assumption_discovery for %s (%r); "
+                "falling back to DSL/placeholder for guaranteed rate",
+                product_code,
+                exc,
+            )
+            mech_assumps = None
+
+        if isinstance(mech_assumps, list):
+            for m in mech_assumps:
+                if not isinstance(m, dict):
+                    continue
+                assumptions_list = m.get("assumptions") or []
+                for raw in assumptions_list:
+                    text = str(raw or "")
+                    low = text.lower()
+                    # Heuristic: look for guaranteed interest / rate bullets.
+                    if "guaranteed" not in low:
+                        continue
+                    if not any(kw in low for kw in ["interest", "credited", "rate"]):
+                        continue
+
+                    rate_val: Optional[float] = None
+                    # Prefer explicit percentages like "2%" or "2.5 %".
+                    m_pct = re.search(r"(\d+(?:\.\d+)?)\s*%", text)
+                    if m_pct:
+                        try:
+                            rate_val = float(m_pct.group(1)) / 100.0
+                        except Exception:
+                            rate_val = None
+                    else:
+                        # Fallback: bare numeric like "0.02" or "2.0".
+                        m_num = re.search(r"(\d+(?:\.\d+)?)", text)
+                        if m_num:
+                            try:
+                                val = float(m_num.group(1))
+                                rate_val = val / 100.0 if val > 1.0 else val
+                            except Exception:
+                                rate_val = None
+
+                    if rate_val is not None and 0.0 < rate_val < 1.0:
+                        guaranteed_rate = rate_val
+                        used_structured = True
+                        logger.info(
+                            "UL config: loaded guaranteed rate %.6f from assumption_discovery for %s",
+                            guaranteed_rate,
+                            product_code,
+                        )
+                        break
+                if used_structured:
+                    break
+        else:
+            logger.info(
+                "UL config: no mechanic_assumptions found in assumption_discovery for %s; "
+                "falling back to DSL/placeholder for guaranteed rate",
+                product_code,
+            )
+
+    # ------------------------------------------------------------------
+    # 2) DSL-backed AssumptionSet (fallback when no structured value)
+    # ------------------------------------------------------------------
+    asn: Optional[AssumptionSet]
+    if not used_structured:
+        try:
+            asn = get_current_assumption_for_product(product_code)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.info(
+                "UL config: failed to load current AssumptionSet for %s (%r); "
+                "using fallback guaranteed rate %.6f",
                 product_code,
                 exc,
                 default_guaranteed,
             )
-    else:
-        logger.info(
-            "UL config: no current AssumptionSet for %s; using fallback guaranteed rate %.6f",
-            product_code,
-            default_guaranteed,
-        )
+            asn = None
+
+        if asn is not None:
+            try:
+                dsl_file = asn.dsl_file
+                dsl_path = Path(dsl_file)
+                if not dsl_path.is_absolute():
+                    # The registry stores dsl_file relative to the DSL
+                    # examples directory under src/actuarypoc/dsl/examples.
+                    dsl_path = (
+                        _PROJECT_ROOT
+                        / "src"
+                        / "actuarypoc"
+                        / "dsl"
+                        / "examples"
+                        / dsl_file
+                    )
+
+                # Reuse the existing DSL loader so we don't need a parallel
+                # YAML parser here.
+                formula = load_formula(str(dsl_path))
+
+                rate: Optional[float] = None
+                # First preference: an explicit guaranteed credit_rate.
+                for cr in getattr(formula, "credit_rates", []) or []:
+                    rate_type = getattr(cr, "rate_type", None)
+                    expr = getattr(cr, "expression", None)
+                    if rate_type != "guaranteed" or not expr:
+                        continue
+                    try:
+                        rate = float(str(expr))
+                    except Exception:
+                        rate = None
+                    if rate is not None:
+                        break
+
+                # Fallback: meta.guaranteed_minimum_rate when present.
+                if rate is None and getattr(formula, "meta", None):
+                    raw = formula.meta.get("guaranteed_minimum_rate")
+                    try:
+                        rate = float(str(raw)) if raw is not None else None
+                    except Exception:
+                        rate = None
+
+                if rate is not None:
+                    guaranteed_rate = rate
+                    logger.info(
+                        "UL config: loaded guaranteed rate %.6f from AssumptionSet %s (%s)",
+                        guaranteed_rate,
+                        asn.id,
+                        dsl_path,
+                    )
+                else:
+                    logger.info(
+                        "UL config: no explicit guaranteed rate found in AssumptionSet %s (%s); "
+                        "using fallback %.6f",
+                        asn.id,
+                        dsl_path,
+                        default_guaranteed,
+                    )
+            except FileNotFoundError:
+                logger.info(
+                    "UL config: DSL file %s for product %s not found; using fallback guaranteed rate %.6f",
+                    getattr(asn, "dsl_file", "(unknown)"),
+                    product_code,
+                    default_guaranteed,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.info(
+                    "UL config: error loading guaranteed rate from AssumptionSet %s for %s (%r); "
+                    "using fallback %.6f",
+                    asn.id,
+                    product_code,
+                    exc,
+                    default_guaranteed,
+                )
+        else:
+            logger.info(
+                "UL config: no current AssumptionSet for %s; using fallback guaranteed rate %.6f",
+                product_code,
+                default_guaranteed,
+            )
 
     # For Phase 1, also precompute per-year curves that match the
     # existing placeholder behaviour so they are available for future
