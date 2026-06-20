@@ -5493,12 +5493,58 @@ def build_generic_term_illustration(product_code: str, request: Dict[str, Any]) 
 
 
 @dataclass
-class UlRuntimeConfig:
-    """Minimal runtime config for UL-style draft illustrations.
+class UlCreditingConfig:
+    """Per-year crediting configuration for UL-style projections.
 
-    This is intentionally small for the Promise UL POC. It is a stepping
-    stone toward a mechanics/assumption-backed generic UL engine rather
-    than a final configuration surface.
+    For the Promise UL POC this is populated with flat rates, but the
+    structure is intended to support richer per-year curves.
+    """
+
+    guaranteed_rates: List[float]
+    current_rates: Optional[List[float]] = None
+    illustrated_rates: Optional[List[float]] = None
+
+
+@dataclass
+class UlCoiConfig:
+    """Per-year COI configuration for UL-style projections."""
+
+    basis: str  # "face" | "net_amount_at_risk"
+    coi_rates: List[float]
+    table_id: Optional[str] = None
+
+
+@dataclass
+class UlSurrenderConfig:
+    """Per-year surrender charge configuration for UL-style projections."""
+
+    surrender_pct_of_face: List[float]
+    schedule_id: Optional[str] = None
+
+
+@dataclass
+class UlFeeConfig:
+    """Per-year fee configuration for UL-style projections."""
+
+    policy_fee_annual: List[float]
+    premium_load_pct: float = 0.0
+
+
+@dataclass
+class UlDeathBenefitConfig:
+    """Death benefit option configuration for UL-style projections."""
+
+    option_type: str  # e.g. "level", "increasing"
+
+
+@dataclass
+class UlRuntimeConfig:
+    """Runtime config for UL-style draft illustrations.
+
+    For now this wraps both the original scalar placeholders used by the
+    Promise UL POC and richer per-year sub-configs that will eventually
+    drive the engine directly. During Phase 1 the scalars remain the
+    source of truth for `_run_ul_projection` so behaviour is unchanged.
     """
 
     guaranteed_rate: float
@@ -5506,6 +5552,13 @@ class UlRuntimeConfig:
     surrender_period_years: int
     max_surrender_pct: float
     policy_fee_annual: float = 0.0
+
+    # Richer per-year config surfaces for future use.
+    crediting: Optional[UlCreditingConfig] = None
+    coi: Optional[UlCoiConfig] = None
+    surrender: Optional[UlSurrenderConfig] = None
+    fees: Optional[UlFeeConfig] = None
+    death_benefit: Optional[UlDeathBenefitConfig] = None
 
 
 def load_ul_runtime_config(product_code: str) -> UlRuntimeConfig:
@@ -5619,12 +5672,46 @@ def load_ul_runtime_config(product_code: str) -> UlRuntimeConfig:
             default_guaranteed,
         )
 
+    # For Phase 1, also precompute per-year curves that match the
+    # existing placeholder behaviour so they are available for future
+    # engine refactors without changing current outputs.
+    horizon_years = 30
+
+    guaranteed_rates = [guaranteed_rate for _ in range(horizon_years)]
+
+    coi_flat = 0.004
+    coi_rates = [coi_flat for _ in range(horizon_years)]
+
+    surrender_period_years = 19
+    max_surrender_pct = 0.10
+    surrender_pct_of_face: List[float] = []
+    for year in range(1, horizon_years + 1):
+        if year <= surrender_period_years:
+            remaining = surrender_period_years - year + 1
+            pct = max_surrender_pct * (remaining / surrender_period_years)
+        else:
+            pct = 0.0
+        surrender_pct_of_face.append(pct)
+
+    policy_fee_curve = [0.0 for _ in range(horizon_years)]
+
+    crediting_cfg = UlCreditingConfig(guaranteed_rates=guaranteed_rates)
+    coi_cfg = UlCoiConfig(basis="face", coi_rates=coi_rates, table_id=None)
+    surrender_cfg = UlSurrenderConfig(surrender_pct_of_face=surrender_pct_of_face, schedule_id=None)
+    fees_cfg = UlFeeConfig(policy_fee_annual=policy_fee_curve, premium_load_pct=0.0)
+    death_benefit_cfg = UlDeathBenefitConfig(option_type="level")
+
     return UlRuntimeConfig(
         guaranteed_rate=guaranteed_rate,
-        coi_rate_flat=0.004,  # flat 40 bps of face per year.
-        surrender_period_years=19,
-        max_surrender_pct=0.10,  # 10% of face in early durations, declining.
+        coi_rate_flat=coi_flat,  # flat 40 bps of face per year.
+        surrender_period_years=surrender_period_years,
+        max_surrender_pct=max_surrender_pct,  # 10% of face in early durations, declining.
         policy_fee_annual=0.0,
+        crediting=crediting_cfg,
+        coi=coi_cfg,
+        surrender=surrender_cfg,
+        fees=fees_cfg,
+        death_benefit=death_benefit_cfg,
     )
 
 
