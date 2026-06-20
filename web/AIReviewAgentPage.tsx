@@ -1848,6 +1848,31 @@ export const AIReviewAgentPage: React.FC = () => {
                 {illustrationResult.notes.join(" ")}
               </p>
             )}
+            {Array.isArray(illustrationResult.projectionAssumptions) &&
+              illustrationResult.projectionAssumptions.length > 0 && (
+                <section className="card" style={{ marginTop: "0.5rem" }}>
+                  <h4>Projection assumptions</h4>
+                  <table className="kv-table">
+                    <thead>
+                      <tr>
+                        <th>Assumption</th>
+                        <th>Value</th>
+                        <th>Source</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {illustrationResult.projectionAssumptions.map((a: any, idx: number) => (
+                        // eslint-disable-next-line react/no-array-index-key
+                        <tr key={idx}>
+                          <td>{a.name ?? ""}</td>
+                          <td>{a.value ?? ""}</td>
+                          <td>{a.source ?? ""}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </section>
+              )}
             {illustrationResult.projection?.metrics && (
               <table className="kv-table">
                 <tbody>

@@ -5561,6 +5561,8 @@ class UlRuntimeConfig:
     surrender: Optional[UlSurrenderConfig] = None
     fees: Optional[UlFeeConfig] = None
     death_benefit: Optional[UlDeathBenefitConfig] = None
+    # High-level assumption provenance suitable for UI surfaces.
+    assumption_provenance: Optional[List[Dict[str, Any]]] = None
 
 
 def _extract_guaranteed_rate_from_text(text: str) -> Optional[float]:
@@ -5835,6 +5837,43 @@ def load_ul_runtime_config(product_code: str) -> UlRuntimeConfig:
     fees_cfg = UlFeeConfig(policy_fee_annual=policy_fee_curve, premium_load_pct=0.0)
     death_benefit_cfg = UlDeathBenefitConfig(option_type="level")
 
+    # High-level assumption provenance for UI/debug surfaces.
+    # Source strings are intentionally simple and human-readable.
+    if used_structured:
+        guaranteed_source = "Assumption Discovery"
+    elif 'asn' in locals() and asn is not None:
+        guaranteed_source = "AssumptionSet DSL"
+    else:
+        guaranteed_source = "Fallback"
+
+    assumption_provenance: List[Dict[str, Any]] = [
+        {
+            "name": "Guaranteed credited rate",
+            "value": guaranteed_rate,
+            "source": guaranteed_source,
+        },
+        {
+            "name": "COI rate",
+            "value": coi_flat,
+            "source": "Placeholder",
+        },
+        {
+            "name": "COI basis",
+            "value": coi_cfg.basis,
+            "source": "Placeholder",
+        },
+        {
+            "name": "Surrender schedule",
+            "value": f"{max_surrender_pct:.2%} over {surrender_period_years} years (declining, % of face)",
+            "source": "Placeholder",
+        },
+        {
+            "name": "Policy fee",
+            "value": 0.0,
+            "source": "Placeholder",
+        },
+    ]
+
     return UlRuntimeConfig(
         guaranteed_rate=guaranteed_rate,
         coi_rate_flat=coi_flat,  # flat 40 bps of face per year.
@@ -5846,6 +5885,7 @@ def load_ul_runtime_config(product_code: str) -> UlRuntimeConfig:
         surrender=surrender_cfg,
         fees=fees_cfg,
         death_benefit=death_benefit_cfg,
+        assumption_provenance=assumption_provenance,
     )
 
 
@@ -6186,6 +6226,7 @@ def build_promise_ul_illustration(product_code: str, request: Dict[str, Any]) ->
         "request": normalised_request,
         "templateScenarioId": None,
         "projection": projection,
+        "projectionAssumptions": cfg.assumption_provenance or [],
         "warnings": warnings,
         "notes": notes,
     }
