@@ -720,8 +720,12 @@ export const AIReviewAgentPage: React.FC = () => {
 
   const projectionSupported = (() => {
     const code = normalisedCode.trim().toUpperCase();
+    const productMeta = products?.find((p) => (p.productCode || "").toUpperCase() === code);
+    const productType = (productMeta?.productType || "").toString().trim().toUpperCase();
     // P12TRF uses the full engine-backed illustration path.
     if (code === "P12TRF") return true;
+    // Any UL-typed product uses the shared UL illustration provider.
+    if (productType === "UL") return true;
     // Promise UL / ICC18 P18PR UL uses a draft, mechanics-informed illustration
     // that does not depend on an executable DSL.
     if (code === "ICC18 P18PR UL" || code === "ICC18P18PRUL") return true;

@@ -3560,6 +3560,31 @@ def _get_illustration_provider(product_code: str) -> Optional[ProductIllustratio
     return _ILLUSTRATION_PROVIDERS.get(code_norm)
 
 
+def _get_product_type(product_code: str) -> str:
+    """Best-effort lookup of a product's type from Product Review metadata.
+
+    This is advisory only; when unavailable we return an empty string and
+    fall back to default illustration routing.
+    """
+
+    code_norm = (product_code or "").strip().upper()
+    if not code_norm:
+        return ""
+
+    try:
+        rec = get_product_review(code_norm)
+    except Exception:
+        return ""
+    if not isinstance(rec, dict):
+        return ""
+
+    meta = rec.get("metadata") or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    product_type = meta.get("type") or meta.get("productType") or ""
+    return str(product_type or "")
+
+
 def _build_projection_inputs_and_table_from_summary(data: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """Derive scenario-like inputs and a compact projection table from a
     projection summary JSON object.
@@ -4172,13 +4197,17 @@ def api_product_illustration(product_code: str, payload: IllustrationRequest) ->
     code_norm = (cfg.get("productCode") or product_code or "").strip().upper()
 
     # Prefer a product-specific illustration provider when one is
-    # registered (currently P12TRF), but fall back to a generic term
-    # illustration provider for any product that has term-style
-    # projections. Unknown / experimental products are therefore
-    # supported on a best-effort basis instead of returning 501.
+    # registered (currently P12TRF and Promise UL aliases). Otherwise,
+    # route UL-typed products to the shared UL illustration provider and
+    # fall back to the generic term-style illustration for everything
+    # else.
     provider = _get_illustration_provider(code_norm)
     if provider is None:
-        provider = build_generic_term_illustration
+        product_type = (_get_product_type(code_norm) or "").strip().upper()
+        if product_type == "UL":
+            provider = build_ul_illustration_for_product
+        else:
+            provider = build_generic_term_illustration
 
     try:
         request_dict = payload.dict()  # type: ignore[call-arg]
@@ -6188,8 +6217,8 @@ def _run_ul_projection(
     return projection, normalised_request
 
 
-def build_promise_ul_illustration(product_code: str, request: Dict[str, Any]) -> Dict[str, Any]:
-    """Draft, mechanics-informed illustration for Promise UL.
+def build_ul_illustration_for_product(product_code: str, request: Dict[str, Any]) -> Dict[str, Any]:
+    """Shared UL illustration provider.
 
     This is intentionally rough and exists to give a product-understanding
     view of how policy value, surrender value, and death benefit evolve
@@ -6232,9 +6261,18 @@ def build_promise_ul_illustration(product_code: str, request: Dict[str, Any]) ->
     }
 
 
-# Promise UL (ICC18 P18PR UL) – draft mechanics-informed illustration
-_ILLUSTRATION_PROVIDERS["ICC18 P18PR UL"] = build_promise_ul_illustration
-_ILLUSTRATION_PROVIDERS["ICC18P18PRUL"] = build_promise_ul_illustration
+def build_promise_ul_illustration(product_code: str, request: Dict[str, Any]) -> Dict[str, Any]:
+    """Promise UL-specific alias for the shared UL illustration provider."""
+
+    return build_ul_illustration_for_product(product_code, request)
+
+
+# Promise UL (ICC18 P18PR UL) – draft mechanics-informed illustration.
+# These aliases remain explicit so that product-code-specific routing
+# continues to work even as UL products in general route via
+# build_ul_illustration_for_product based on product type.
+_ILLUSTRATION_PROVIDERS["ICC18 P18PR UL"] = build_ul_illustration_for_product
+_ILLUSTRATION_PROVIDERS["ICC18P18PRUL"] = build_ul_illustration_for_product
 
 
 @app.post("/api/product-model-review/p12trf/evidence/seed")
