@@ -5563,6 +5563,78 @@ class UlRuntimeConfig:
     death_benefit: Optional[UlDeathBenefitConfig] = None
 
 
+def _extract_guaranteed_rate_from_text(text: str) -> Optional[float]:
+    """Best-effort extraction of a guaranteed credited interest rate.
+
+    This is intentionally conservative: it only considers bullets that
+    clearly refer to *credited interest* or *interest rates*, not COI
+    caps or other guarantees. It supports forms such as:
+
+    - "Guaranteed minimum annual credited rate = 2%"
+    - "The annual credited rate will not be less than 2%"
+    - "guaranteed minimum annual interest rate, currently set at 2%"
+    - "Guaranteed credited rate: 0.02"
+
+    Returns a float in (0, 1) when a plausible rate is found,
+    otherwise None.
+    """
+
+    s = str(text or "")
+    low = s.lower()
+
+    if "guaranteed" not in low:
+        return None
+    # Avoid COI / CSO style guarantees; focus on credited *interest*.
+    if not any(kw in low for kw in ["interest", "credited", "crediting"]):
+        return None
+
+    # Prefer explicit percentages like "2%" or "2.5 %".
+    m_pct = re.search(r"(\d+(?:\.\d+)?)\s*%", s)
+    rate_val: Optional[float] = None
+    if m_pct:
+        try:
+            rate_val = float(m_pct.group(1)) / 100.0
+        except Exception:
+            rate_val = None
+    else:
+        # Fallback: bare numeric like "0.02" or "2.0".
+        m_num = re.search(r"(\d+(?:\.\d+)?)", s)
+        if m_num:
+            try:
+                val = float(m_num.group(1))
+                rate_val = val / 100.0 if val > 1.0 else val
+            except Exception:
+                rate_val = None
+
+    if rate_val is None or not (0.0 < rate_val < 1.0):
+        return None
+    return rate_val
+
+
+def _debug__test_extract_guaranteed_rate_from_text() -> Dict[str, Optional[float]]:
+    """Lightweight self-check for the guaranteed rate parser.
+
+    Not used in production; can be run manually in a REPL to confirm
+    expected behaviour.
+    """
+
+    cases = {
+        # Should parse as 0.02
+        "Guaranteed minimum annual credited rate = 2%": 0.02,
+        "The annual credited rate will not be less than 2%": 0.02,
+        "guaranteed minimum annual interest rate, currently set at 2% for new issues": 0.02,
+        "Guaranteed credited rate: 0.02": 0.02,
+        # Should NOT parse (None)
+        "Cost of Insurance rates are guaranteed not to exceed the capped 2017 CSO": None,
+        "The policy can be issued from ages 0 through 80": None,
+        "Surrender charge period is 19 years": None,
+        "Face amount minimum is $10,000": None,
+        "Death benefit must satisfy IRC Section 7702": None,
+    }
+
+    return {text: _extract_guaranteed_rate_from_text(text) for text in cases}
+
+
 def load_ul_runtime_config(product_code: str) -> UlRuntimeConfig:
     """Temporary UL runtime config loader.
 
@@ -5617,32 +5689,8 @@ def load_ul_runtime_config(product_code: str) -> UlRuntimeConfig:
                 assumptions_list = m.get("assumptions") or []
                 for raw in assumptions_list:
                     text = str(raw or "")
-                    low = text.lower()
-                    # Heuristic: look for guaranteed interest / rate bullets.
-                    if "guaranteed" not in low:
-                        continue
-                    if not any(kw in low for kw in ["interest", "credited", "rate"]):
-                        continue
-
-                    rate_val: Optional[float] = None
-                    # Prefer explicit percentages like "2%" or "2.5 %".
-                    m_pct = re.search(r"(\d+(?:\.\d+)?)\s*%", text)
-                    if m_pct:
-                        try:
-                            rate_val = float(m_pct.group(1)) / 100.0
-                        except Exception:
-                            rate_val = None
-                    else:
-                        # Fallback: bare numeric like "0.02" or "2.0".
-                        m_num = re.search(r"(\d+(?:\.\d+)?)", text)
-                        if m_num:
-                            try:
-                                val = float(m_num.group(1))
-                                rate_val = val / 100.0 if val > 1.0 else val
-                            except Exception:
-                                rate_val = None
-
-                    if rate_val is not None and 0.0 < rate_val < 1.0:
+                    rate_val = _extract_guaranteed_rate_from_text(text)
+                    if rate_val is not None:
                         guaranteed_rate = rate_val
                         used_structured = True
                         logger.info(
