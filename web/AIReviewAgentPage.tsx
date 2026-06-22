@@ -790,10 +790,10 @@ export const AIReviewAgentPage: React.FC = () => {
   return (
     <div className="run-detail-page">
       <header className="card">
-        <h1>AI Product Review Agent</h1>
+        <h1>AI Product Review Agent – Expert / Debug Mode</h1>
         <p className="muted">
-          Single-page console that drives the multi-stage AI pipeline: metadata, assumptions, and Product Model Review
-          summary / decision suggestion.
+          Detailed, staged pipeline view for product understanding. Use this when you want full visibility and manual
+          control over metadata, mechanics, assumptions, scenarios, projections, and PMR summaries.
         </p>
       </header>
 

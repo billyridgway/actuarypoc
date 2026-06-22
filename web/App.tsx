@@ -6,6 +6,7 @@ export const App: React.FC = () => {
     <div className="app-shell">
       <header className="top-nav">
         <div className="top-nav__brand">ActuaryPOC – AI Agent</div>
+        <div className="top-nav__subtitle">Expert / Debug pipeline view</div>
       </header>
       <main className="app-shell__main">
         <AIReviewAgentPage />
