@@ -7,6 +7,7 @@ export const App: React.FC = () => {
   const searchParams = new URLSearchParams(window.location.search || "");
   const view = (searchParams.get("view") || "").toLowerCase();
   const isExpert = view === "expert";
+  const productFromQuery = (searchParams.get("product") || "").trim();
 
    // Simple pathname-based routing so that /web shows the catalog and
    // /web/product/{code} shows the product workspace. The static
@@ -17,17 +18,23 @@ export const App: React.FC = () => {
   let workspaceProductCode: string | null = null;
 
   if (!isExpert) {
-    let pathAfterWeb = normalisedPath;
-    if (pathAfterWeb.startsWith("/web")) {
-      pathAfterWeb = pathAfterWeb.slice("/web".length) || "/";
-    }
-    if (pathAfterWeb.startsWith("/product/")) {
-      const codeFragment = pathAfterWeb.slice("/product/".length);
-      if (codeFragment) {
-        try {
-          workspaceProductCode = decodeURIComponent(codeFragment);
-        } catch {
-          workspaceProductCode = codeFragment;
+    // Query-param based routing takes precedence so that /web?product=
+    // always enters the workspace view regardless of path.
+    if (productFromQuery) {
+      workspaceProductCode = productFromQuery;
+    } else {
+      let pathAfterWeb = normalisedPath;
+      if (pathAfterWeb.startsWith("/web")) {
+        pathAfterWeb = pathAfterWeb.slice("/web".length) || "/";
+      }
+      if (pathAfterWeb.startsWith("/product/")) {
+        const codeFragment = pathAfterWeb.slice("/product/".length);
+        if (codeFragment) {
+          try {
+            workspaceProductCode = decodeURIComponent(codeFragment);
+          } catch {
+            workspaceProductCode = codeFragment;
+          }
         }
       }
     }

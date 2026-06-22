@@ -117,8 +117,28 @@ export const ProductWorkspacePage: React.FC<{ productCode: string }> = ({ produc
         const code = encodeURIComponent(productCode || "");
         const resp = await fetch(`/api/product-workspace/${code}`);
         if (!resp.ok) {
-          const text = await resp.text();
-          throw new Error(text || `HTTP ${resp.status}`);
+          let message = `Failed to load workspace (HTTP ${resp.status})`;
+          try {
+            const contentType = resp.headers.get("content-type") || "";
+            if (contentType.includes("application/json")) {
+              const body = await resp.json();
+              if (body && typeof body.detail === "string" && body.detail.trim()) {
+                message = body.detail.trim();
+              }
+            } else {
+              const text = await resp.text();
+              if (text) message = text;
+            }
+          } catch {
+            // Ignore parse errors and keep the default message.
+          }
+
+          if (resp.status === 501) {
+            message =
+              "Product Understanding Workspace is not yet implemented for this product type. Use Expert / Debug mode or the Trust Surface for detailed PMR status.";
+          }
+
+          throw new Error(message);
         }
         const payload: WorkspacePayload = await resp.json();
         if (!cancelled) {

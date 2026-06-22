@@ -97,7 +97,12 @@ export const ProductCatalogPage: React.FC = () => {
                 typeof p.documentCount === "number" ? String(p.documentCount) : "(unknown)";
               const projectionLabel = p.projectionAvailable ? "Available" : "Not available";
 
-              const href = `/web/product/${encodeURIComponent(p.productCode)}`;
+              // Use a query-parameter based workspace route so that
+              // navigation stays within the SPA and always hits the
+              // /web entrypoint. Path-based routing (/web/product/…)
+              // is still supported by App.tsx but we prefer this
+              // form to avoid server-side 404s.
+              const href = `/web?product=${encodeURIComponent(p.productCode)}`;
 
               return (
                 <div key={p.productCode} className="card home-card">
@@ -166,4 +171,3 @@ export const ProductCatalogPage: React.FC = () => {
     </div>
   );
 };
-
