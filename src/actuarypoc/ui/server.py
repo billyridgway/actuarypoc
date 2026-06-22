@@ -131,13 +131,13 @@ def _normalise_promise_ul_code(product_code: str) -> str:
     """Canonicalise Promise UL product codes for workspace views.
 
     Slice 3 of the Product Understanding Workspace is Promise‑UL‑first:
-    ICC18 P18PR UL is treated as the canonical code, with ICC18P18PRUL
-    supported as an alias where needed. Other products are intentionally
+    ICC18 P18PR UL is treated as the canonical code, with common
+    aliases normalised where needed. Other products are intentionally
     left unsupported for this workspace surface in this MVP.
     """
 
     code_norm = (product_code or "").strip().upper()
-    if code_norm in {"ICC18 P18PR UL", "ICC18P18PRUL"}:
+    if code_norm in {"ICC18 P18PR UL", "ICC18P18PRUL", "ICC18 P18PRUL"}:
         return "ICC18 P18PR UL"
     return code_norm
 
@@ -2344,7 +2344,12 @@ def api_products() -> Dict[str, Any]:
         if not code_norm:
             return False
 
-        provider = _get_illustration_provider(code_norm)
+        # Use Promise UL canonicalisation for registry lookups so that
+        # workspace and catalog agree on which products have projection
+        # support.
+        lookup_code = _normalise_promise_ul_code(code_norm)
+
+        provider = _get_illustration_provider(lookup_code)
         if provider is not None:
             return True
 
