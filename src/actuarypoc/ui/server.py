@@ -2352,6 +2352,11 @@ def api_products() -> Dict[str, Any]:
             review_freshness = pmr.get("reviewFreshness") or {}
             decision_risk = (last_decision.get("decisionRisk") or {}) if isinstance(last_decision, dict) else {}
 
+            # Basic understanding and projection flags for the catalog.
+            understanding_status = "green" if builder_registered else "yellow"
+            projection_available = True
+            document_count = review_meta.get("documentCount")
+
             products.append(
                 {
                     "productCode": product_block.get("code"),
@@ -2366,6 +2371,10 @@ def api_products() -> Dict[str, Any]:
                     "latestRiskStatus": decision_risk.get("status"),
                     "reviewFreshnessStatus": review_freshness.get("status"),
                     "bundlePath": last_decision.get("bundle_path"),
+                    # Catalog-oriented fields
+                    "understandingStatus": understanding_status,
+                    "documentCount": document_count,
+                    "projectionAvailable": projection_available,
                 }
             )
         else:
@@ -2383,6 +2392,10 @@ def api_products() -> Dict[str, Any]:
                     "latestRiskStatus": None,
                     "reviewFreshnessStatus": None,
                     "bundlePath": None,
+                    # Catalog-oriented fields – advisory only for now.
+                    "understandingStatus": "unknown",
+                    "documentCount": None,
+                    "projectionAvailable": False,
                 }
             )
 
@@ -2431,6 +2444,16 @@ def api_products() -> Dict[str, Any]:
         builder = _get_product_model_review_builder(code)
         builder_registered = builder is not None
 
+        # Advisory understanding and projection flags for registered
+        # products. We treat them as draft/yellow until their
+        # implementation status is upgraded.
+        if implementation_status in {"no_dsl", "not_executable"}:
+            understanding_status = "yellow"
+        else:
+            understanding_status = "unknown"
+
+        projection_available = bool(_get_illustration_provider(code))
+
         products.append(
             {
                 "productCode": code,
@@ -2454,6 +2477,10 @@ def api_products() -> Dict[str, Any]:
                     "registeredBy": catalog.get("registeredBy"),
                     "source": catalog.get("source"),
                 },
+                # Catalog-oriented fields
+                "understandingStatus": understanding_status,
+                "documentCount": None,
+                "projectionAvailable": projection_available,
             }
         )
 
@@ -4020,16 +4047,19 @@ def build_product_workspace_snapshot(product_code: str) -> Dict[str, Any]:
 
     canonical_code = _normalise_promise_ul_code(code_input)
 
-    # TODO(workspace-multi-product): extend this to support additional
-    # products once they have mechanics, assumptions, and illustration
-    # surfaces wired. For now we keep Promise UL as the only implemented
-    # workspace product.
-    if canonical_code != "ICC18 P18PR UL":
+    # Extension point: as additional products gain mechanics,
+    # assumptions, and illustration support, the workspace snapshot can
+    # route based on product type instead of hard-coding product
+    # codes. For now we implement the workspace surface only for
+    # UL-style products and use the shared UL providers below.
+
+    product_type_hint = _get_product_type(canonical_code)
+    if not _is_ul_product_type(product_type_hint):
         raise HTTPException(
             status_code=501,
             detail=(
-                "Product Understanding Workspace is currently implemented "
-                "only for Promise UL (ICC18 P18PR UL) in this MVP."
+                "Product Understanding Workspace surface is currently "
+                "implemented only for UL-style products in this MVP."
             ),
         )
 

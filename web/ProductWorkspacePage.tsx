@@ -100,7 +100,7 @@ const formatCurrency = (value: any): string => {
   });
 };
 
-export const ProductWorkspacePage: React.FC = () => {
+export const ProductWorkspacePage: React.FC<{ productCode: string }> = ({ productCode }) => {
   const [data, setData] = React.useState<WorkspacePayload | null>(null);
   const [loading, setLoading] = React.useState<boolean>(true);
   const [error, setError] = React.useState<string | null>(null);
@@ -114,10 +114,7 @@ export const ProductWorkspacePage: React.FC = () => {
       try {
         setLoading(true);
         setError(null);
-        // Slice 3 is Promise‑UL‑first: ICC18 P18PR UL is the canonical
-        // workspace product code, with ICC18P18PRUL supported server‑side
-        // as an alias.
-        const code = encodeURIComponent("ICC18 P18PR UL");
+        const code = encodeURIComponent(productCode || "");
         const resp = await fetch(`/api/product-workspace/${code}`);
         if (!resp.ok) {
           const text = await resp.text();
@@ -282,15 +279,15 @@ export const ProductWorkspacePage: React.FC = () => {
       <header className="card">
         <h1>Product Understanding Workspace</h1>
         <p className="muted">
-          High-level, read-only view of the current Promise UL understanding. Use this as the default workspace; switch
-          to Expert / Debug mode when you need full control over each pipeline stage.
+          High-level, read-only view of the current product understanding. Use this as the default workspace; switch to
+          Expert / Debug mode when you need full control over each pipeline stage.
         </p>
         <p>
           <a href="/web?view=expert" className="button">
             Open Expert / Debug Mode
           </a>
         </p>
-        {loading && <p className="muted">Loading Promise UL workspace…</p>}
+        {loading && <p className="muted">Loading product workspace…</p>}
         {error && !loading && <p className="error">{error}</p>}
       </header>
 

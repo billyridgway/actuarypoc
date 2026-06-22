@@ -1,22 +1,58 @@
 import React from "react";
 import { AIReviewAgentPage } from "./AIReviewAgentPage";
 import { ProductWorkspacePage } from "./ProductWorkspacePage";
+import { ProductCatalogPage } from "./ProductCatalogPage";
 
 export const App: React.FC = () => {
   const searchParams = new URLSearchParams(window.location.search || "");
   const view = (searchParams.get("view") || "").toLowerCase();
   const isExpert = view === "expert";
 
+   // Simple pathname-based routing so that /web shows the catalog and
+   // /web/product/{code} shows the product workspace. The static
+   // FastAPI mount serves the same SPA bundle for all of these paths;
+   // routing is handled entirely client-side.
+  const pathname = window.location.pathname || "";
+  const normalisedPath = pathname.replace(/\/+$/, "");
+  let workspaceProductCode: string | null = null;
+
+  if (!isExpert) {
+    let pathAfterWeb = normalisedPath;
+    if (pathAfterWeb.startsWith("/web")) {
+      pathAfterWeb = pathAfterWeb.slice("/web".length) || "/";
+    }
+    if (pathAfterWeb.startsWith("/product/")) {
+      const codeFragment = pathAfterWeb.slice("/product/".length);
+      if (codeFragment) {
+        try {
+          workspaceProductCode = decodeURIComponent(codeFragment);
+        } catch {
+          workspaceProductCode = codeFragment;
+        }
+      }
+    }
+  }
+
+  const subtitle = isExpert
+    ? "Expert / Debug pipeline view"
+    : workspaceProductCode
+      ? "Product Understanding Workspace"
+      : "Product Catalog";
+
   return (
     <div className="app-shell">
       <header className="top-nav">
         <div className="top-nav__brand">ActuaryPOC – AI Agent</div>
-        <div className="top-nav__subtitle">
-          {isExpert ? "Expert / Debug pipeline view" : "Product Understanding Workspace"}
-        </div>
+        <div className="top-nav__subtitle">{subtitle}</div>
       </header>
       <main className="app-shell__main">
-        {isExpert ? <AIReviewAgentPage /> : <ProductWorkspacePage />}
+        {isExpert ? (
+          <AIReviewAgentPage />
+        ) : workspaceProductCode ? (
+          <ProductWorkspacePage productCode={workspaceProductCode} />
+        ) : (
+          <ProductCatalogPage />
+        )}
       </main>
     </div>
   );
