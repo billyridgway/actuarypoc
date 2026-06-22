@@ -2330,6 +2330,31 @@ def api_products() -> Dict[str, Any]:
     except Exception:
         pmr = None
 
+    def _has_projection(code: str) -> bool:
+        """Best-effort check for whether on-demand projection is available.
+
+        This mirrors the routing in ``api_product_illustration``: we
+        first look for an explicit illustration provider, then fall back
+        to type-based routing for UL and term products. The workspace
+        and catalog both key off this capability so they remain
+        consistent.
+        """
+
+        code_norm = (code or "").strip().upper()
+        if not code_norm:
+            return False
+
+        provider = _get_illustration_provider(code_norm)
+        if provider is not None:
+            return True
+
+        product_type = _get_product_type(code_norm)
+        if _is_ul_product_type(product_type):
+            return True
+        if _is_term_product_type(product_type):
+            return True
+        return False
+
     for entry in _PRODUCT_REGISTRY:
         code = entry.get("productCode")
         name = entry.get("productName")
@@ -2354,7 +2379,7 @@ def api_products() -> Dict[str, Any]:
 
             # Basic understanding and projection flags for the catalog.
             understanding_status = "green" if builder_registered else "yellow"
-            projection_available = True
+            projection_available = _has_projection(code_norm)
             document_count = review_meta.get("documentCount")
 
             products.append(
@@ -2395,7 +2420,7 @@ def api_products() -> Dict[str, Any]:
                     # Catalog-oriented fields – advisory only for now.
                     "understandingStatus": "unknown",
                     "documentCount": None,
-                    "projectionAvailable": False,
+                    "projectionAvailable": _has_projection(code_norm),
                 }
             )
 
@@ -2452,7 +2477,7 @@ def api_products() -> Dict[str, Any]:
         else:
             understanding_status = "unknown"
 
-        projection_available = bool(_get_illustration_provider(code))
+        projection_available = _has_projection(code)
 
         products.append(
             {
