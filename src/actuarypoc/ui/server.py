@@ -5655,6 +5655,376 @@ class UlRuntimeConfig:
     assumption_provenance: Optional[List[Dict[str, Any]]] = None
 
 
+def build_ul_projection_explanation(
+    *,
+    product_code: str,
+    request: Dict[str, Any],
+    config: UlRuntimeConfig,
+    projection: Dict[str, Any],
+    year: int,
+) -> Dict[str, Any]:
+    """Build a lightweight mechanics trace for a single UL projection year.
+
+    This is intentionally read-only and derived from the existing UL
+    projection rows and runtime config so that it cannot affect
+    `_run_ul_projection` behaviour. It exposes the effective order of
+    operations for a single projection year in a UI-friendly shape.
+    """
+
+    code_norm = (product_code or "").strip().upper()
+
+    rows: List[Dict[str, Any]] = list((projection or {}).get("rows") or [])
+    target_row: Optional[Dict[str, Any]] = None
+    for r in rows:
+        if r.get("year") == year:
+            target_row = r
+            break
+
+    if target_row is None:
+        # Best-effort fallback: index into the rows list when the
+        # requested year is within the horizon. This keeps the surface
+        # usable even if callers pass a 1-based index instead of the
+        # stored year label.
+        idx = year - 1
+        if 0 <= idx < len(rows):
+            target_row = rows[idx]
+        else:
+            raise ValueError(f"No UL projection row found for year {year!r}.")
+
+    # Core scalar inputs used in the original UL projection loop.
+    guaranteed_rate = float(config.guaranteed_rate)
+    coi_rate = float(config.coi_rate_flat)
+    policy_fee_annual = float(config.policy_fee_annual)
+
+    face_amount = float(request.get("faceAmount") or 0.0)
+    annual_premium = float(target_row.get("annualPremium") or target_row.get("premium") or 0.0)
+    premium_mode = str(target_row.get("premiumMode") or request.get("premiumMode") or "").strip().upper()
+
+    # Values as produced by `_run_ul_projection`.
+    end_policy_value = float(target_row.get("policyValue") or target_row.get("cashValue") or 0.0)
+    guaranteed_interest = float(target_row.get("guaranteedInterest") or 0.0)
+    coi_charge = float(target_row.get("coiCharge") or 0.0)
+    surrender_charge = float(target_row.get("surrenderCharge") or 0.0)
+    surrender_value = float(target_row.get("surrenderValue") or 0.0)
+    death_benefit = float(target_row.get("deathBenefit") or 0.0)
+    net_amount_at_risk = float(target_row.get("netAmountAtRisk") or 0.0)
+
+    # Invert the simple annual projection logic to recover the opening
+    # policy value for this year. The core loop is:
+    #   base = opening_value + annual_premium
+    #   guaranteed_interest = base * guaranteed_rate
+    #   policy_value_end = base + guaranteed_interest - coi_charge - policy_fee_annual
+    #
+    # Let X = opening_value + annual_premium. Then:
+    #   policy_value_end = X * (1 + guaranteed_rate) - coi - fee
+    #   X = (policy_value_end + coi + fee) / (1 + guaranteed_rate)
+    #   opening_value = X - annual_premium
+    #
+    # This matches `_run_ul_projection` exactly even when the
+    # guaranteed rate is zero.
+    one_plus_rate = 1.0 + guaranteed_rate
+    if one_plus_rate == 0.0:
+        # Degenerate case; fall back to a simpler reconstruction that
+        # mirrors the zero-rate branch of the loop.
+        base = end_policy_value + coi_charge + policy_fee_annual
+    else:
+        base = (end_policy_value + coi_charge + policy_fee_annual) / one_plus_rate
+
+    opening_policy_value = base - annual_premium
+    if opening_policy_value < 0.0:
+        # Guard against tiny negative noise from floating point
+        # inversion; the engine itself floors at zero.
+        opening_policy_value = 0.0
+
+    # Helper to map high-level assumption provenance into a lookup by
+    # (case-insensitive) name substring.
+    provenance_index: Dict[str, Dict[str, Any]] = {}
+    for entry in config.assumption_provenance or []:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            continue
+        provenance_index[name.lower()] = entry
+
+    def _prov_lookup(substr: str) -> Optional[Dict[str, Any]]:
+        key = (substr or "").lower()
+        for name_low, entry in provenance_index.items():
+            if key in name_low:
+                return entry
+        return None
+
+    def _explained_value(
+        *, label: str, value: Any, unit: Optional[str] = None, source: Optional[str] = None, source_detail: Optional[str] = None
+    ) -> Dict[str, Any]:
+        out: Dict[str, Any] = {"label": label, "value": value}
+        if unit is not None:
+            out["unit"] = unit
+        if source is not None:
+            out["source"] = source
+        if source_detail is not None:
+            out["sourceDetail"] = source_detail
+        return out
+
+    # Resolve provenance labels for key assumptions when available.
+    prov_guaranteed = _prov_lookup("guaranteed") or {}
+    prov_coi_rate = _prov_lookup("coi rate") or _prov_lookup("coi") or {}
+    prov_policy_fee = _prov_lookup("policy fee") or {}
+    prov_surrender = _prov_lookup("surrender schedule") or _prov_lookup("surrender") or {}
+
+    def _prov_source(entry: Dict[str, Any], default: str = "Placeholder") -> str:
+        src = entry.get("source")
+        return str(src) if src is not None else default
+
+    steps: List[Dict[str, Any]] = []
+
+    # 1. Opening policy value
+    steps.append(
+        {
+            "id": "opening_policy_value",
+            "order": 1,
+            "title": "Opening policy value",
+            "formulaText": "Opening policy value is the prior year closing policy value, or zero at issue.",
+            "inputs": [
+                _explained_value(
+                    label="Reconstructed from projection row",
+                    value={
+                        "endPolicyValue": end_policy_value,
+                        "annualPremium": annual_premium,
+                        "guaranteedRate": guaranteed_rate,
+                        "coiCharge": coi_charge,
+                        "policyFeeAnnual": policy_fee_annual,
+                    },
+                    source="Projection row",
+                ),
+            ],
+            "result": _explained_value(
+                label="Opening policy value",
+                value=opening_policy_value,
+                unit="USD",
+                source="Projection row",
+            ),
+        }
+    )
+
+    # 2. Premium added
+    steps.append(
+        {
+            "id": "premium_added",
+            "order": 2,
+            "title": "Premium added",
+            "formulaText": "Level premium for the year, based on the annualised modal premium used in the projection.",
+            "inputs": [
+                _explained_value(label="Annual premium", value=annual_premium, unit="USD", source="Projection row"),
+                _explained_value(label="Premium mode", value=premium_mode, source="Projection row"),
+            ],
+            "result": _explained_value(
+                label="Premium added",
+                value=annual_premium,
+                unit="USD",
+                source="Projection row",
+            ),
+        }
+    )
+
+    # 3. COI charge deducted
+    steps.append(
+        {
+            "id": "coi_charge_deducted",
+            "order": 3,
+            "title": "COI charge deducted",
+            "formulaText": "COI charge is a flat fraction of face amount for this draft Promise UL projection.",
+            "inputs": [
+                _explained_value(
+                    label="Face amount",
+                    value=face_amount,
+                    unit="USD",
+                    source="Projection row",
+                ),
+                _explained_value(
+                    label="COI rate (flat)",
+                    value=coi_rate,
+                    unit="rate",
+                    source=_prov_source(prov_coi_rate),
+                    source_detail=prov_coi_rate.get("name") or None,
+                ),
+            ],
+            "result": _explained_value(
+                label="COI charge deducted",
+                value=coi_charge,
+                unit="USD",
+                source="Projection row",
+            ),
+        }
+    )
+
+    # 4. Policy/admin fee deducted
+    steps.append(
+        {
+            "id": "policy_admin_fee_deducted",
+            "order": 4,
+            "title": "Policy/admin fee deducted",
+            "formulaText": "Annual policy/admin fee applied after COI for this draft UL projection.",
+            "inputs": [
+                _explained_value(
+                    label="Policy fee (annual)",
+                    value=policy_fee_annual,
+                    unit="USD",
+                    source=_prov_source(prov_policy_fee),
+                    source_detail=prov_policy_fee.get("name") or None,
+                ),
+            ],
+            "result": _explained_value(
+                label="Policy/admin fee deducted",
+                value=policy_fee_annual,
+                unit="USD",
+                source="Projection row",
+            ),
+        }
+    )
+
+    # 5. Interest credited
+    steps.append(
+        {
+            "id": "interest_credited",
+            "order": 5,
+            "title": "Interest credited",
+            "formulaText": "Interest is credited at the guaranteed rate on beginning policy value plus current-year premium.",
+            "inputs": [
+                _explained_value(
+                    label="Guaranteed credited rate",
+                    value=guaranteed_rate,
+                    unit="rate",
+                    source=_prov_source(prov_guaranteed, default="Fallback"),
+                    source_detail=prov_guaranteed.get("name") or None,
+                ),
+                _explained_value(label="Opening policy value", value=opening_policy_value, unit="USD", source="Projection row"),
+                _explained_value(label="Annual premium", value=annual_premium, unit="USD", source="Projection row"),
+            ],
+            "result": _explained_value(
+                label="Interest credited",
+                value=guaranteed_interest,
+                unit="USD",
+                source="Projection row",
+            ),
+        }
+    )
+
+    # 6. Closing policy value
+    steps.append(
+        {
+            "id": "closing_policy_value",
+            "order": 6,
+            "title": "Closing policy value",
+            "formulaText": "Closing policy value = Opening value + premium added − COI charges − policy/admin fees + interest credited.",
+            "inputs": [
+                _explained_value(label="Opening policy value", value=opening_policy_value, unit="USD", source="Projection row"),
+                _explained_value(label="Premium added", value=annual_premium, unit="USD", source="Projection row"),
+                _explained_value(label="COI charge", value=coi_charge, unit="USD", source="Projection row"),
+                _explained_value(label="Policy/admin fee", value=policy_fee_annual, unit="USD", source="Projection row"),
+                _explained_value(label="Interest credited", value=guaranteed_interest, unit="USD", source="Projection row"),
+            ],
+            "result": _explained_value(
+                label="Closing policy value",
+                value=end_policy_value,
+                unit="USD",
+                source="Projection row",
+            ),
+        }
+    )
+
+    # 7. Surrender charge
+    steps.append(
+        {
+            "id": "surrender_charge",
+            "order": 7,
+            "title": "Surrender charge",
+            "formulaText": "Draft surrender charge based on a declining percentage of face amount over the surrender period.",
+            "inputs": [
+                _explained_value(label="Face amount", value=face_amount, unit="USD", source="Projection row"),
+                _explained_value(
+                    label="Surrender schedule",
+                    value=prov_surrender.get("value"),
+                    source=_prov_source(prov_surrender),
+                    source_detail=prov_surrender.get("name") or None,
+                ),
+            ],
+            "result": _explained_value(
+                label="Surrender charge",
+                value=surrender_charge,
+                unit="USD",
+                source="Projection row",
+            ),
+        }
+    )
+
+    # 8. Surrender value
+    steps.append(
+        {
+            "id": "surrender_value",
+            "order": 8,
+            "title": "Surrender value",
+            "formulaText": "Surrender value = Closing policy value − surrender charge (floored at zero).",
+            "inputs": [
+                _explained_value(label="Closing policy value", value=end_policy_value, unit="USD", source="Projection row"),
+                _explained_value(label="Surrender charge", value=surrender_charge, unit="USD", source="Projection row"),
+            ],
+            "result": _explained_value(
+                label="Surrender value",
+                value=surrender_value,
+                unit="USD",
+                source="Projection row",
+            ),
+        }
+    )
+
+    # 9. Death benefit
+    steps.append(
+        {
+            "id": "death_benefit",
+            "order": 9,
+            "title": "Death benefit",
+            "formulaText": "Draft UL death benefit is level and equal to face amount for this projection.",
+            "inputs": [
+                _explained_value(label="Face amount", value=face_amount, unit="USD", source="Projection row"),
+            ],
+            "result": _explained_value(
+                label="Death benefit",
+                value=death_benefit,
+                unit="USD",
+                source="Projection row",
+            ),
+        }
+    )
+
+    # 10. Net amount at risk
+    steps.append(
+        {
+            "id": "net_amount_at_risk",
+            "order": 10,
+            "title": "Net amount at risk",
+            "formulaText": "Net amount at risk = Death benefit − policy value used as account value in the projection.",
+            "inputs": [
+                _explained_value(label="Death benefit", value=death_benefit, unit="USD", source="Projection row"),
+                _explained_value(label="Policy value", value=end_policy_value, unit="USD", source="Projection row"),
+            ],
+            "result": _explained_value(
+                label="Net amount at risk",
+                value=net_amount_at_risk,
+                unit="USD",
+                source="Projection row",
+            ),
+        }
+    )
+
+    return {
+        "productCode": code_norm,
+        "year": year,
+        "title": f"Order of operations for Year {year}",
+        "steps": steps,
+    }
+
+
 def _extract_guaranteed_rate_from_text(text: str) -> Optional[float]:
     """Best-effort extraction of a guaranteed credited interest rate.
 
@@ -6294,6 +6664,25 @@ def build_ul_illustration_for_product(product_code: str, request: Dict[str, Any]
     horizon_years = 30
     projection, normalised_request = _run_ul_projection(request=request, config=cfg, horizon_years=horizon_years)
 
+    # v0.1 Mechanics Validation Surface (UL): build a lightweight
+    # mechanics trace for Year 1 using the existing projection results.
+    # This is intentionally read-only and must not affect projection
+    # math; it simply exposes the effective order of operations for a
+    # single row.
+    mechanics_explanation: Optional[Dict[str, Any]] = None
+    try:
+        mechanics_explanation = build_ul_projection_explanation(
+            product_code=code_norm,
+            request=normalised_request,
+            config=cfg,
+            projection=projection,
+            year=1,
+        )
+    except Exception:
+        # Explanation is best-effort only; failures must not block the
+        # core projection path.
+        mechanics_explanation = None
+
     warnings = [
         "COI rates are placeholder (flat 40 bps of face amount) because the actual COI rate table is not yet uploaded.",
         "Surrender charges use a simple declining schedule over 19 years because the full schedule is not yet uploaded.",
@@ -6316,6 +6705,7 @@ def build_ul_illustration_for_product(product_code: str, request: Dict[str, Any]
         "request": normalised_request,
         "templateScenarioId": None,
         "projection": projection,
+        "mechanicsExplanation": mechanics_explanation,
         "projectionAssumptions": cfg.assumption_provenance or [],
         "warnings": warnings,
         "notes": notes,
@@ -6334,6 +6724,77 @@ def build_promise_ul_illustration(product_code: str, request: Dict[str, Any]) ->
 # build_ul_illustration_for_product based on product type.
 _ILLUSTRATION_PROVIDERS["ICC18 P18PR UL"] = build_ul_illustration_for_product
 _ILLUSTRATION_PROVIDERS["ICC18P18PRUL"] = build_ul_illustration_for_product
+
+
+class UlExplainRequest(BaseModel):  # type: ignore[misc]
+    """UL-specific mechanics explanation request.
+
+    This intentionally mirrors the normalised UL illustration request
+    shape and adds a `year` selector. It is limited to UL-style
+    projections and does not change projection behaviour.
+    """
+
+    age: int
+    faceAmount: float
+    premiumMode: str
+    modalPremium: Optional[float] = None
+    year: int
+
+
+@app.post("/api/illustrations/{product_code}/explain")
+def api_product_illustration_explain(product_code: str, payload: UlExplainRequest) -> Dict[str, Any]:
+    """Return a mechanics explanation for a single UL projection year.
+
+    This endpoint is UL-only and is a thin wrapper around the existing
+    `_run_ul_projection` helper and `build_ul_projection_explanation`.
+    It recomputes the same draft UL projection for the supplied
+    request and returns the mechanics trace for the requested year.
+    Projection math and values remain unchanged.
+    """
+
+    cfg = _get_product_config(product_code)
+    code_norm = (cfg.get("productCode") or product_code or "").strip().upper() if cfg else (product_code or "").strip().upper()
+
+    # Only UL-type products (including Promise UL aliases) are
+    # supported for this mechanics surface.
+    provider = _get_illustration_provider(code_norm)
+    if provider is not build_ul_illustration_for_product:
+        product_type = _get_product_type(code_norm)
+        if not _is_ul_product_type(product_type):
+            raise HTTPException(
+                status_code=501,
+                detail=(
+                    "Mechanics explanation is currently only implemented for UL-style draft projections. "
+                    f"Product type '{(product_type or 'unknown')}' is not supported."
+                ),
+            )
+
+    # Reconstruct the simple UL request used by `_run_ul_projection`.
+    req: Dict[str, Any] = {
+        "age": payload.age,
+        "faceAmount": payload.faceAmount,
+        "premiumMode": payload.premiumMode,
+    }
+    if payload.modalPremium is not None:
+        req["modalPremium"] = payload.modalPremium
+
+    cfg_runtime = load_ul_runtime_config(code_norm)
+    horizon_years = 30
+    projection, normalised_request = _run_ul_projection(
+        request=req,
+        config=cfg_runtime,
+        horizon_years=horizon_years,
+    )
+
+    explanation = build_ul_projection_explanation(
+        product_code=code_norm,
+        request=normalised_request,
+        config=cfg_runtime,
+        projection=projection,
+        year=payload.year,
+    )
+
+    return explanation
 
 
 @app.post("/api/product-model-review/p12trf/evidence/seed")

@@ -76,6 +76,8 @@ export const AIReviewAgentPage: React.FC = () => {
   const [pmrFeedback, setPmrFeedback] = useState<string>("");
   const [illustrationResult, setIllustrationResult] = useState<any | null>(null);
   const [selectedScenarioIndex, setSelectedScenarioIndex] = useState<number>(0);
+  const [showUlMechanics, setShowUlMechanics] = useState<boolean>(false);
+  const [selectedExplanationYear, setSelectedExplanationYear] = useState<number>(1);
 
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
@@ -653,6 +655,8 @@ export const AIReviewAgentPage: React.FC = () => {
       }
       const data = await res.json();
       setIllustrationResult(data || null);
+      setShowUlMechanics(false);
+      setSelectedExplanationYear(1);
     } catch (e: any) {
       setError(e?.message || "Failed to generate illustration.");
     } finally {
@@ -704,6 +708,43 @@ export const AIReviewAgentPage: React.FC = () => {
   };
 
   const [registrationMessage, setRegistrationMessage] = React.useState<string | null>(null);
+
+  const loadUlMechanicsExplanation = async (year: number) => {
+    if (!illustrationResult) return;
+    const code = normalisedCode.trim();
+    if (!code) return;
+
+    const req = (illustrationResult.request ?? {}) as any;
+    const age = req.age;
+    const faceAmount = req.faceAmount;
+    const premiumMode = req.premiumMode;
+
+    if (age == null || faceAmount == null || !premiumMode) {
+      return;
+    }
+
+    try {
+      const res = await fetch(`/api/illustrations/${encodeURIComponent(code)}/explain`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          age,
+          faceAmount,
+          premiumMode,
+          year,
+        }),
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      setIllustrationResult((prev: any) => (prev ? { ...prev, mechanicsExplanation: data } : prev));
+      setShowUlMechanics(true);
+    } catch (e: any) {
+      setError(e?.message || "Failed to load mechanics explanation.");
+    }
+  };
 
   const handleRegisterProduct = async () => {
     const code = normalisedCode.trim();
@@ -1971,6 +2012,47 @@ export const AIReviewAgentPage: React.FC = () => {
                 </tbody>
               </table>
             )}
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                marginTop: "0.5rem",
+                gap: "0.5rem",
+                flexWrap: "wrap",
+              }}
+            >
+              <h4 style={{ margin: 0 }}>Projection table</h4>
+              {illustrationResult.projection?.rows && illustrationResult.projection.rows.length > 0 && (
+                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: "0.25rem" }}>
+                    <span>Explain mechanics for year</span>
+                    <select
+                      value={selectedExplanationYear}
+                      onChange={(e) => {
+                        const y = Number(e.target.value) || 1;
+                        setSelectedExplanationYear(y);
+                        void loadUlMechanicsExplanation(y);
+                      }}
+                    >
+                      {illustrationResult.projection.rows.map((r: any) => (
+                        <option key={r.year} value={r.year}>
+                          {r.year}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  {illustrationResult.mechanicsExplanation && (
+                    <button
+                      type="button"
+                      onClick={() => setShowUlMechanics((prev) => !prev)}
+                    >
+                      {showUlMechanics ? "Hide mechanics" : "Show mechanics"}
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
             <table className="kv-table">
               <thead>
                 <tr>
@@ -2012,6 +2094,92 @@ export const AIReviewAgentPage: React.FC = () => {
                   ))}
               </tbody>
             </table>
+            {showUlMechanics && illustrationResult.mechanicsExplanation && (
+              <section className="card" style={{ marginTop: "0.75rem" }}>
+                <h4>{illustrationResult.mechanicsExplanation.title ?? "Order of operations"}</h4>
+                <ol>
+                  {Array.isArray(illustrationResult.mechanicsExplanation.steps) &&
+                    illustrationResult.mechanicsExplanation.steps.map((step: any) => (
+                      <li key={step.id ?? step.order} style={{ marginBottom: "0.75rem" }}>
+                        <strong>
+                          {typeof step.order === "number" ? `${step.order}. ` : ""}
+                          {step.title ?? "Step"}
+                        </strong>
+                        {step.formulaText && (
+                          <p className="muted" style={{ marginTop: "0.25rem" }}>
+                            {step.formulaText}
+                          </p>
+                        )}
+                        <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap" }}>
+                          <div style={{ flex: "1 1 260px" }}>
+                            <h5 style={{ margin: "0.25rem 0" }}>Inputs</h5>
+                            {Array.isArray(step.inputs) && step.inputs.length > 0 ? (
+                              <table className="kv-table">
+                                <thead>
+                                  <tr>
+                                    <th>Input</th>
+                                    <th>Value</th>
+                                    <th>Source</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {step.inputs.map((inp: any, idx: number) => (
+                                    // eslint-disable-next-line react/no-array-index-key
+                                    <tr key={idx}>
+                                      <td>{inp.label ?? ""}</td>
+                                      <td>
+                                        {typeof inp.value === "number"
+                                          ? formatCurrency(inp.value)
+                                          : typeof inp.value === "object" && inp.value !== null
+                                          ? JSON.stringify(inp.value)
+                                          : String(inp.value ?? "")}
+                                      </td>
+                                      <td>{inp.source ?? ""}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            ) : (
+                              <p className="muted">No explicit inputs recorded for this step.</p>
+                            )}
+                          </div>
+                          <div style={{ flex: "1 1 220px" }}>
+                            <h5 style={{ margin: "0.25rem 0" }}>Result</h5>
+                            {step.result ? (
+                              <table className="kv-table">
+                                <tbody>
+                                  <tr>
+                                    <th>Metric</th>
+                                    <td>{step.result.label ?? ""}</td>
+                                  </tr>
+                                  <tr>
+                                    <th>Value</th>
+                                    <td>
+                                      {typeof step.result.value === "number"
+                                        ? formatCurrency(step.result.value)
+                                        : typeof step.result.value === "object" && step.result.value !== null
+                                        ? JSON.stringify(step.result.value)
+                                        : String(step.result.value ?? "")}
+                                    </td>
+                                  </tr>
+                                  {step.result.source && (
+                                    <tr>
+                                      <th>Source</th>
+                                      <td>{step.result.source}</td>
+                                    </tr>
+                                  )}
+                                </tbody>
+                              </table>
+                            ) : (
+                              <p className="muted">No result recorded for this step.</p>
+                            )}
+                          </div>
+                        </div>
+                      </li>
+                    ))}
+                </ol>
+              </section>
+            )}
           </>
         )}
       </section>
