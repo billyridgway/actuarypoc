@@ -1,15 +1,22 @@
 import React from "react";
 import { AIReviewAgentPage } from "./AIReviewAgentPage";
+import { ProductWorkspacePage } from "./ProductWorkspacePage";
 
 export const App: React.FC = () => {
+  const searchParams = new URLSearchParams(window.location.search || "");
+  const view = (searchParams.get("view") || "").toLowerCase();
+  const isExpert = view === "expert";
+
   return (
     <div className="app-shell">
       <header className="top-nav">
         <div className="top-nav__brand">ActuaryPOC – AI Agent</div>
-        <div className="top-nav__subtitle">Expert / Debug pipeline view</div>
+        <div className="top-nav__subtitle">
+          {isExpert ? "Expert / Debug pipeline view" : "Product Understanding Workspace"}
+        </div>
       </header>
       <main className="app-shell__main">
-        <AIReviewAgentPage />
+        {isExpert ? <AIReviewAgentPage /> : <ProductWorkspacePage />}
       </main>
     </div>
   );
