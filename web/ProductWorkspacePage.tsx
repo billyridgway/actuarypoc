@@ -53,6 +53,25 @@ interface WorkspacePayload {
   assumptions?: {
     provenance?: WorkspaceAssumption[];
   };
+  evidence?: {
+    items?: Array<{
+      id: string;
+      label: string;
+      category?: string;
+      status?: string;
+      value?: any;
+      confidence?: number;
+      impact?: string;
+      notes?: string;
+      sources?: Array<{
+        document?: string | null;
+        page?: string | null;
+        snippet?: string | null;
+        confidence?: number;
+        origin?: string;
+      }>;
+    }>;
+  };
   gaps?: {
     items?: Array<{
       id: string;
@@ -164,6 +183,7 @@ export const ProductWorkspacePage: React.FC<{ productCode: string }> = ({ produc
   const product = data?.product;
   const mechanicsSummary = data?.mechanics?.summary;
   const assumptions = data?.assumptions?.provenance ?? [];
+  const evidenceItems = data?.evidence?.items ?? [];
   const gaps = data?.gaps;
   const illustration = data?.illustration;
   const mechanicsExplanation = data?.mechanicsExplanation;
@@ -383,6 +403,72 @@ export const ProductWorkspacePage: React.FC<{ productCode: string }> = ({ produc
           </table>
         ) : (
           <p className="muted">{loading ? "Loading product summary…" : "No Product Review metadata found yet."}</p>
+        )}
+      </section>
+
+      <section className="card home-card">
+        <h2>Product Understanding Evidence</h2>
+        <p className="muted">
+          Traceability from filings and assumptions to the mechanics used in this workspace. This helps explain why the
+          system believes the product behaves the way it does.
+        </p>
+        {evidenceItems.length > 0 ? (
+          <table className="kv-table">
+            <thead>
+              <tr>
+                <th>Item</th>
+                <th>Status</th>
+                <th>Value</th>
+                <th>Confidence</th>
+                <th>Impact</th>
+                <th>Source</th>
+              </tr>
+            </thead>
+            <tbody>
+              {evidenceItems.map((ev) => {
+                const statusLabel = (ev.status || "unknown").toLowerCase();
+                const conf = typeof ev.confidence === "number" ? `${(ev.confidence * 100).toFixed(0)}%` : "";
+                const impact = ev.impact || "unknown";
+                const src = (ev.sources && ev.sources[0]) || null;
+                return (
+                  <tr key={ev.id}>
+                    <td>
+                      <div>{ev.label}</div>
+                      {ev.notes && <div className="muted">{ev.notes}</div>}
+                    </td>
+                    <td>{statusLabel}</td>
+                    <td>
+                      {typeof ev.value === "number"
+                        ? ev.label.toLowerCase().includes("rate")
+                          ? `${(ev.value * 100).toFixed(2)}%`
+                          : formatCurrency(ev.value)
+                        : String(ev.value ?? "")}
+                    </td>
+                    <td>{conf}</td>
+                    <td>{impact}</td>
+                    <td>
+                      {src ? (
+                        <div className="muted">
+                          {src.document && <div>{src.document}</div>}
+                          {src.page && <div>p. {src.page}</div>}
+                          {src.snippet && <div>{src.snippet}</div>}
+                          {src.origin && <div>origin: {src.origin}</div>}
+                        </div>
+                      ) : (
+                        <span className="muted">(no direct filing source)</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        ) : (
+          <p className="muted">
+            {loading
+              ? "Loading evidence…"
+              : "No structured evidence snapshot is available yet for this product. Use Expert / Debug mode or the Trust Surface for more detail."}
+          </p>
         )}
       </section>
 

@@ -4290,6 +4290,305 @@ def build_product_workspace_snapshot(product_code: str) -> Dict[str, Any]:
                 }
             )
 
+    # --- Evidence layer: mechanics and assumptions traceability ---------------
+    evidence_items: List[Dict[str, Any]] = []
+
+    # Helper: gap ids and impact mapping for Promise‑UL v1.
+    gap_ids = {str(g.get("id")) for g in gap_items if isinstance(g, dict)}
+
+    def _impact_for_id(eid: str) -> str:
+        if eid in {"guaranteed_credited_rate"}:
+            return "high"
+        if eid in {"coi_rates", "surrender_schedule", "policy_admin_fee"}:
+            return "high" if eid == "coi_rates" else "medium"
+        if eid in {"death_benefit_option", "cash_surrender_value"}:
+            return "medium"
+        return "low"
+
+    def _confidence_from_sources(sources: List[Dict[str, Any]]) -> float:
+        vals: List[float] = []
+        for s in sources:
+            try:
+                vals.append(float(s.get("confidence") or 0.0))
+            except Exception:
+                continue
+        if not vals:
+            return 0.0
+        return max(min(v, 1.0) for v in vals)
+
+    def _sources_from_mechanic(m: Optional[Dict[str, Any]], origin: str) -> List[Dict[str, Any]]:
+        if not isinstance(m, dict):
+            return []
+        out: List[Dict[str, Any]] = []
+        for fs in m.get("filing_sources") or []:
+            if not isinstance(fs, dict):
+                continue
+            out.append(
+                {
+                    "document": fs.get("document_hint") or fs.get("document_path") or fs.get("document") or None,
+                    "page": fs.get("page") or fs.get("page_reference") or None,
+                    "snippet": fs.get("snippet") or fs.get("sourceSnippet") or None,
+                    "confidence": fs.get("confidence") or 0.0,
+                    "origin": origin,
+                }
+            )
+        return out
+
+    # Index mechanics by id/name for Promise UL.
+    mechanics_by_id: Dict[str, Dict[str, Any]] = {}
+    mechanics_by_name: Dict[str, Dict[str, Any]] = {}
+    for m in mechanics_payload:
+        if not isinstance(m, dict):
+            continue
+        mid = str(m.get("id") or "").strip()
+        name = str(m.get("name") or "").strip()
+        if mid:
+            mechanics_by_id[mid] = m
+        if name:
+            mechanics_by_name[name.lower()] = m
+
+    def _find_mechanic_by_name(substr: str) -> Optional[Dict[str, Any]]:
+        key = (substr or "").lower()
+        for name, m in mechanics_by_name.items():
+            if key in name:
+                return m
+        return None
+
+    # Evidence: Guaranteed credited rate.
+    prov_guaranteed = None
+    for ap in assumptions_payload:
+        if not isinstance(ap, dict):
+            continue
+        name = str(ap.get("name") or "").lower()
+        if "guaranteed" in name and "rate" in name:
+            prov_guaranteed = ap
+            break
+    if prov_guaranteed is not None:
+        val = prov_guaranteed.get("value")
+        src = str(prov_guaranteed.get("source") or "").strip()
+        if src == "Assumption Discovery":
+            status = "extracted"
+            origin = "assumption_discovery"
+        elif src == "AssumptionSet DSL":
+            status = "inferred"
+            origin = "dsl"
+        elif src == "Placeholder":
+            status = "placeholder"
+            origin = "placeholder"
+        else:
+            status = "inferred"
+            origin = "dsl"
+
+        mech_min_rate = _find_mechanic_by_name("minimum interest") or _find_mechanic_by_name("minimum annual interest")
+        sources = _sources_from_mechanic(mech_min_rate, "mechanic")
+        if not sources and status in {"extracted", "inferred"}:
+            # When we know it came from discovery/DSL but have no
+            # mechanic-specific filing_sources, expose a generic
+            # placeholder origin.
+            sources = [
+                {
+                    "document": None,
+                    "page": None,
+                    "snippet": None,
+                    "confidence": 0.0,
+                    "origin": origin,
+                }
+            ]
+
+        evidence_items.append(
+            {
+                "id": "guaranteed_credited_rate",
+                "label": "Guaranteed credited rate",
+                "category": "assumption",
+                "status": status,
+                "value": val,
+                "sources": sources,
+                "confidence": _confidence_from_sources(sources) or (1.0 if status in {"extracted", "inferred"} else 0.2),
+                "impact": _impact_for_id("guaranteed_credited_rate"),
+                "notes": "Determines the minimum credited interest applied to policy values; directly affects account value growth.",
+            }
+        )
+
+    # Evidence: COI rates.
+    prov_coi = None
+    for ap in assumptions_payload:
+        if not isinstance(ap, dict):
+            continue
+        name = str(ap.get("name") or "").lower()
+        if "coi" in name:
+            prov_coi = ap
+            break
+    coi_status = "missing"
+    coi_val = None
+    coi_origin = "placeholder"
+    if prov_coi is not None:
+        coi_val = prov_coi.get("value")
+        src = str(prov_coi.get("source") or "").strip()
+        if src == "Placeholder":
+            coi_status = "placeholder"
+            coi_origin = "placeholder"
+        elif src == "Assumption Discovery":
+            coi_status = "extracted"
+            coi_origin = "assumption_discovery"
+        elif src == "AssumptionSet DSL":
+            coi_status = "inferred"
+            coi_origin = "dsl"
+        else:
+            coi_status = "inferred"
+            coi_origin = "dsl"
+
+    # Mechanics evidence for COI structure, even when rates are placeholder.
+    mech_coi = _find_mechanic_by_name("cost of insurance")
+    coi_sources = _sources_from_mechanic(mech_coi, "mechanic")
+    if "missing_coi_table" in gap_ids and coi_status == "missing":
+        coi_status = "missing"
+    elif "missing_coi_table" in gap_ids and coi_status != "extracted":
+        coi_status = "placeholder"
+
+    evidence_items.append(
+        {
+            "id": "coi_rates",
+            "label": "COI rates",
+            "category": "assumption",
+            "status": coi_status,
+            "value": coi_val,
+            "sources": coi_sources,
+            "confidence": _confidence_from_sources(coi_sources) if coi_sources else 0.2,
+            "impact": _impact_for_id("coi_rates"),
+            "notes": "Controls the cost of insurance charges deducted from the policy; placeholder rates mean projected values may not reflect filed CSO-based tables.",
+        }
+    )
+
+    # Evidence: Surrender schedule.
+    prov_surr = None
+    for ap in assumptions_payload:
+        if not isinstance(ap, dict):
+            continue
+        name = str(ap.get("name") or "").lower()
+        if "surrender" in name:
+            prov_surr = ap
+            break
+    surr_status = "missing"
+    surr_val = None
+    surr_origin = "placeholder"
+    if prov_surr is not None:
+        surr_val = prov_surr.get("value")
+        src = str(prov_surr.get("source") or "").strip()
+        if src == "Placeholder":
+            surr_status = "placeholder"
+            surr_origin = "placeholder"
+        elif src == "Assumption Discovery":
+            surr_status = "extracted"
+            surr_origin = "assumption_discovery"
+        elif src == "AssumptionSet DSL":
+            surr_status = "inferred"
+            surr_origin = "dsl"
+        else:
+            surr_status = "inferred"
+            surr_origin = "dsl"
+
+    mech_surr = _find_mechanic_by_name("surrender charge")
+    surr_sources = _sources_from_mechanic(mech_surr, "mechanic")
+    if "surrender_schedule_placeholder" in gap_ids and surr_status != "extracted":
+        surr_status = "placeholder"
+
+    evidence_items.append(
+        {
+            "id": "surrender_schedule",
+            "label": "Surrender schedule",
+            "category": "assumption",
+            "status": surr_status,
+            "value": surr_val,
+            "sources": surr_sources,
+            "confidence": _confidence_from_sources(surr_sources) if surr_sources else 0.2,
+            "impact": _impact_for_id("surrender_schedule"),
+            "notes": "Determines surrender charges and cash surrender values; placeholder schedule means early duration cash values may diverge from filed illustrations.",
+        }
+    )
+
+    # Evidence: Policy / admin fee.
+    prov_fee = None
+    for ap in assumptions_payload:
+        if not isinstance(ap, dict):
+            continue
+        name = str(ap.get("name") or "").lower()
+        if "policy fee" in name or "admin fee" in name:
+            prov_fee = ap
+            break
+    fee_status = "missing"
+    fee_val = None
+    if prov_fee is not None:
+        fee_val = prov_fee.get("value")
+        src = str(prov_fee.get("source") or "").strip()
+        if src == "Placeholder":
+            fee_status = "placeholder"
+        elif src == "Assumption Discovery":
+            fee_status = "extracted"
+        elif src == "AssumptionSet DSL":
+            fee_status = "inferred"
+        else:
+            fee_status = "inferred"
+    if "policy_admin_fee_missing" in gap_ids and fee_status != "extracted":
+        fee_status = "missing" if not fee_val else "placeholder"
+
+    evidence_items.append(
+        {
+            "id": "policy_admin_fee",
+            "label": "Policy / admin fee",
+            "category": "assumption",
+            "status": fee_status,
+            "value": fee_val,
+            "sources": [],
+            "confidence": 0.0 if fee_status in {"missing", "placeholder"} else 0.5,
+            "impact": _impact_for_id("policy_admin_fee"),
+            "notes": "Per-policy fees and admin charges reduce account value; current projection assumes no fees when this remains missing or placeholder.",
+        }
+    )
+
+    # Evidence: Death benefit option.
+    mech_db = _find_mechanic_by_name("death benefit")
+    db_sources = _sources_from_mechanic(mech_db, "mechanic")
+    db_status = "extracted" if db_sources else "inferred"
+    db_val = None
+    if isinstance(mech_db, dict):
+        db_val = mech_db.get("description") or mech_db.get("name")
+
+    evidence_items.append(
+        {
+            "id": "death_benefit_option",
+            "label": "Death benefit option",
+            "category": "mechanic",
+            "status": db_status,
+            "value": db_val,
+            "sources": db_sources,
+            "confidence": _confidence_from_sources(db_sources) if db_sources else 0.5,
+            "impact": _impact_for_id("death_benefit_option"),
+            "notes": "Defines how the death benefit behaves (e.g. level vs. increasing) and ties directly to the face amount paid on death.",
+        }
+    )
+
+    # Evidence: Cash surrender value definition.
+    mech_csv = _find_mechanic_by_name("cash surrender value")
+    csv_sources = _sources_from_mechanic(mech_csv, "mechanic")
+    csv_status = "extracted" if csv_sources else "inferred"
+    csv_val = None
+    if isinstance(mech_csv, dict):
+        csv_val = mech_csv.get("description") or mech_csv.get("name")
+
+    evidence_items.append(
+        {
+            "id": "cash_surrender_value",
+            "label": "Cash surrender value",
+            "category": "mechanic",
+            "status": csv_status,
+            "value": csv_val,
+            "sources": csv_sources,
+            "confidence": _confidence_from_sources(csv_sources) if csv_sources else 0.5,
+            "impact": _impact_for_id("cash_surrender_value"),
+            "notes": "Defines how cash surrender value is determined from policy value and surrender charges; underpins surrender projections.",
+        }
+    )
+
     # --- PMR / readiness summary (when available) ------------------------------
     readiness_status = "no_review"
     readiness_messages: List[str] = []
@@ -4330,6 +4629,9 @@ def build_product_workspace_snapshot(product_code: str) -> Dict[str, Any]:
         },
         "assumptions": {
             "provenance": assumptions_payload,
+        },
+        "evidence": {
+            "items": evidence_items,
         },
         "gaps": {
             # Normalised gap items for structured workspace UIs. For
