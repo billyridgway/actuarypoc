@@ -54,6 +54,15 @@ interface WorkspacePayload {
     provenance?: WorkspaceAssumption[];
   };
   gaps?: {
+    items?: Array<{
+      id: string;
+      title: string;
+      severity?: string;
+      status?: string;
+      whyItMatters?: string;
+      suggestedUploads?: string[];
+      source?: string;
+    }>;
     warnings?: string[];
     notes?: string[];
   };
@@ -95,6 +104,8 @@ export const ProductWorkspacePage: React.FC = () => {
   const [data, setData] = React.useState<WorkspacePayload | null>(null);
   const [loading, setLoading] = React.useState<boolean>(true);
   const [error, setError] = React.useState<string | null>(null);
+  const [uploadingId, setUploadingId] = React.useState<string | null>(null);
+  const [uploadMessage, setUploadMessage] = React.useState<string | null>(null);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -303,28 +314,114 @@ export const ProductWorkspacePage: React.FC = () => {
 
       <section className="card home-card">
         <h2>Missing information / gaps</h2>
-        {gaps && (gaps.warnings?.length || gaps.notes?.length) ? (
+        <p className="muted">
+          Uploading additional support documents improves evidence for mechanics and assumptions, but does not
+          automatically make this draft projection filed-rate compliant. Use Expert / Debug mode to rerun and review
+          the full pipeline.
+        </p>
+        {uploadMessage && <p className="muted">{uploadMessage}</p>}
+        {gaps && gaps.items && gaps.items.length > 0 ? (
           <>
-            {gaps.warnings && gaps.warnings.length > 0 && (
-              <>
-                <h3>Warnings</h3>
-                <ul className="muted">
-                  {gaps.warnings.map((w, idx) => (
-                    <li key={idx}>{w}</li>
-                  ))}
-                </ul>
-              </>
-            )}
-            {gaps.notes && gaps.notes.length > 0 && (
-              <>
-                <h3>Notes</h3>
-                <ul className="muted">
-                  {gaps.notes.map((n, idx) => (
-                    <li key={idx}>{n}</li>
-                  ))}
-                </ul>
-              </>
-            )}
+            {gaps.items.map((item) => {
+              const isUploading = uploadingId === item.id;
+              const gapProductCode = product?.code || "ICC18 P18PR UL";
+
+              const handleFileChange: React.ChangeEventHandler<HTMLInputElement> = async (event) => {
+                const file = event.target.files && event.target.files[0];
+                if (!file) return;
+                setUploadingId(item.id);
+                setUploadMessage(null);
+                try {
+                  const form = new FormData();
+                  form.append("file", file);
+                  const resp = await fetch(
+                    `/api/product-assumptions/${encodeURIComponent(gapProductCode)}/support`,
+                    {
+                      method: "POST",
+                      body: form,
+                    },
+                  );
+                  if (!resp.ok) {
+                    const text = await resp.text();
+                    throw new Error(text || `Upload failed with status ${resp.status}`);
+                  }
+                  setUploadMessage(
+                    `Uploaded '${file.name}' as additional assumption support for ${gapProductCode}. Rerun understanding via Expert / Debug mode to incorporate new evidence.`,
+                  );
+                } catch (e: any) {
+                  setUploadMessage(e?.message || "Upload failed.");
+                } finally {
+                  setUploadingId(null);
+                  event.target.value = "";
+                }
+              };
+
+              const handleRerunClick = () => {
+                setUploadMessage(
+                  "Rerun understanding is not wired to orchestration yet. Use Expert / Debug mode to rerun the pipeline after uploading support.",
+                );
+              };
+
+              return (
+                <div key={item.id} className="gap-item">
+                  <h3>{item.title}</h3>
+                  <p className="muted">
+                    <strong>Status:</strong> {item.status || "unknown"}; <strong>Severity:</strong> {item.severity || "n/a"}
+                    {item.source && (
+                      <>
+                        {" "}- <strong>Source:</strong> {item.source}
+                      </>
+                    )}
+                  </p>
+                  {item.whyItMatters && <p className="muted">{item.whyItMatters}</p>}
+                  {item.suggestedUploads && item.suggestedUploads.length > 0 && (
+                    <p className="muted">
+                      <strong>Suggested uploads:</strong> {item.suggestedUploads.join(", ")}
+                    </p>
+                  )}
+                  <div className="gap-actions">
+                    <label className="button button-secondary">
+                      {isUploading ? "Uploading…" : "Upload supporting document"}
+                      <input
+                        type="file"
+                        style={{ display: "none" }}
+                        disabled={isUploading}
+                        onChange={handleFileChange}
+                      />
+                    </label>
+                    <button type="button" className="button button-ghost" onClick={handleRerunClick}>
+                      Rerun understanding (coming soon)
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+
+            {/* Preserve raw warnings/notes for additional context. */}
+            {(gaps.warnings && gaps.warnings.length > 0) || (gaps.notes && gaps.notes.length > 0) ? (
+              <div className="gap-raw-summary">
+                {gaps.warnings && gaps.warnings.length > 0 && (
+                  <>
+                    <h3>Raw warnings</h3>
+                    <ul className="muted">
+                      {gaps.warnings.map((w, idx) => (
+                        <li key={idx}>{w}</li>
+                      ))}
+                    </ul>
+                  </>
+                )}
+                {gaps.notes && gaps.notes.length > 0 && (
+                  <>
+                    <h3>Notes</h3>
+                    <ul className="muted">
+                      {gaps.notes.map((n, idx) => (
+                        <li key={idx}>{n}</li>
+                      ))}
+                    </ul>
+                  </>
+                )}
+              </div>
+            ) : null}
           </>
         ) : (
           <p className="muted">

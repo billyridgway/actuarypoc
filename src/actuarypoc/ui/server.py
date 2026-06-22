@@ -4121,6 +4121,7 @@ def build_product_workspace_snapshot(product_code: str) -> Dict[str, Any]:
     mechanics_explanation: Optional[Dict[str, Any]] = None
     gap_warnings: List[str] = []
     gap_notes: List[str] = []
+    gap_items: List[Dict[str, Any]] = []
 
     if isinstance(illustration, dict):
         projection = illustration.get("projection") or {}
@@ -4150,6 +4151,84 @@ def build_product_workspace_snapshot(product_code: str) -> Dict[str, Any]:
 
         gap_warnings = list(illustration.get("warnings") or [])
         gap_notes = list(illustration.get("notes") or [])
+
+        # Normalised gap items for the Promise UL workspace. These
+        # reuse existing projection warnings rather than introducing
+        # new heuristics, so behaviour is driven entirely by the
+        # current UL illustration config.
+
+        def _has_warning(substr: str) -> bool:
+            needle = (substr or "").lower()
+            for w in gap_warnings:
+                if isinstance(w, str) and needle in w.lower():
+                    return True
+            return False
+
+        # COI table missing / placeholder.
+        if _has_warning("COI rates are placeholder"):
+            gap_items.append(
+                {
+                    "id": "missing_coi_table",
+                    "title": "COI table missing",
+                    "severity": "high",
+                    "status": "placeholder",
+                    "whyItMatters": (
+                        "COI charges currently use a flat placeholder rate, so projected "
+                        "account values and policy charges may not reflect filed rates."
+                    ),
+                    "suggestedUploads": [
+                        "COI rate table",
+                        "pricing workbook",
+                        "actuarial memorandum",
+                        "rate manual",
+                    ],
+                    "source": "Projection warning",
+                }
+            )
+
+        # Surrender schedule placeholder.
+        if _has_warning("Surrender charges use a simple declining schedule"):
+            gap_items.append(
+                {
+                    "id": "surrender_schedule_placeholder",
+                    "title": "Surrender schedule placeholder",
+                    "severity": "medium",
+                    "status": "placeholder",
+                    "whyItMatters": (
+                        "Surrender values are based on a simplified declining schedule, "
+                        "not the filed surrender charge pattern, so early duration values "
+                        "may be materially different from production illustrations."
+                    ),
+                    "suggestedUploads": [
+                        "surrender charge schedule",
+                        "policy form",
+                        "actuarial memorandum",
+                    ],
+                    "source": "Projection warning",
+                }
+            )
+
+        # Policy/admin fee missing.
+        if _has_warning("No policy or admin fees are applied"):
+            gap_items.append(
+                {
+                    "id": "policy_admin_fee_missing",
+                    "title": "Policy/admin fee missing",
+                    "severity": "medium",
+                    "status": "missing",
+                    "whyItMatters": (
+                        "Projected policy values do not include policy or admin fees, "
+                        "so they may be higher than filed or production values."
+                    ),
+                    "suggestedUploads": [
+                        "fee schedule",
+                        "expense assumption sheet",
+                        "pricing workbook",
+                        "policy specification",
+                    ],
+                    "source": "Projection warning",
+                }
+            )
 
     # --- PMR / readiness summary (when available) ------------------------------
     readiness_status = "no_review"
@@ -4193,6 +4272,12 @@ def build_product_workspace_snapshot(product_code: str) -> Dict[str, Any]:
             "provenance": assumptions_payload,
         },
         "gaps": {
+            # Normalised gap items for structured workspace UIs. For
+            # Slice 4 this is Promise‑UL‑first and derived entirely
+            # from existing projection warnings.
+            "items": gap_items,
+            # Backwards-compatible raw warnings/notes so existing
+            # consumers (if any) can continue to render them.
             "warnings": gap_warnings,
             "notes": gap_notes,
         },
