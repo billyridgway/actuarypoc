@@ -152,6 +152,131 @@ export const ProductWorkspacePage: React.FC = () => {
   const mechanicsExplanation = data?.mechanicsExplanation;
   const pmr = data?.pmrReadiness;
 
+  const gapItems = gaps?.items ?? [];
+
+  // Derive a simple high-level understanding status from current
+  // mechanics, illustration, and gap items. This is intentionally
+  // conservative and uses only existing workspace data.
+  const hasMaterialGaps = gapItems.some((g) => {
+    const sev = (g.severity || "").toLowerCase();
+    return sev === "high" || sev === "medium";
+  });
+
+  let understandingStatusLevel: "green" | "yellow" | "red" | "unknown" = "unknown";
+  let understandingStatusLabel = "Understanding status is unknown.";
+
+  if (illustration && mechanicsSummary) {
+    if (hasMaterialGaps) {
+      understandingStatusLevel = "yellow";
+      understandingStatusLabel = "Draft understanding available with material gaps.";
+    } else {
+      understandingStatusLevel = "green";
+      understandingStatusLabel = "Understanding appears substantially complete.";
+    }
+  } else {
+    understandingStatusLevel = "red";
+    understandingStatusLabel = "Major information is missing; understanding is incomplete.";
+  }
+
+  // Promise UL currently has an illustration plus known gaps, so this
+  // resolves to yellow in practice.
+
+  // Build a short, deterministic overview paragraph from existing
+  // product and mechanics data.
+  const overviewParts: string[] = [];
+  if (product) {
+    const name = product.name || product.code || "This product";
+    const type = product.type || "universal life";
+    overviewParts.push(`${name} appears to be a ${type} product.`);
+  } else {
+    overviewParts.push("This product appears to be a universal life insurance product.");
+  }
+
+  if (mechanicsSummary) {
+    const mechBits: string[] = [];
+    if (mechanicsSummary.deathBenefitOption) {
+      mechBits.push(
+        mechanicsSummary.deathBenefitOption.toLowerCase() === "level"
+          ? "a level death benefit option"
+          : `a ${mechanicsSummary.deathBenefitOption} death benefit option`,
+      );
+    }
+    if (mechanicsSummary.interestCrediting) {
+      mechBits.push(mechanicsSummary.interestCrediting.toLowerCase());
+    }
+    if (mechanicsSummary.coiApproach) {
+      mechBits.push(mechanicsSummary.coiApproach.toLowerCase());
+    }
+    if (mechanicsSummary.surrenderMechanics) {
+      mechBits.push(mechanicsSummary.surrenderMechanics.toLowerCase());
+    }
+    if (mechBits.length > 0) {
+      overviewParts.push(`Key mechanics include ${mechBits.join(", ")}.`);
+    }
+  }
+
+  if (illustration) {
+    overviewParts.push(
+      "A draft illustration projection is available based on the currently discovered mechanics and assumptions.",
+    );
+  } else {
+    overviewParts.push(
+      "A draft illustration projection is not yet available; mechanics and assumptions are still being assembled.",
+    );
+  }
+
+  const overviewText = overviewParts.join(" ");
+
+  // Key mechanics bullets for quick scanning.
+  const keyMechanics: string[] = [];
+  if (mechanicsSummary?.deathBenefitOption) {
+    keyMechanics.push(
+      mechanicsSummary.deathBenefitOption.toLowerCase() === "level"
+        ? "Level death benefit option"
+        : `Death benefit option: ${mechanicsSummary.deathBenefitOption}`,
+    );
+  }
+  if (mechanicsSummary?.interestCrediting) {
+    keyMechanics.push(mechanicsSummary.interestCrediting);
+  }
+  if (mechanicsSummary?.coiApproach) {
+    keyMechanics.push(mechanicsSummary.coiApproach);
+  }
+  if (mechanicsSummary?.surrenderMechanics) {
+    keyMechanics.push(mechanicsSummary.surrenderMechanics);
+  }
+
+  // Highest-severity gaps for the summary view.
+  const severityRank = (s?: string): number => {
+    const v = (s || "").toLowerCase();
+    if (v === "high") return 3;
+    if (v === "medium") return 2;
+    if (v === "low") return 1;
+    return 0;
+  };
+
+  const majorGaps = [...gapItems].sort((a, b) => severityRank(b.severity) - severityRank(a.severity)).slice(0, 3);
+
+  // Projection readiness narrative based on illustration presence and
+  // known gaps.
+  let projectionReadiness = "Projection readiness is unknown.";
+  if (illustration) {
+    const hasCoiGap = gapItems.some((g) => g.id === "missing_coi_table");
+    const hasSurrGap = gapItems.some((g) => g.id === "surrender_schedule_placeholder");
+    const hasFeeGap = gapItems.some((g) => g.id === "policy_admin_fee_missing");
+
+    if (hasCoiGap || hasSurrGap || hasFeeGap) {
+      projectionReadiness =
+        "Draft projection available. Projection currently relies on placeholder COI rates, simplified surrender mechanics, and/or missing fee schedules and should not be considered filed-rate compliant.";
+    } else {
+      projectionReadiness =
+        "Draft projection available. This surface is intended for product understanding and should not be treated as a filed-rate projection.";
+    }
+  } else {
+    projectionReadiness =
+      "No draft projection is currently available; projection readiness cannot yet be assessed from this workspace.";
+  }
+
   return (
     <div className="home-page">
       <header className="card">
@@ -170,39 +295,42 @@ export const ProductWorkspacePage: React.FC = () => {
       </header>
 
       <section className="card home-card">
-        <h2>Uploaded documents</h2>
-        {data?.documents && data.documents.length > 0 ? (
-          <table className="kv-table">
-            <thead>
-              <tr>
-                <th>ID</th>
-                <th>Kind</th>
-                <th>Description</th>
-                <th>Object path</th>
-                <th>Filing</th>
-                <th>Uploaded at</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.documents.map((d) => (
-                <tr key={d.id ?? d.objectPath ?? String(d.createdAt)}>
-                  <td>{d.id}</td>
-                  <td>{d.kind || "filing"}</td>
-                  <td>{d.description || "(none)"}</td>
-                  <td>{d.objectPath}</td>
-                  <td>{d.filingId || product?.filingId || "(n/a)"}</td>
-                  <td>{d.createdAt || ""}</td>
-                </tr>
+        <h2>Product Understanding Summary</h2>
+        <p>{overviewText}</p>
+        <div className="summary-status">
+          <strong>Current understanding status: </strong>
+          <span className={`tag tag--understanding-${understandingStatusLevel}`}>
+            {understandingStatusLevel === "unknown" ? "UNKNOWN" : understandingStatusLevel.toUpperCase()}
+          </span>
+          <span className="muted" style={{ marginLeft: "0.5rem" }}>
+            {understandingStatusLabel}
+          </span>
+        </div>
+
+        {keyMechanics.length > 0 && (
+          <>
+            <h3>Key mechanics discovered</h3>
+            <ul>
+              {keyMechanics.map((m, idx) => (
+                <li key={idx}>{m}</li>
               ))}
-            </tbody>
-          </table>
-        ) : (
-          <p className="muted">
-            {loading
-              ? "Loading documents…"
-              : "No filings or support documents are registered for Promise UL yet."}
-          </p>
+            </ul>
+          </>
         )}
+
+        {majorGaps.length > 0 && (
+          <>
+            <h3>Major gaps</h3>
+            <ul>
+              {majorGaps.map((g) => (
+                <li key={g.id}>{g.title}</li>
+              ))}
+            </ul>
+          </>
+        )}
+
+        <h3>Projection readiness</h3>
+        <p className="muted">{projectionReadiness}</p>
       </section>
 
       <section className="card home-card">
@@ -538,6 +666,42 @@ export const ProductWorkspacePage: React.FC = () => {
             {loading
               ? "Loading readiness…"
               : "No Product Model Review readiness snapshot is available for Promise UL yet."}
+          </p>
+        )}
+      </section>
+
+      <section className="card home-card">
+        <h2>Uploaded documents</h2>
+        {data?.documents && data.documents.length > 0 ? (
+          <table className="kv-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Kind</th>
+                <th>Description</th>
+                <th>Object path</th>
+                <th>Filing</th>
+                <th>Uploaded at</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.documents.map((d) => (
+                <tr key={d.id ?? d.objectPath ?? String(d.createdAt)}>
+                  <td>{d.id}</td>
+                  <td>{d.kind || "filing"}</td>
+                  <td>{d.description || "(none)"}</td>
+                  <td>{d.objectPath}</td>
+                  <td>{d.filingId || product?.filingId || "(n/a)"}</td>
+                  <td>{d.createdAt || ""}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <p className="muted">
+            {loading
+              ? "Loading documents…"
+              : "No filings or support documents are registered for Promise UL yet."}
           </p>
         )}
       </section>
