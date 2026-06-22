@@ -127,6 +127,21 @@ _PRODUCT_REGISTRY: List[Dict[str, Any]] = [
 ]
 
 
+def _normalise_promise_ul_code(product_code: str) -> str:
+    """Canonicalise Promise UL product codes for workspace views.
+
+    Slice 3 of the Product Understanding Workspace is Promise‑UL‑first:
+    ICC18 P18PR UL is treated as the canonical code, with ICC18P18PRUL
+    supported as an alias where needed. Other products are intentionally
+    left unsupported for this workspace surface in this MVP.
+    """
+
+    code_norm = (product_code or "").strip().upper()
+    if code_norm in {"ICC18 P18PR UL", "ICC18P18PRUL"}:
+        return "ICC18 P18PR UL"
+    return code_norm
+
+
 def _get_product_config(product_code: str) -> Optional[Dict[str, Any]]:
     code_norm = (product_code or "").strip().upper()
     for entry in _PRODUCT_REGISTRY:
@@ -3988,6 +4003,214 @@ def api_product_model_review_product(product_code: str) -> Dict[str, Any]:
         return builder()
 
     return api_product_model_review_generic(code_norm)
+
+
+def build_product_workspace_snapshot(product_code: str) -> Dict[str, Any]:
+    """Build a read-only Product Workspace snapshot for a product.
+
+    Slice 3 keeps this Promise‑UL‑first but the helper is intentionally
+    product‑parameterised so future products can plug in without changing
+    the API surface. Today we support ICC18 P18PR UL only and return a
+    501 for all other products.
+    """
+
+    code_input = (product_code or "").strip()
+    if not code_input:
+        raise HTTPException(status_code=400, detail="product_code is required")
+
+    canonical_code = _normalise_promise_ul_code(code_input)
+
+    # TODO(workspace-multi-product): extend this to support additional
+    # products once they have mechanics, assumptions, and illustration
+    # surfaces wired. For now we keep Promise UL as the only implemented
+    # workspace product.
+    if canonical_code != "ICC18 P18PR UL":
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                "Product Understanding Workspace is currently implemented "
+                "only for Promise UL (ICC18 P18PR UL) in this MVP."
+            ),
+        )
+
+    # --- Product Review metadata -------------------------------------------------
+    try:
+        rec = get_product_review(canonical_code)
+    except Exception:
+        rec = None
+
+    meta = (rec or {}).get("metadata") or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    review_state = meta.get("review") or {}
+    if not isinstance(review_state, dict):
+        review_state = {}
+
+    product_name = meta.get("name") or meta.get("product_name") or "Promise UL"
+    product_code_effective = meta.get("product_code") or canonical_code
+    carrier = meta.get("carrier") or meta.get("carrier_name")
+    product_type = meta.get("type") or meta.get("productType") or "UL"
+
+    filing_id = review_state.get("filing_id") if isinstance(review_state, dict) else None
+    if isinstance(filing_id, str):
+        filing_id = filing_id.strip() or None
+
+    # --- UL runtime configuration & assumption provenance -----------------------
+    cfg_runtime = load_ul_runtime_config(canonical_code)
+
+    assumptions_payload = list(cfg_runtime.assumption_provenance or [])
+
+    # --- Mechanics registry (for transparency) ----------------------------------
+    mechanics_summary: Dict[str, Any] = {}
+    mechanics_payload: List[Dict[str, Any]] = []
+    try:
+        mechanics = load_mechanics_for_product(canonical_code)
+        mechanics_payload = mechanics_to_json(mechanics)
+    except Exception:
+        mechanics_payload = []
+
+    # Derive a lightweight mechanics summary from the UL runtime config. This is
+    # intentionally high‑level and does not affect projection behaviour.
+    death_benefit_option = None
+    if cfg_runtime.death_benefit is not None:
+        death_benefit_option = cfg_runtime.death_benefit.option_type
+
+    mechanics_summary = {
+        "deathBenefitOption": death_benefit_option or "level",
+        "coiApproach": f"flat {cfg_runtime.coi_rate_flat:.2%} of face amount (placeholder)",
+        "interestCrediting": f"guaranteed credited rate {cfg_runtime.guaranteed_rate:.2%}",
+        "surrenderMechanics": (
+            f"{cfg_runtime.max_surrender_pct:.2%} of face in early durations, "
+            f"declining over {cfg_runtime.surrender_period_years} years"
+        ),
+        "mechanicsCount": len(mechanics_payload),
+    }
+
+    # --- Documents associated with this product / filing ------------------------
+    documents_payload: List[Dict[str, Any]] = []
+    try:
+        docs = list_product_documents(canonical_code, filing_id=filing_id)
+    except Exception:
+        docs = []
+
+    for d in docs:
+        documents_payload.append(
+            {
+                "id": d.get("id"),
+                "kind": d.get("kind"),
+                "description": d.get("description"),
+                "objectPath": d.get("object_path"),
+                "createdAt": d.get("created_at"),
+                "filingId": d.get("serff_id") or filing_id,
+            }
+        )
+
+    # --- Illustration snapshot (Promise UL draft projection) --------------------
+    illustration: Optional[Dict[str, Any]] = None
+    provider = _get_illustration_provider(canonical_code)
+    if provider is not None:
+        try:
+            # Use the same provider and default request normalisation as the
+            # existing /api/illustrations path. An empty request lets the
+            # provider apply its current defaults without changing behaviour.
+            illustration = provider(canonical_code, {})
+        except Exception:
+            illustration = None
+
+    projection_snapshot: Optional[Dict[str, Any]] = None
+    mechanics_explanation: Optional[Dict[str, Any]] = None
+    gap_warnings: List[str] = []
+    gap_notes: List[str] = []
+
+    if isinstance(illustration, dict):
+        projection = illustration.get("projection") or {}
+        rows = list(projection.get("rows") or [])
+        metrics = projection.get("metrics") or {}
+
+        sample_rows: List[Dict[str, Any]] = []
+        if rows:
+            first = rows[0]
+            last = rows[-1]
+            mid = rows[len(rows) // 2] if len(rows) > 2 else None
+            sample_rows.append(first)
+            if mid is not None and mid is not first and mid is not last:
+                sample_rows.append(mid)
+            if last is not first:
+                sample_rows.append(last)
+
+        projection_snapshot = {
+            "request": illustration.get("request") or {},
+            "metrics": metrics,
+            "sampleRows": sample_rows,
+        }
+
+        me = illustration.get("mechanicsExplanation")
+        if isinstance(me, dict):
+            mechanics_explanation = me
+
+        gap_warnings = list(illustration.get("warnings") or [])
+        gap_notes = list(illustration.get("notes") or [])
+
+    # --- PMR / readiness summary (when available) ------------------------------
+    readiness_status = "no_review"
+    readiness_messages: List[str] = []
+
+    if rec is None:
+        readiness_messages.append(
+            "No Product Review draft exists for Promise UL yet; run the Expert/Debug "
+            "pipeline before relying on this readiness status."
+        )
+    else:
+        readiness_status = "review_in_progress"
+        readiness_messages.append(
+            "Product Review draft exists for Promise UL. Use Expert / Debug mode "
+            "and the Trust Surface for detailed PMR status."
+        )
+
+    pmr_readiness = {
+        "status": readiness_status,
+        "messages": readiness_messages,
+    }
+
+    # --- Assemble workspace payload -------------------------------------------
+    product_block = {
+        "code": product_code_effective,
+        "name": product_name,
+        "type": product_type,
+        "carrier": carrier,
+        "filingId": filing_id,
+        "understandingStatus": readiness_status,
+    }
+
+    return {
+        "product": product_block,
+        "documents": documents_payload,
+        "mechanics": {
+            "summary": mechanics_summary,
+            "items": mechanics_payload,
+        },
+        "assumptions": {
+            "provenance": assumptions_payload,
+        },
+        "gaps": {
+            "warnings": gap_warnings,
+            "notes": gap_notes,
+        },
+        "illustration": projection_snapshot,
+        "mechanicsExplanation": mechanics_explanation,
+        "pmrReadiness": pmr_readiness,
+    }
+
+
+@app.get("/api/product-workspace/{product_code}")
+def api_product_workspace(product_code: str) -> Dict[str, Any]:
+    """Product Understanding Workspace snapshot entrypoint.
+
+    Thin wrapper around :func:`build_product_workspace_snapshot` so the
+    HTTP surface stays stable as products are added.
+    """
+
+    return build_product_workspace_snapshot(product_code)
 
 
 @app.post("/api/product-model-review/{product_code}/ai-summary")
