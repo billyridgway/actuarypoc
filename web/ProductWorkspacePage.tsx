@@ -53,6 +53,25 @@ interface WorkspacePayload {
   assumptions?: {
     provenance?: WorkspaceAssumption[];
   };
+  complianceMatrix?: {
+    summary?: {
+      implemented?: number;
+      partial?: number;
+      missing?: number;
+      overallStatus?: string;
+    };
+    requirements?: Array<{
+      id: string;
+      name: string;
+      category?: string;
+      filedRequirement?: string;
+      currentImplementation?: string;
+      status?: string;
+      impact?: string;
+      evidence?: any[];
+      notes?: string;
+    }>;
+  };
   evidence?: {
     items?: Array<{
       id: string;
@@ -117,6 +136,30 @@ const formatCurrency = (value: any): string => {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   });
+};
+
+const formatStatusLabel = (value?: string | null): string => {
+  const raw = (value || "").trim();
+  if (!raw) return "Unknown";
+  const v = raw.toLowerCase();
+  const map: Record<string, string> = {
+    review_in_progress: "Review In Progress",
+    implemented: "Implemented",
+    partial: "Partial",
+    missing: "Missing",
+    extracted: "Extracted",
+    inferred: "Inferred",
+    placeholder: "Placeholder",
+    assumption_discovery: "Assumption Discovery",
+    cash_surrender_value: "Cash Surrender Value",
+  };
+  if (map[v]) return map[v];
+  // Fallback: split on underscores and capitalise words.
+  return v
+    .split(/[_\s]+/)
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
 };
 
 export const ProductWorkspacePage: React.FC<{ productCode: string }> = ({ productCode }) => {
@@ -184,6 +227,7 @@ export const ProductWorkspacePage: React.FC<{ productCode: string }> = ({ produc
   const mechanicsSummary = data?.mechanics?.summary;
   const assumptions = data?.assumptions?.provenance ?? [];
   const evidenceItems = data?.evidence?.items ?? [];
+  const compliance = data?.complianceMatrix;
   const gaps = data?.gaps;
   const illustration = data?.illustration;
   const mechanicsExplanation = data?.mechanicsExplanation;
@@ -413,61 +457,124 @@ export const ProductWorkspacePage: React.FC<{ productCode: string }> = ({ produc
           system believes the product behaves the way it does.
         </p>
         {evidenceItems.length > 0 ? (
-          <table className="kv-table">
-            <thead>
-              <tr>
-                <th>Item</th>
-                <th>Status</th>
-                <th>Value</th>
-                <th>Confidence</th>
-                <th>Impact</th>
-                <th>Source</th>
-              </tr>
-            </thead>
-            <tbody>
-              {evidenceItems.map((ev) => {
-                const statusLabel = (ev.status || "unknown").toLowerCase();
-                const conf = typeof ev.confidence === "number" ? `${(ev.confidence * 100).toFixed(0)}%` : "";
-                const impact = ev.impact || "unknown";
-                const src = (ev.sources && ev.sources[0]) || null;
-                return (
-                  <tr key={ev.id}>
-                    <td>
-                      <div>{ev.label}</div>
-                      {ev.notes && <div className="muted">{ev.notes}</div>}
-                    </td>
-                    <td>{statusLabel}</td>
-                    <td>
-                      {typeof ev.value === "number"
-                        ? ev.label.toLowerCase().includes("rate")
-                          ? `${(ev.value * 100).toFixed(2)}%`
-                          : formatCurrency(ev.value)
-                        : String(ev.value ?? "")}
-                    </td>
-                    <td>{conf}</td>
-                    <td>{impact}</td>
-                    <td>
-                      {src ? (
-                        <div className="muted">
-                          {src.document && <div>{src.document}</div>}
-                          {src.page && <div>p. {src.page}</div>}
-                          {src.snippet && <div>{src.snippet}</div>}
-                          {src.origin && <div>origin: {src.origin}</div>}
-                        </div>
-                      ) : (
-                        <span className="muted">(no direct filing source)</span>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+          <div className="evidence-list">
+            {evidenceItems.map((ev) => {
+              const statusLabel = formatStatusLabel(ev.status || "unknown");
+              const conf =
+                typeof ev.confidence === "number" ? `${(ev.confidence * 100).toFixed(0)}%` : "Unknown";
+              const impactLabel = formatStatusLabel(ev.impact || "unknown");
+              const src = (ev.sources && ev.sources[0]) || null;
+              const valueText =
+                typeof ev.value === "number"
+                  ? ev.label.toLowerCase().includes("rate")
+                    ? `${(ev.value * 100).toFixed(2)}%`
+                    : formatCurrency(ev.value)
+                  : String(ev.value ?? "");
+
+              return (
+                <div key={ev.id} className="evidence-item">
+                  <h3>{ev.label}</h3>
+                  <p className="muted">{ev.notes}</p>
+                  <p>
+                    <strong>Status:</strong> {statusLabel} | <strong>Impact:</strong> {impactLabel}
+                  </p>
+                  <p>
+                    <strong>Value:</strong> {valueText || "(not set)"}
+                  </p>
+                  <p>
+                    <strong>Confidence:</strong> {conf}
+                  </p>
+                  <div>
+                    <strong>Source:</strong>
+                    {src ? (
+                      <div className="muted">
+                        {src.document && <div>{src.document}</div>}
+                        {src.page && <div>p. {src.page}</div>}
+                        {src.snippet && <div>{src.snippet}</div>}
+                        {src.origin && <div>Origin: {formatStatusLabel(src.origin)}</div>}
+                      </div>
+                    ) : (
+                      <span className="muted"> (no direct filing source)</span>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         ) : (
           <p className="muted">
             {loading
               ? "Loading evidence…"
               : "No structured evidence snapshot is available yet for this product. Use Expert / Debug mode or the Trust Surface for more detail."}
+          </p>
+        )}
+      </section>
+
+      <section className="card home-card">
+        <h2>Product Compliance Matrix</h2>
+        <p className="muted">
+          Comparison of key filed requirements against the current implementation, with a simple implemented/partial/
+          missing status for each.
+        </p>
+        {compliance && compliance.requirements && compliance.requirements.length > 0 ? (
+          <>
+            {compliance.summary && (
+              <div className="summary-status">
+                <strong>Overall compliance status: </strong>
+                <span
+                  className={`tag tag--compliance-${(compliance.summary.overallStatus || "unknown").toLowerCase()}`}
+                >
+                  {formatStatusLabel(compliance.summary.overallStatus || "unknown")}
+                </span>
+                <span className="muted" style={{ marginLeft: "0.5rem" }}>
+                  Implemented: {compliance.summary.implemented ?? 0}, Partial: {compliance.summary.partial ?? 0},
+                  Missing: {compliance.summary.missing ?? 0}
+                </span>
+              </div>
+            )}
+
+            <div className="compliance-list">
+              {compliance.requirements.map((req) => {
+                const status = formatStatusLabel(req.status || "unknown");
+                const impact = formatStatusLabel(req.impact || "unknown");
+                const ev = (req.evidence && req.evidence[0]) || null;
+                const src = ev && ev.sources && ev.sources[0];
+
+                return (
+                  <div key={req.id} className="compliance-item">
+                    <h3>{req.name}</h3>
+                    <p className="muted">{req.notes}</p>
+                    <p>
+                      <strong>Status:</strong> {status} | <strong>Impact:</strong> {impact}
+                    </p>
+                    <p>
+                      <strong>Filed requirement:</strong> {req.filedRequirement || "(not documented)"}
+                    </p>
+                    <p>
+                      <strong>Current implementation:</strong> {req.currentImplementation || "(not implemented)"}
+                    </p>
+                    <div>
+                      <strong>Evidence:</strong>
+                      {src ? (
+                        <div className="muted">
+                          {src.document && <div>{src.document}</div>}
+                          {src.page && <div>p. {src.page}</div>}
+                          {src.snippet && <div>{src.snippet}</div>}
+                        </div>
+                      ) : (
+                        <span className="muted"> (no direct filing source)</span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        ) : (
+          <p className="muted">
+            {loading
+              ? "Loading compliance matrix…"
+              : "No compliance matrix is available yet for this product. Use Expert / Debug mode or the Trust Surface for more detail."}
           </p>
         )}
       </section>
@@ -597,7 +704,7 @@ export const ProductWorkspacePage: React.FC<{ productCode: string }> = ({ produc
                 <div key={item.id} className="gap-item">
                   <h3>{item.title}</h3>
                   <p className="muted">
-                    <strong>Status:</strong> {item.status || "unknown"}; <strong>Severity:</strong> {item.severity || "n/a"}
+                    <strong>Status:</strong> {formatStatusLabel(item.status || "unknown")}; <strong>Severity:</strong> {formatStatusLabel(item.severity || "n/a")}
                     {item.source && (
                       <>
                         {" "}- <strong>Source:</strong> {item.source}
@@ -669,16 +776,23 @@ export const ProductWorkspacePage: React.FC<{ productCode: string }> = ({ produc
           <>
             <p className="muted">Draft Promise UL projection based on the current mechanics and assumptions.</p>
             {illustration.metrics && (
-              <table className="kv-table">
-                <tbody>
-                  {Object.entries(illustration.metrics).map(([k, v]) => (
-                    <tr key={k}>
-                      <th>{k}</th>
-                      <td>{typeof v === "number" ? formatCurrency(v) : String(v ?? "")}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              <div className="projection-summary">
+                {typeof illustration.metrics.maximumYear === "number" && (
+                  <p>
+                    <strong>Projection Horizon:</strong> {illustration.metrics.maximumYear} years
+                  </p>
+                )}
+                {typeof illustration.metrics.breakEvenYearCash === "number" && (
+                  <p>
+                    <strong>Break-even Cash Value:</strong> Year {illustration.metrics.breakEvenYearCash}
+                  </p>
+                )}
+                {typeof illustration.metrics.breakEvenYearSurrender === "number" && (
+                  <p>
+                    <strong>Break-even Surrender Value:</strong> Year {illustration.metrics.breakEvenYearSurrender}
+                  </p>
+                )}
+              </div>
             )}
             {illustration.sampleRows && illustration.sampleRows.length > 0 && (
               <>
@@ -752,8 +866,19 @@ export const ProductWorkspacePage: React.FC<{ productCode: string }> = ({ produc
               <tbody>
                 <tr>
                   <th>Status</th>
-                  <td>{pmr.status || "unknown"}</td>
+                  <td>{formatStatusLabel(pmr.status || "unknown")}</td>
                 </tr>
+                {compliance && compliance.summary && (
+                  <tr>
+                    <th>Compliance summary</th>
+                    <td>
+                      Implemented: {compliance.summary.implemented ?? 0}, Partial: {compliance.summary.partial ?? 0},
+                      Missing: {compliance.summary.missing ?? 0} (Overall {formatStatusLabel(
+                        compliance.summary.overallStatus || "unknown",
+                      )})
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
             {pmr.messages && pmr.messages.length > 0 && (

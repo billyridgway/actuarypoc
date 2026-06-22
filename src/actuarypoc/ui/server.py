@@ -2484,6 +2484,39 @@ def api_products() -> Dict[str, Any]:
 
         projection_available = _has_projection(code)
 
+        # Workspace availability is currently Promise‑UL‑first: we only
+        # expose the Product Understanding Workspace for UL‑style
+        # products where the UL workspace surface is implemented.
+        workspace_available = False
+        product_type_norm = str(product_type or "").strip()
+        if _is_ul_product_type(product_type_norm):
+            # Promise UL / UL-style products only; P12TRF and other term
+            # products remain Expert / Trust Surface only for now.
+            workspace_available = True
+
+        # For Promise UL, surface a lightweight compliance summary from
+        # the workspace builder so that the catalog can show compliance
+        # status without calling the full workspace endpoint per
+        # product. For other products this remains None/unknown.
+        compliance_summary: Optional[Dict[str, Any]] = None
+        try:
+            if workspace_available and _is_ul_product_type(product_type_norm):
+                ws = build_product_workspace_snapshot(code)
+                cm = (ws.get("complianceMatrix") or {}).get("summary") if isinstance(ws, dict) else None
+                if isinstance(cm, dict):
+                    compliance_summary = {
+                        "implemented": cm.get("implemented"),
+                        "partial": cm.get("partial"),
+                        "missing": cm.get("missing"),
+                        "overallStatus": cm.get("overallStatus"),
+                    }
+        except HTTPException:
+            # Workspace not implemented for this product type; leave
+            # compliance_summary as None.
+            compliance_summary = None
+        except Exception:
+            compliance_summary = None
+
         products.append(
             {
                 "productCode": code,
@@ -2511,6 +2544,8 @@ def api_products() -> Dict[str, Any]:
                 "understandingStatus": understanding_status,
                 "documentCount": None,
                 "projectionAvailable": projection_available,
+                 "workspaceAvailable": workspace_available,
+                "complianceSummary": compliance_summary,
             }
         )
 
@@ -4589,6 +4624,172 @@ def build_product_workspace_snapshot(product_code: str) -> Dict[str, Any]:
         }
     )
 
+    # --- Compliance Matrix: filed vs implemented requirements -----------------
+
+    # Index evidence items by id for quick lookup.
+    evidence_by_id: Dict[str, Dict[str, Any]] = {}
+    for ev in evidence_items:
+        if isinstance(ev, dict) and ev.get("id"):
+            key = str(ev["id"])
+            evidence_by_id[key] = ev
+
+    def _req_status_for_evidence(eid: str, *, gap_key: Optional[str] = None, default: str = "missing") -> str:
+        ev = evidence_by_id.get(eid)
+        if not isinstance(ev, dict):
+            return default
+        s = str(ev.get("status") or "").lower()
+        if s in {"extracted", "inferred"}:
+            # Strongest evidence: treat as implemented when not
+            # contradicted by explicit gaps.
+            if gap_key and gap_key in gap_ids:
+                # Gap indicates table/schedule still placeholder.
+                return "partial"
+            return "implemented"
+        if s == "placeholder":
+            # Placeholder values imply partial at best when a gap is
+            # recorded; otherwise treat as partial implementation.
+            return "partial" if gap_key else "partial"
+        # s == "missing" or unknown.
+        return "missing"
+
+    compliance_requirements: List[Dict[str, Any]] = []
+
+    # 1) Guaranteed credited rate.
+    ev_gcr = evidence_by_id.get("guaranteed_credited_rate") or {}
+    status_gcr = _req_status_for_evidence("guaranteed_credited_rate", default="missing")
+    compliance_requirements.append(
+        {
+            "id": "guaranteed_credited_rate",
+            "name": "Guaranteed credited rate",
+            "category": "interest",
+            "filedRequirement": "Policy credits interest at least at the guaranteed minimum rate.",
+            "currentImplementation": "Guaranteed credited rate is loaded into UL runtime assumptions from assumption discovery or DSL.",
+            "status": status_gcr,
+            "impact": _impact_for_id("guaranteed_credited_rate"),
+            "evidence": [ev_gcr] if ev_gcr else [],
+            "notes": "If this requirement is not implemented, projected account values may be inconsistent with filed minimum-crediting guarantees.",
+        }
+    )
+
+    # 2) Death benefit option.
+    ev_db = evidence_by_id.get("death_benefit_option") or {}
+    status_db = _req_status_for_evidence("death_benefit_option", default="missing")
+    compliance_requirements.append(
+        {
+            "id": "death_benefit_option",
+            "name": "Death benefit option",
+            "category": "benefits",
+            "filedRequirement": "Level death benefit equal to face amount (Option A).",
+            "currentImplementation": "Current mechanics model a level death benefit equal to the face amount.",
+            "status": status_db,
+            "impact": _impact_for_id("death_benefit_option"),
+            "evidence": [ev_db] if ev_db else [],
+            "notes": "Misalignment here would change the basic product promise (amount paid on death).",
+        }
+    )
+
+    # 3) Cash surrender value definition.
+    ev_csv = evidence_by_id.get("cash_surrender_value") or {}
+    status_csv = _req_status_for_evidence("cash_surrender_value", default="missing")
+    compliance_requirements.append(
+        {
+            "id": "cash_surrender_value",
+            "name": "Cash surrender value",
+            "category": "benefits",
+            "filedRequirement": "Cash surrender value equals policy value less any surrender charge.",
+            "currentImplementation": "Workspace CSV mechanics reflect CSV = Policy Value − Surrender Charge.",
+            "status": status_csv,
+            "impact": _impact_for_id("cash_surrender_value"),
+            "evidence": [ev_csv] if ev_csv else [],
+            "notes": "Ensures surrender benefits match filed definitions for policy value and surrender charges.",
+        }
+    )
+
+    # 4) COI rate table.
+    ev_coi = evidence_by_id.get("coi_rates") or {}
+    status_coi = _req_status_for_evidence("coi_rates", gap_key="missing_coi_table", default="missing")
+    compliance_requirements.append(
+        {
+            "id": "coi_table",
+            "name": "COI rate table",
+            "category": "charges",
+            "filedRequirement": "Cost of Insurance charges are determined using the filed COI rate tables.",
+            "currentImplementation": "Current implementation uses a flat 0.40% of face as a placeholder instead of filed COI tables.",
+            "status": status_coi,
+            "impact": _impact_for_id("coi_rates"),
+            "evidence": [ev_coi] if ev_coi else [],
+            "notes": "Placeholder COI rates mean projected charges may not align with filed CSO-based rate tables.",
+        }
+    )
+
+    # 5) Surrender charge schedule.
+    ev_surr = evidence_by_id.get("surrender_schedule") or {}
+    status_surr = _req_status_for_evidence("surrender_schedule", gap_key="surrender_schedule_placeholder", default="missing")
+    compliance_requirements.append(
+        {
+            "id": "surrender_schedule",
+            "name": "Surrender charge schedule",
+            "category": "charges",
+            "filedRequirement": "Surrender charges follow the filed charge schedule by duration.",
+            "currentImplementation": "Current implementation uses a simplified declining schedule over the surrender period.",
+            "status": status_surr,
+            "impact": _impact_for_id("surrender_schedule"),
+            "evidence": [ev_surr] if ev_surr else [],
+            "notes": "Placeholder surrender schedule can materially affect early-year surrender values.",
+        }
+    )
+
+    # 6) Policy / admin fees.
+    ev_fees = evidence_by_id.get("policy_admin_fee") or {}
+    # For fees we treat placeholder/zero as missing until a non-zero,
+    # evidenced value is present.
+    status_fees = "missing"
+    if isinstance(ev_fees, dict):
+        s_fee = str(ev_fees.get("status") or "").lower()
+        v_fee = ev_fees.get("value")
+        has_value = bool(v_fee not in (None, 0, 0.0, "0", "0.0"))
+        if s_fee in {"extracted", "inferred"} and has_value:
+            status_fees = "implemented"
+        elif s_fee == "placeholder" and has_value:
+            status_fees = "partial"
+        else:
+            status_fees = "missing"
+    compliance_requirements.append(
+        {
+            "id": "policy_admin_fees",
+            "name": "Policy / admin fees",
+            "category": "charges",
+            "filedRequirement": "Filed policy and admin fee schedule applies to the policy value.",
+            "currentImplementation": "No fee schedule is currently loaded; projections assume no policy/admin fees.",
+            "status": status_fees,
+            "impact": _impact_for_id("policy_admin_fee"),
+            "evidence": [ev_fees] if ev_fees else [],
+            "notes": "Missing fee schedules mean projected account values may be overstated relative to filed illustrations.",
+        }
+    )
+
+    # Compliance summary counts and overall status.
+    implemented_count = sum(1 for r in compliance_requirements if str(r.get("status")).lower() == "implemented")
+    partial_count = sum(1 for r in compliance_requirements if str(r.get("status")).lower() == "partial")
+    missing_count = sum(1 for r in compliance_requirements if str(r.get("status")).lower() == "missing")
+
+    # Overall compliance status based on high-impact requirements.
+    overall_status: str
+    has_high_missing = any(
+        str(r.get("impact")).lower() == "high" and str(r.get("status")).lower() == "missing"
+        for r in compliance_requirements
+    )
+    has_high_partial = any(
+        str(r.get("impact")).lower() == "high" and str(r.get("status")).lower() == "partial"
+        for r in compliance_requirements
+    )
+    if has_high_missing:
+        overall_status = "red"
+    elif has_high_partial:
+        overall_status = "yellow"
+    else:
+        overall_status = "green"
+
     # --- PMR / readiness summary (when available) ------------------------------
     readiness_status = "no_review"
     readiness_messages: List[str] = []
@@ -4600,14 +4801,28 @@ def build_product_workspace_snapshot(product_code: str) -> Dict[str, Any]:
         )
     else:
         readiness_status = "review_in_progress"
+        # Summarise compliance matrix for PMR readiness.
         readiness_messages.append(
             "Product Review draft exists for Promise UL. Use Expert / Debug mode "
             "and the Trust Surface for detailed PMR status."
         )
 
+    compliance_summary = {
+        "implemented": implemented_count,
+        "partial": partial_count,
+        "missing": missing_count,
+        "overallStatus": overall_status,
+    }
+
+    # Add a compliance-oriented message so PMR reflects the matrix.
+    readiness_messages.append(
+        f"Compliance summary: implemented={implemented_count}, partial={partial_count}, missing={missing_count}, overall status={overall_status}."
+    )
+
     pmr_readiness = {
         "status": readiness_status,
         "messages": readiness_messages,
+        "complianceSummary": compliance_summary,
     }
 
     # --- Assemble workspace payload -------------------------------------------
@@ -4629,6 +4844,10 @@ def build_product_workspace_snapshot(product_code: str) -> Dict[str, Any]:
         },
         "assumptions": {
             "provenance": assumptions_payload,
+        },
+        "complianceMatrix": {
+            "summary": compliance_summary,
+            "requirements": compliance_requirements,
         },
         "evidence": {
             "items": evidence_items,

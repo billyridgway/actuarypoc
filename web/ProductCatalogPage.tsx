@@ -8,6 +8,12 @@ interface CatalogProduct {
   understandingStatus?: string;
   documentCount?: number | null;
   projectionAvailable?: boolean;
+  workspaceAvailable?: boolean;
+  complianceStatus?: string;
+  complianceImplemented?: number | null;
+  compliancePartial?: number | null;
+  complianceMissing?: number | null;
+  reviewEndpoint?: string | null;
 }
 
 interface ProductsResponse {
@@ -21,6 +27,15 @@ const normaliseUnderstandingLabel = (value?: string | null): string => {
   if (v === "yellow") return "Yellow";
   if (v === "red") return "Red";
   return value || "Unknown";
+};
+
+const normaliseComplianceLabel = (value?: string | null): string => {
+  const v = (value || "").toLowerCase();
+  if (!v) return "Unknown";
+  if (v === "green") return "Green";
+  if (v === "yellow") return "Yellow";
+  if (v === "red") return "Red";
+  return "Unknown";
 };
 
 export const ProductCatalogPage: React.FC = () => {
@@ -47,15 +62,27 @@ export const ProductCatalogPage: React.FC = () => {
           return;
         }
 
-        const mapped: CatalogProduct[] = raw.map((p: any) => ({
-          productCode: String(p.productCode || "").toUpperCase(),
-          productName: p.productName,
-          productType: p.productType,
-          carrier: p.carrier,
-          understandingStatus: p.understandingStatus,
-          documentCount: typeof p.documentCount === "number" ? p.documentCount : null,
-          projectionAvailable: Boolean(p.projectionAvailable),
-        }));
+        const mapped: CatalogProduct[] = raw.map((p: any) => {
+          const compliance = p.complianceSummary || {};
+          return {
+            productCode: String(p.productCode || "").toUpperCase(),
+            productName: p.productName,
+            productType: p.productType,
+            carrier: p.carrier,
+            understandingStatus: p.understandingStatus,
+            documentCount: typeof p.documentCount === "number" ? p.documentCount : null,
+            projectionAvailable: Boolean(p.projectionAvailable),
+            workspaceAvailable: Boolean(p.workspaceAvailable),
+            complianceStatus: compliance.overallStatus || null,
+            complianceImplemented:
+              typeof compliance.implemented === "number" ? compliance.implemented : null,
+            compliancePartial:
+              typeof compliance.partial === "number" ? compliance.partial : null,
+            complianceMissing:
+              typeof compliance.missing === "number" ? compliance.missing : null,
+            reviewEndpoint: p.reviewEndpoint ?? null,
+          };
+        });
 
         if (!cancelled) setProducts(mapped);
       } catch (err: any) {
@@ -96,13 +123,25 @@ export const ProductCatalogPage: React.FC = () => {
               const docCountLabel =
                 typeof p.documentCount === "number" ? String(p.documentCount) : "(unknown)";
               const projectionLabel = p.projectionAvailable ? "Available" : "Not available";
+              const complianceLabel = normaliseComplianceLabel(p.complianceStatus);
 
-              // Use a query-parameter based workspace route so that
-              // navigation stays within the SPA and always hits the
-              // /web entrypoint. Path-based routing (/web/product/…)
-              // is still supported by App.tsx but we prefer this
-              // form to avoid server-side 404s.
-              const href = `/web?product=${encodeURIComponent(p.productCode)}`;
+              const workspaceHref = `/web?product=${encodeURIComponent(p.productCode)}`;
+              const canOpenWorkspace = Boolean(p.workspaceAvailable);
+              const canOpenExpert = !canOpenWorkspace && !!p.reviewEndpoint;
+
+              let ctaLabel = "Workspace coming soon";
+              let ctaHref: string | undefined;
+              let ctaDisabled = true;
+
+              if (canOpenWorkspace) {
+                ctaLabel = "Open workspace";
+                ctaHref = workspaceHref;
+                ctaDisabled = false;
+              } else if (canOpenExpert) {
+                ctaLabel = "Open Expert / Trust Surface";
+                ctaHref = p.reviewEndpoint || undefined;
+                ctaDisabled = false;
+              }
 
               return (
                 <div key={p.productCode} className="card home-card">
@@ -126,12 +165,29 @@ export const ProductCatalogPage: React.FC = () => {
                         <th>Projection</th>
                         <td>{projectionLabel}</td>
                       </tr>
+                      <tr>
+                        <th>Compliance</th>
+                        <td>
+                          {complianceLabel}
+                          {p.complianceImplemented != null && (
+                            <span className="muted">{` - Impl: ${p.complianceImplemented}, Part: ${
+                              p.compliancePartial ?? 0
+                            }, Miss: ${p.complianceMissing ?? 0}`}</span>
+                          )}
+                        </td>
+                      </tr>
                     </tbody>
                   </table>
                   <p>
-                    <a href={href} className="button">
-                      Open workspace
-                    </a>
+                    {ctaHref ? (
+                      <a href={ctaHref} className="button">
+                        {ctaLabel}
+                      </a>
+                    ) : (
+                      <button className="button" disabled={ctaDisabled}>
+                        {ctaLabel}
+                      </button>
+                    )}
                   </p>
                 </div>
               );
