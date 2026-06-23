@@ -5,6 +5,7 @@ from datetime import datetime
 import io
 import json
 import logging
+import os
 import re
 import zipfile
 from hashlib import sha256
@@ -66,6 +67,13 @@ from actuarypoc.storage.postgres_client import (
     upsert_product_review_draft,
     register_product_catalog,
     list_registered_products,
+    create_workspace,
+    list_workspaces,
+    get_workspace,
+    record_workspace_document,
+    list_workspace_documents,
+    update_workspace_analysis,
+    delete_workspace_and_documents,
 )
 
 try:  # FastAPI can be configured with either Pydantic v1 or v2
@@ -125,6 +133,298 @@ _PRODUCT_REGISTRY: List[Dict[str, Any]] = [
         "reviewEndpoint": None,
     },
 ]
+
+
+# ---------------------------------------------------------------------------
+# Document‑first Product Workspaces (MVP)
+#
+# These endpoints implement a "create workspace → upload documents →
+# analyze product" workflow. Workspaces start metadata‑free and are
+# populated by the understanding pipeline after analysis.
+# ---------------------------------------------------------------------------
+
+
+def _workspace_to_api(ws: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalise internal workspace dict into API shape."""
+
+    return {
+        "id": ws.get("id"),
+        "status": ws.get("status"),
+        "documentCount": ws.get("document_count", 0),
+        "createdAt": ws.get("created_at"),
+        "updatedAt": ws.get("updated_at"),
+        "inferredProductName": ws.get("inferred_product_name"),
+        "inferredProductCode": ws.get("inferred_product_code"),
+        "inferredProductType": ws.get("inferred_product_type"),
+        "inferredCarrier": ws.get("inferred_carrier"),
+        "inferredFilingContext": ws.get("inferred_filing_context"),
+        "inferredPrimaryProductCode": ws.get("inferred_primary_product_code"),
+        "understandingStatus": ws.get("understanding_status"),
+        "complianceStatus": ws.get("compliance_overall_status"),
+        "complianceImplemented": ws.get("compliance_implemented_count"),
+        "compliancePartial": ws.get("compliance_partial_count"),
+        "complianceMissing": ws.get("compliance_missing_count"),
+        "projectionTrustLevel": ws.get("projection_trust_level"),
+    }
+
+
+@app.post("/api/workspaces")
+def api_create_workspace() -> Dict[str, Any]:
+    """Create an empty, document‑first workspace.
+
+    No product metadata is required at creation time; the workspace is
+    initially in ``waiting_for_documents`` status.
+    """
+
+    ws = create_workspace()
+    if ws is None:
+        raise HTTPException(status_code=503, detail="Workspace storage is not available (Postgres DSN not configured)")
+    return {"workspace": _workspace_to_api(ws)}
+
+
+@app.get("/api/workspaces")
+def api_list_workspaces() -> Dict[str, Any]:
+    """List workspaces for the Workspace Catalog view."""
+
+    rows = list_workspaces() or []
+    return {"workspaces": [_workspace_to_api(ws) for ws in rows]}
+
+
+@app.get("/api/workspaces/{workspace_id}")
+def api_get_workspace(workspace_id: str) -> Dict[str, Any]:
+    """Return workspace metadata, documents, and latest snapshot (if any)."""
+
+    ws = get_workspace(workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+
+    docs = list_workspace_documents(workspace_id)
+    # Shape documents similar to existing list_product_documents surface.
+    documents_payload: List[Dict[str, Any]] = []
+    for d in docs:
+        documents_payload.append(
+            {
+                "id": d.get("id"),
+                "kind": d.get("kind"),
+                "description": d.get("description"),
+                "objectPath": d.get("object_path"),
+                "createdAt": d.get("created_at"),
+                "filingId": d.get("serff_id"),
+            }
+        )
+
+    return {
+        "workspace": _workspace_to_api(ws),
+        "documents": documents_payload,
+        "snapshot": ws.get("latest_snapshot_json"),
+    }
+
+
+@app.delete("/api/workspaces/{workspace_id}")
+def api_delete_workspace(workspace_id: str) -> Dict[str, Any]:
+    """Delete a workspace and its uploaded documents.
+
+    This is intentionally conservative and only deletes MinIO objects
+    whose paths live under ``workspaces/{workspace_id}/``. Product-level
+    and shared documents are left untouched.
+    """
+
+    ws = get_workspace(workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+
+    docs = list_workspace_documents(workspace_id)
+    prefix = f"workspaces/{workspace_id}/"
+
+    client = get_minio_client()
+    ensure_bucket(client)
+    bucket = get_bucket_name()
+
+    deleted_objects = 0
+    owned_document_ids: List[int] = []
+
+    for d in docs:
+        object_path = d.get("object_path") or d.get("objectPath") or ""
+        doc_id = d.get("id")
+        if not object_path:
+            continue
+        if not isinstance(object_path, str):
+            object_path = str(object_path)
+
+        if not object_path.startswith(prefix):
+            logging.warning(
+                "[workspace-delete] Skipping object outside workspace prefix: workspace=%s path=%s prefix=%s",
+                workspace_id,
+                object_path,
+                prefix,
+            )
+            continue
+
+        try:
+            client.remove_object(bucket, object_path)
+            deleted_objects += 1
+        except Exception as exc:  # noqa: BLE001
+            logging.warning(
+                "[workspace-delete] Failed to delete MinIO object: workspace=%s path=%s error=%s",
+                workspace_id,
+                object_path,
+                exc,
+            )
+
+        try:
+            if isinstance(doc_id, int):
+                owned_document_ids.append(doc_id)
+            elif isinstance(doc_id, str) and doc_id.isdigit():
+                owned_document_ids.append(int(doc_id))
+        except Exception:
+            # Best-effort only; object deletion has already occurred.
+            pass
+
+    result = delete_workspace_and_documents(workspace_id, owned_document_ids=owned_document_ids)
+    if result is None:
+        raise HTTPException(status_code=503, detail="Workspace storage is not available (Postgres DSN not configured)")
+
+    return {
+        "workspaceId": workspace_id,
+        "deleted": True,
+        "deletedDocuments": int(result.get("deleted_documents") or 0),
+        "deletedObjects": int(deleted_objects),
+    }
+
+
+@app.post("/api/workspaces/{workspace_id}/documents")
+async def api_workspace_upload_document(
+    workspace_id: str,
+    file: UploadFile = File(...),
+) -> Dict[str, Any]:
+    """Upload a document into a workspace.
+
+    The file is stored in MinIO under a workspace‑scoped prefix and
+    recorded in the shared ``documents`` table with product_id set to
+    the workspace id. A separate association row links it to the
+    workspace so the understanding pipeline can treat workspaces and
+    product‑scoped documents consistently.
+    """
+
+    ws = get_workspace(workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Filename is required")
+
+    safe_name = Path(file.filename).name
+    timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+    object_name = f"workspaces/{workspace_id}/{timestamp}_{safe_name}"
+
+    client = get_minio_client()
+    ensure_bucket(client)
+    bucket = get_bucket_name()
+
+    content = await file.read()
+    size = len(content)
+    if size == 0:
+        raise HTTPException(status_code=400, detail="Empty file upload is not allowed")
+
+    import io as _io
+
+    client.put_object(
+        bucket,
+        object_name,
+        _io.BytesIO(content),
+        length=size,
+        content_type=file.content_type or "application/octet-stream",
+    )
+
+    # Record in the shared documents table, using workspace id as product_id
+    # so that the artefact is still discoverable via existing tooling when
+    # needed.
+    doc = record_document_upload(
+        product_id=workspace_id,
+        kind="workspace",
+        description=safe_name,
+        object_path=object_name,
+        object_hash=None,
+        filing_id=None,
+    )
+    if doc is None:
+        raise HTTPException(status_code=503, detail="Failed to record uploaded document in Postgres")
+
+    record_workspace_document(workspace_id, int(doc["id"]))
+
+    return {
+        "workspaceId": workspace_id,
+        "document": {
+            "id": doc["id"],
+            "kind": doc["kind"],
+            "description": doc["description"],
+            "objectPath": doc["object_path"],
+            "createdAt": doc["created_at"],
+            "filingId": doc["serff_id"],
+        },
+    }
+
+
+@app.post("/api/workspaces/{workspace_id}/analyze")
+def api_workspace_analyze(workspace_id: str) -> Dict[str, Any]:
+    """Run an understanding analysis for a workspace (MVP).
+
+    For the initial slice this is Promise‑UL‑compatible: we reuse the
+    existing Promise UL product workspace snapshot builder and treat the
+    result as the workspace snapshot. Future slices will route based on
+    inferred product type.
+    """
+
+    ws = get_workspace(workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+
+    if int(ws.get("document_count") or 0) <= 0:
+        raise HTTPException(status_code=400, detail="At least one document is required before analysis")
+
+    # For MVP we ignore workspace‑specific document content and reuse the
+    # existing Promise UL understanding pipeline.
+    try:
+        snapshot = build_product_workspace_snapshot("ICC18 P18PR UL")
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        # Mark workspace as analysis_failed and surface an error.
+        update_workspace_analysis(
+            workspace_id,
+            status="analysis_failed",
+            snapshot=ws.get("latest_snapshot_json") or {},
+        )
+        raise HTTPException(status_code=500, detail=f"Analysis failed: {exc}")
+
+    product_block = snapshot.get("product") or {}
+    compliance = (snapshot.get("complianceMatrix") or {}).get("summary") or {}
+    readiness = snapshot.get("readinessDashboard") or {}
+
+    updated = update_workspace_analysis(
+        workspace_id,
+        status="analyzed",
+        snapshot=snapshot,
+        inferred_product_name=product_block.get("name"),
+        inferred_product_code=product_block.get("code"),
+        inferred_product_type=product_block.get("type"),
+        inferred_carrier=product_block.get("carrier"),
+        inferred_filing_context=product_block.get("filingId"),
+        inferred_primary_product_code=product_block.get("code"),
+        understanding_status=readiness.get("overallStatus") or product_block.get("understandingStatus"),
+        compliance_overall_status=compliance.get("overallStatus"),
+        compliance_implemented_count=compliance.get("implemented"),
+        compliance_partial_count=compliance.get("partial"),
+        compliance_missing_count=compliance.get("missing"),
+        projection_trust_level=readiness.get("projectionTrustLevel"),
+        last_analysis_run_id=None,
+    )
+    if updated is None:
+        raise HTTPException(status_code=503, detail="Failed to persist workspace analysis result")
+
+    return {
+        "workspace": _workspace_to_api(updated),
+        "snapshot": snapshot,
+    }
 
 
 def _normalise_promise_ul_code(product_code: str) -> str:
@@ -9833,6 +10133,9 @@ def health() -> Dict[str, Any]:
         "status": "ok",
         "version": getattr(app, "version", None),
         "started_at": BUILD_STARTED_AT,
+        "git_sha": os.getenv("GIT_SHA"),
+        "build_time": os.getenv("BUILD_TIME"),
+        "image_tag": os.getenv("IMAGE_TAG"),
     }
 
 

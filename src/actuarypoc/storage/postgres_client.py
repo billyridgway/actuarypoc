@@ -3,8 +3,9 @@ from __future__ import annotations
 import os
 import time
 import json
+import uuid
 from contextlib import contextmanager
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 import psycopg
 
@@ -257,6 +258,38 @@ ALTER TABLE product_model_review_decisions
 
 ALTER TABLE product_model_review_decisions
     ADD COLUMN IF NOT EXISTS bundle_created_at timestamptz;
+
+CREATE TABLE IF NOT EXISTS workspaces (
+    id text PRIMARY KEY,
+    status text NOT NULL,
+    document_count integer NOT NULL DEFAULT 0,
+    latest_snapshot_json jsonb,
+    inferred_product_name text,
+    inferred_product_code text,
+    inferred_product_type text,
+    inferred_carrier text,
+    inferred_filing_context text,
+    inferred_primary_product_code text,
+    understanding_status text,
+    compliance_overall_status text,
+    compliance_implemented_count integer,
+    compliance_partial_count integer,
+    compliance_missing_count integer,
+    projection_trust_level text,
+    last_analysis_run_id text,
+    created_at timestamptz DEFAULT now(),
+    updated_at timestamptz DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS workspace_documents (
+    workspace_id text NOT NULL,
+    document_id bigint NOT NULL REFERENCES documents(id),
+    added_at timestamptz DEFAULT now(),
+    PRIMARY KEY (workspace_id, document_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_workspace_documents_workspace
+    ON workspace_documents(workspace_id);
 """
 
 
@@ -302,6 +335,82 @@ def ensure_schema() -> None:
                 cur.execute(_DDL)
     except Exception as exc:  # noqa: BLE001
         _note_failure(exc)
+
+
+def _workspace_row_to_dict(row: Any, include_snapshot: bool = True) -> Dict[str, Any]:
+    """Map a workspaces row to a dict.
+
+    The column order must match the SELECT clauses in the helpers below.
+    """
+
+    # When include_snapshot=True we expect latest_snapshot_json in the
+    # result set; when False we skip it to reduce payload size.
+    if include_snapshot:
+        (
+            wid,
+            status,
+            document_count,
+            latest_snapshot_json,
+            inferred_product_name,
+            inferred_product_code,
+            inferred_product_type,
+            inferred_carrier,
+            inferred_filing_context,
+            inferred_primary_product_code,
+            understanding_status,
+            compliance_overall_status,
+            compliance_implemented_count,
+            compliance_partial_count,
+            compliance_missing_count,
+            projection_trust_level,
+            last_analysis_run_id,
+            created_at,
+            updated_at,
+        ) = row
+    else:
+        (
+            wid,
+            status,
+            document_count,
+            inferred_product_name,
+            inferred_product_code,
+            inferred_product_type,
+            inferred_carrier,
+            inferred_filing_context,
+            inferred_primary_product_code,
+            understanding_status,
+            compliance_overall_status,
+            compliance_implemented_count,
+            compliance_partial_count,
+            compliance_missing_count,
+            projection_trust_level,
+            last_analysis_run_id,
+            created_at,
+            updated_at,
+        ) = row
+        latest_snapshot_json = None
+
+    return {
+        "id": wid,
+        "status": status,
+        "document_count": document_count,
+        "latest_snapshot_json": latest_snapshot_json,
+        "inferred_product_name": inferred_product_name,
+        "inferred_product_code": inferred_product_code,
+        "inferred_product_type": inferred_product_type,
+        "inferred_carrier": inferred_carrier,
+        "inferred_filing_context": inferred_filing_context,
+        "inferred_primary_product_code": inferred_primary_product_code,
+        "understanding_status": understanding_status,
+        "compliance_overall_status": compliance_overall_status,
+        "compliance_implemented_count": compliance_implemented_count,
+        "compliance_partial_count": compliance_partial_count,
+        "compliance_missing_count": compliance_missing_count,
+        "projection_trust_level": projection_trust_level,
+        "last_analysis_run_id": last_analysis_run_id,
+        "created_at": created_at,
+        "updated_at": updated_at,
+    }
 
 
 def record_assumption_set(
@@ -423,6 +532,426 @@ def record_illustration_run(
                 )
     except Exception as exc:  # noqa: BLE001
         _note_failure(exc)
+
+
+def create_workspace() -> Optional[Dict[str, Any]]:
+    """Create a new document-first workspace.
+
+    Workspaces start in the ``waiting_for_documents`` status with zero
+    documents and no analysis snapshot.
+    """
+
+    ensure_schema()
+    wid = f"ws-{uuid.uuid4().hex[:8]}"
+    try:
+        with _conn() as conn:
+            if conn is None:
+                return None
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO workspaces (id, status, document_count)
+                    VALUES (%s, %s, 0)
+                    RETURNING
+                        id,
+                        status,
+                        document_count,
+                        latest_snapshot_json,
+                        inferred_product_name,
+                        inferred_product_code,
+                        inferred_product_type,
+                        inferred_carrier,
+                        inferred_filing_context,
+                        inferred_primary_product_code,
+                        understanding_status,
+                        compliance_overall_status,
+                        compliance_implemented_count,
+                        compliance_partial_count,
+                        compliance_missing_count,
+                        projection_trust_level,
+                        last_analysis_run_id,
+                        created_at,
+                        updated_at
+                    """,
+                    (wid, "waiting_for_documents"),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                return _workspace_row_to_dict(row, include_snapshot=True)
+    except Exception as exc:  # noqa: BLE001
+        _note_failure(exc)
+        return None
+
+
+def list_workspaces() -> List[Dict[str, Any]]:
+    """Return a summary list of workspaces for the catalog view."""
+
+    ensure_schema()
+    try:
+        with _conn() as conn:
+            if conn is None:
+                return []
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        id,
+                        status,
+                        document_count,
+                        inferred_product_name,
+                        inferred_product_code,
+                        inferred_product_type,
+                        inferred_carrier,
+                        inferred_filing_context,
+                        inferred_primary_product_code,
+                        understanding_status,
+                        compliance_overall_status,
+                        compliance_implemented_count,
+                        compliance_partial_count,
+                        compliance_missing_count,
+                        projection_trust_level,
+                        last_analysis_run_id,
+                        created_at,
+                        updated_at
+                      FROM workspaces
+                  ORDER BY created_at DESC
+                    """,
+                )
+                rows = cur.fetchall() or []
+                return [_workspace_row_to_dict(r, include_snapshot=False) for r in rows]
+    except Exception as exc:  # noqa: BLE001
+        _note_failure(exc)
+        return []
+
+
+def get_workspace(workspace_id: str) -> Optional[Dict[str, Any]]:
+    """Fetch a single workspace with its latest snapshot (when present)."""
+
+    ensure_schema()
+    try:
+        with _conn() as conn:
+            if conn is None:
+                return None
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        id,
+                        status,
+                        document_count,
+                        latest_snapshot_json,
+                        inferred_product_name,
+                        inferred_product_code,
+                        inferred_product_type,
+                        inferred_carrier,
+                        inferred_filing_context,
+                        inferred_primary_product_code,
+                        understanding_status,
+                        compliance_overall_status,
+                        compliance_implemented_count,
+                        compliance_partial_count,
+                        compliance_missing_count,
+                        projection_trust_level,
+                        last_analysis_run_id,
+                        created_at,
+                        updated_at
+                      FROM workspaces
+                     WHERE id = %s
+                    """,
+                    (workspace_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                return _workspace_row_to_dict(row, include_snapshot=True)
+    except Exception as exc:  # noqa: BLE001
+        _note_failure(exc)
+        return None
+
+
+def record_workspace_document(workspace_id: str, document_id: int) -> None:
+    """Associate an existing document with a workspace and bump counts.
+
+    This also updates ``document_count`` and status when the workspace
+    was previously waiting for documents.
+    """
+
+    ensure_schema()
+    try:
+        with _conn() as conn:
+            if conn is None:
+                return
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO workspace_documents (workspace_id, document_id)
+                    VALUES (%s, %s)
+                    ON CONFLICT (workspace_id, document_id) DO NOTHING
+                    """,
+                    (workspace_id, document_id),
+                )
+                # Bump document_count and move from waiting_for_documents
+                # to ready_for_analysis when appropriate.
+                cur.execute(
+                    """
+                    UPDATE workspaces
+                       SET document_count = document_count + 1,
+                           status = CASE
+                                      WHEN status IN ('waiting_for_documents', 'analysis_failed')
+                                      THEN 'ready_for_analysis'
+                                      ELSE status
+                                    END,
+                           updated_at = now()
+                     WHERE id = %s
+                    """,
+                    (workspace_id,),
+                )
+    except Exception as exc:  # noqa: BLE001
+        _note_failure(exc)
+
+
+def list_workspace_documents(workspace_id: str) -> List[Dict[str, Any]]:
+    """Return documents associated with a workspace.
+
+    Shape mirrors list_product_documents.where possible.
+    """
+
+    ensure_schema()
+    try:
+        with _conn() as conn:
+            if conn is None:
+                return []
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT d.id,
+                           d.kind,
+                           d.description,
+                           d.object_path,
+                           d.created_at,
+                           d.serff_id
+                      FROM workspace_documents wd
+                      JOIN documents d ON d.id = wd.document_id
+                     WHERE wd.workspace_id = %s
+                  ORDER BY wd.added_at, d.created_at
+                    """,
+                    (workspace_id,),
+                )
+                rows = cur.fetchall() or []
+                out: List[Dict[str, Any]] = []
+                for r in rows:
+                    out.append(
+                        {
+                            "id": r[0],
+                            "kind": r[1],
+                            "description": r[2],
+                            "object_path": r[3],
+                            "created_at": r[4],
+                            "serff_id": r[5],
+                        }
+                    )
+                return out
+    except Exception as exc:  # noqa: BLE001
+        _note_failure(exc)
+        return []
+
+
+def update_workspace_analysis(
+    workspace_id: str,
+    *,
+    status: str,
+    snapshot: Dict[str, Any],
+    inferred_product_name: Optional[str] = None,
+    inferred_product_code: Optional[str] = None,
+    inferred_product_type: Optional[str] = None,
+    inferred_carrier: Optional[str] = None,
+    inferred_filing_context: Optional[str] = None,
+    inferred_primary_product_code: Optional[str] = None,
+    understanding_status: Optional[str] = None,
+    compliance_overall_status: Optional[str] = None,
+    compliance_implemented_count: Optional[int] = None,
+    compliance_partial_count: Optional[int] = None,
+    compliance_missing_count: Optional[int] = None,
+    projection_trust_level: Optional[str] = None,
+    last_analysis_run_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Update a workspace with the result of an analysis run."""
+
+    ensure_schema()
+    try:
+        with _conn() as conn:
+            if conn is None:
+                return None
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE workspaces
+                       SET status = %s,
+                           latest_snapshot_json = %s::jsonb,
+                           inferred_product_name = %s,
+                           inferred_product_code = %s,
+                           inferred_product_type = %s,
+                           inferred_carrier = %s,
+                           inferred_filing_context = %s,
+                           inferred_primary_product_code = %s,
+                           understanding_status = %s,
+                           compliance_overall_status = %s,
+                           compliance_implemented_count = %s,
+                           compliance_partial_count = %s,
+                           compliance_missing_count = %s,
+                           projection_trust_level = %s,
+                           last_analysis_run_id = %s,
+                           updated_at = now()
+                     WHERE id = %s
+                 RETURNING
+                        id,
+                        status,
+                        document_count,
+                        latest_snapshot_json,
+                        inferred_product_name,
+                        inferred_product_code,
+                        inferred_product_type,
+                        inferred_carrier,
+                        inferred_filing_context,
+                        inferred_primary_product_code,
+                        understanding_status,
+                        compliance_overall_status,
+                        compliance_implemented_count,
+                        compliance_partial_count,
+                        compliance_missing_count,
+                        projection_trust_level,
+                        last_analysis_run_id,
+                        created_at,
+                        updated_at
+                    """,
+                    (
+                        status,
+                        json.dumps(snapshot),
+                        inferred_product_name,
+                        inferred_product_code,
+                        inferred_product_type,
+                        inferred_carrier,
+                        inferred_filing_context,
+                        inferred_primary_product_code,
+                        understanding_status,
+                        compliance_overall_status,
+                        compliance_implemented_count,
+                        compliance_partial_count,
+                        compliance_missing_count,
+                        projection_trust_level,
+                        last_analysis_run_id,
+                        workspace_id,
+                    ),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                return _workspace_row_to_dict(row, include_snapshot=True)
+    except Exception as exc:  # noqa: BLE001
+        _note_failure(exc)
+        return None
+
+
+def delete_workspace_and_documents(
+    workspace_id: str,
+    owned_document_ids: Optional[Sequence[int]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Delete a workspace and its workspace-owned documents.
+
+    This helper performs conservative cleanup for the document-first
+    workspace flow:
+
+    - All ``workspace_documents`` links for the workspace are removed.
+    - ``documents`` rows are deleted *only* for document IDs that are
+      explicitly marked as workspace-owned by the caller *and* are not
+      referenced by any other workspace.
+    - The ``workspaces`` row itself is deleted.
+
+    The caller is responsible for performing any corresponding MinIO
+    object deletions. When Postgres is unavailable this returns
+    ``None`` instead of raising.
+    """
+
+    ensure_schema()
+    try:
+        with _conn() as conn:
+            if conn is None:
+                return None
+            with conn.cursor() as cur:
+                # Normalise and de-duplicate the candidate document IDs.
+                owned_ids: List[int] = []
+                if owned_document_ids:
+                    seen: set[int] = set()
+                    for raw in owned_document_ids:
+                        try:
+                            val = int(raw)
+                        except (TypeError, ValueError):
+                            continue
+                        if val in seen:
+                            continue
+                        seen.add(val)
+                        owned_ids.append(val)
+
+                safe_delete_ids: List[int] = []
+                if owned_ids:
+                    # Only delete documents that are *exclusively*
+                    # referenced by this workspace. Documents linked to
+                    # multiple workspaces are treated as shared and kept.
+                    cur.execute(
+                        """
+                        SELECT document_id, COUNT(*) AS ref_count
+                          FROM workspace_documents
+                         WHERE document_id = ANY(%s)
+                        GROUP BY document_id
+                        """,
+                        (owned_ids,),
+                    )
+                    rows = cur.fetchall() or []
+                    for doc_id, ref_count in rows:
+                        if int(ref_count or 0) == 1:
+                            safe_delete_ids.append(int(doc_id))
+
+                # Delete workspace_document links first to avoid FK
+                # violations when removing document rows.
+                cur.execute(
+                    """
+                    DELETE FROM workspace_documents
+                     WHERE workspace_id = %s
+                    """,
+                    (workspace_id,),
+                )
+                deleted_links = cur.rowcount or 0
+
+                deleted_docs = 0
+                if safe_delete_ids:
+                    cur.execute(
+                        """
+                        DELETE FROM documents
+                         WHERE id = ANY(%s)
+                        """,
+                        (safe_delete_ids,),
+                    )
+                    deleted_docs = cur.rowcount or 0
+
+                cur.execute(
+                    """
+                    DELETE FROM workspaces
+                     WHERE id = %s
+                    """,
+                    (workspace_id,),
+                )
+                deleted_ws = cur.rowcount or 0
+
+                return {
+                    "deleted_workspace": deleted_ws,
+                    "deleted_documents": deleted_docs,
+                    "deleted_workspace_documents": deleted_links,
+                    "safe_document_ids": safe_delete_ids,
+                }
+    except Exception as exc:  # noqa: BLE001
+        _note_failure(exc)
+        return None
 
 
 def upsert_product_review_draft(

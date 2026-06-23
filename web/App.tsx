@@ -2,12 +2,14 @@ import React from "react";
 import { AIReviewAgentPage } from "./AIReviewAgentPage";
 import { ProductWorkspacePage } from "./ProductWorkspacePage";
 import { ProductCatalogPage } from "./ProductCatalogPage";
+import { WorkspacePage } from "./WorkspacePage";
 
 export const App: React.FC = () => {
   const searchParams = new URLSearchParams(window.location.search || "");
   const view = (searchParams.get("view") || "").toLowerCase();
   const isExpert = view === "expert";
   const productFromQuery = (searchParams.get("product") || "").trim();
+  const workspaceIdFromQuery = (searchParams.get("workspace") || "").trim();
 
    // Simple pathname-based routing so that /web shows the catalog and
    // /web/product/{code} shows the product workspace. The static
@@ -42,9 +44,11 @@ export const App: React.FC = () => {
 
   const subtitle = isExpert
     ? "Expert / Debug pipeline view"
-    : workspaceProductCode
+    : workspaceIdFromQuery
       ? "Product Understanding Workspace"
-      : "Product Catalog";
+      : workspaceProductCode
+        ? "Product Understanding Workspace"
+        : "Workspace Catalog";
 
   return (
     <div className="app-shell">
@@ -55,6 +59,8 @@ export const App: React.FC = () => {
       <main className="app-shell__main">
         {isExpert ? (
           <AIReviewAgentPage />
+        ) : workspaceIdFromQuery ? (
+          <WorkspacePage workspaceId={workspaceIdFromQuery} />
         ) : workspaceProductCode ? (
           <ProductWorkspacePage productCode={workspaceProductCode} />
         ) : (

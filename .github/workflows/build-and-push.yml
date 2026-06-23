@@ -27,6 +27,12 @@ jobs:
           SAFE_REF="${GITHUB_REF_NAME//\//-}"
           echo "ref_sanitized=${SAFE_REF}" >> "$GITHUB_OUTPUT"
 
+      - name: Compute build metadata
+        id: meta
+        run: |
+          echo "git_sha=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -46,6 +52,10 @@ jobs:
           context: .
           push: true
           platforms: linux/amd64,linux/arm64
+          build-args: |
+            GIT_SHA=${{ steps.meta.outputs.git_sha }}
+            BUILD_TIME=${{ steps.meta.outputs.build_time }}
+            IMAGE_TAG=${{ steps.vars.outputs.ref_sanitized }}
           tags: |
             ghcr.io/${{ github.repository_owner }}/actuarypoc:latest
             ghcr.io/${{ github.repository_owner }}/actuarypoc:${{ steps.vars.outputs.ref_sanitized }}

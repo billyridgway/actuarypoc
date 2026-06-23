@@ -196,9 +196,12 @@ const formatProjectionTrustLevel = (value?: string | null): string => {
   }
 };
 
-export const ProductWorkspacePage: React.FC<{ productCode: string }> = ({ productCode }) => {
-  const [data, setData] = React.useState<WorkspacePayload | null>(null);
-  const [loading, setLoading] = React.useState<boolean>(true);
+export const ProductWorkspacePage: React.FC<{ productCode?: string; snapshot?: WorkspacePayload | null }> = ({
+  productCode,
+  snapshot,
+}) => {
+  const [data, setData] = React.useState<WorkspacePayload | null>(snapshot ?? null);
+  const [loading, setLoading] = React.useState<boolean>(!snapshot);
   const [error, setError] = React.useState<string | null>(null);
   const [uploadingId, setUploadingId] = React.useState<string | null>(null);
   const [uploadMessage, setUploadMessage] = React.useState<string | null>(null);
@@ -211,6 +214,20 @@ export const ProductWorkspacePage: React.FC<{ productCode: string }> = ({ produc
   const [showDocuments, setShowDocuments] = React.useState<boolean>(false);
 
   React.useEffect(() => {
+    if (snapshot) {
+      // When a snapshot is provided (workspace-based view), we skip the
+      // product-code fetch entirely.
+      setData(snapshot);
+      setLoading(false);
+      return;
+    }
+
+    if (!productCode) {
+      setError("Product code is required for this view.");
+      setLoading(false);
+      return;
+    }
+
     let cancelled = false;
 
     const load = async () => {
@@ -262,7 +279,7 @@ export const ProductWorkspacePage: React.FC<{ productCode: string }> = ({ produc
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [productCode, snapshot]);
 
   const product = data?.product;
   const mechanicsSummary = data?.mechanics?.summary;

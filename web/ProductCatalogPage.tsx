@@ -1,32 +1,39 @@
 import React from "react";
 
-interface CatalogProduct {
-  productCode: string;
-  productName?: string;
-  productType?: string;
-  carrier?: string;
-  understandingStatus?: string;
-  documentCount?: number | null;
-  projectionAvailable?: boolean;
-  workspaceAvailable?: boolean;
-  complianceStatus?: string;
+interface CatalogWorkspace {
+  id: string;
+  status: string;
+  documentCount: number;
+  inferredProductName?: string | null;
+  inferredProductType?: string | null;
+  inferredCarrier?: string | null;
+  complianceStatus?: string | null;
   complianceImplemented?: number | null;
   compliancePartial?: number | null;
   complianceMissing?: number | null;
-  reviewEndpoint?: string | null;
+  projectionTrustLevel?: string | null;
 }
 
-interface ProductsResponse {
-  products?: any[];
+interface WorkspacesResponse {
+  workspaces?: any[];
 }
 
-const normaliseUnderstandingLabel = (value?: string | null): string => {
+const formatWorkspaceStatus = (value?: string | null): string => {
   const v = (value || "").toLowerCase();
-  if (!v) return "Unknown";
-  if (v === "green") return "Green";
-  if (v === "yellow") return "Yellow";
-  if (v === "red") return "Red";
-  return value || "Unknown";
+  switch (v) {
+    case "waiting_for_documents":
+      return "Waiting For Documents";
+    case "ready_for_analysis":
+      return "Ready For Analysis";
+    case "analyzing":
+      return "Analyzing";
+    case "analyzed":
+      return "Analyzed";
+    case "analysis_failed":
+      return "Analysis Failed";
+    default:
+      return "Unknown";
+  }
 };
 
 const normaliseComplianceLabel = (value?: string | null): string => {
@@ -39,7 +46,7 @@ const normaliseComplianceLabel = (value?: string | null): string => {
 };
 
 export const ProductCatalogPage: React.FC = () => {
-  const [products, setProducts] = React.useState<CatalogProduct[]>([]);
+  const [workspaces, setWorkspaces] = React.useState<CatalogWorkspace[]>([]);
   const [loading, setLoading] = React.useState<boolean>(true);
   const [error, setError] = React.useState<string | null>(null);
 
@@ -50,41 +57,39 @@ export const ProductCatalogPage: React.FC = () => {
       try {
         setLoading(true);
         setError(null);
-        const resp = await fetch("/api/products");
+        const resp = await fetch("/api/workspaces");
         if (!resp.ok) {
           const text = await resp.text();
           throw new Error(text || `HTTP ${resp.status}`);
         }
-        const body: ProductsResponse = await resp.json();
-        const raw = body.products || [];
+        const body: WorkspacesResponse = await resp.json();
+        const raw = body.workspaces || [];
         if (!Array.isArray(raw)) {
-          if (!cancelled) setProducts([]);
+          if (!cancelled) setWorkspaces([]);
           return;
         }
 
-        const mapped: CatalogProduct[] = raw.map((p: any) => {
-          const compliance = p.complianceSummary || {};
+        const mapped: CatalogWorkspace[] = raw.map((w: any) => {
           return {
-            productCode: String(p.productCode || "").toUpperCase(),
-            productName: p.productName,
-            productType: p.productType,
-            carrier: p.carrier,
-            understandingStatus: p.understandingStatus,
-            documentCount: typeof p.documentCount === "number" ? p.documentCount : null,
-            projectionAvailable: Boolean(p.projectionAvailable),
-            workspaceAvailable: Boolean(p.workspaceAvailable),
-            complianceStatus: compliance.overallStatus || null,
+            id: String(w.id || "").toLowerCase(),
+            status: String(w.status || "unknown"),
+            documentCount:
+              typeof w.documentCount === "number" ? w.documentCount : Number(w.documentCount || 0),
+            inferredProductName: w.inferredProductName ?? null,
+            inferredProductType: w.inferredProductType ?? null,
+            inferredCarrier: w.inferredCarrier ?? null,
+            complianceStatus: w.complianceStatus ?? null,
             complianceImplemented:
-              typeof compliance.implemented === "number" ? compliance.implemented : null,
+              typeof w.complianceImplemented === "number" ? w.complianceImplemented : null,
             compliancePartial:
-              typeof compliance.partial === "number" ? compliance.partial : null,
+              typeof w.compliancePartial === "number" ? w.compliancePartial : null,
             complianceMissing:
-              typeof compliance.missing === "number" ? compliance.missing : null,
-            reviewEndpoint: p.reviewEndpoint ?? null,
+              typeof w.complianceMissing === "number" ? w.complianceMissing : null,
+            projectionTrustLevel: w.projectionTrustLevel ?? null,
           };
         });
 
-        if (!cancelled) setProducts(mapped);
+        if (!cancelled) setWorkspaces(mapped);
       } catch (err: any) {
         if (!cancelled) setError(err?.message || "Failed to load products.");
       } finally {
@@ -98,64 +103,98 @@ export const ProductCatalogPage: React.FC = () => {
     };
   }, []);
 
-  const hasProducts = products.length > 0;
+  const hasWorkspaces = workspaces.length > 0;
+
+  const handleDeleteWorkspace = async (id: string) => {
+    const confirmed = window.confirm(
+      "This will permanently delete the workspace and uploaded documents from object storage. This cannot be undone.",
+    );
+    if (!confirmed) return;
+
+    try {
+      const resp = await fetch(`/api/workspaces/${encodeURIComponent(id)}`, { method: "DELETE" });
+      if (!resp.ok) {
+        const text = await resp.text();
+        throw new Error(text || `Delete failed with status ${resp.status}`);
+      }
+
+      // Optimistically remove from local state; a refresh will also
+      // reflect the deletion.
+      setWorkspaces((prev) => prev.filter((w) => w.id !== id));
+    } catch (err: any) {
+      setError(err?.message || "Failed to delete workspace.");
+    }
+  };
 
   return (
     <div className="home-page">
       <section className="card home-card">
-        <h2>Product Catalog</h2>
+        <h2>Workspace Catalog</h2>
         <p className="muted">
-          Select a product to open its Product Understanding Workspace, or use Expert / Debug mode for detailed
-          pipeline control.
+          Create a product workspace, upload filings, and then analyze the product. Use Expert / Debug mode for
+          detailed pipeline control.
+        </p>
+        <p>
+          <button
+            type="button"
+            className="button"
+            onClick={async () => {
+              try {
+                setError(null);
+                const resp = await fetch("/api/workspaces", { method: "POST" });
+                if (!resp.ok) {
+                  const text = await resp.text();
+                  throw new Error(text || `HTTP ${resp.status}`);
+                }
+                const body = await resp.json();
+                const ws = body.workspace;
+                if (ws && ws.id) {
+                  window.location.href = `/web?workspace=${encodeURIComponent(ws.id)}`;
+                }
+              } catch (err: any) {
+                setError(err?.message || "Failed to create workspace.");
+              }
+            }}
+          >
+            Create Workspace
+          </button>
         </p>
         {loading && <p className="muted">Loading products…</p>}
         {error && !loading && <p className="error">{error}</p>}
-        {!loading && !error && !hasProducts && (
-          <p className="muted">No products are registered yet. Use the Add Product card below to start onboarding.</p>
+        {!loading && !error && !hasWorkspaces && (
+          <p className="muted">No workspaces exist yet. Click Create Workspace to get started.</p>
         )}
 
-        {hasProducts && (
+        {hasWorkspaces && (
           <div className="catalog-grid">
-            {products.map((p) => {
-              const name = p.productName || p.productCode;
-              const type = p.productType || "(type not set)";
-              const understanding = normaliseUnderstandingLabel(p.understandingStatus);
-              const docCountLabel =
-                typeof p.documentCount === "number" ? String(p.documentCount) : "(unknown)";
-              const projectionLabel = p.projectionAvailable ? "Available" : "Not available";
-              const complianceLabel = normaliseComplianceLabel(p.complianceStatus);
+            {workspaces.map((w) => {
+              const statusLabel = formatWorkspaceStatus(w.status);
+              const docCountLabel = String(w.documentCount ?? 0);
+              const complianceLabel = normaliseComplianceLabel(w.complianceStatus);
+              const projectionLabel = w.projectionTrustLevel
+                ? normaliseComplianceLabel(w.projectionTrustLevel)
+                : "Unknown";
+              const name = w.inferredProductName || "(Not analyzed yet)";
+              const type = w.inferredProductType || "(unknown)";
+              const carrier = w.inferredCarrier || "(unknown)";
 
-              const workspaceHref = `/web?product=${encodeURIComponent(p.productCode)}`;
-              const canOpenWorkspace = Boolean(p.workspaceAvailable);
-              const canOpenExpert = !canOpenWorkspace && !!p.reviewEndpoint;
-
-              let ctaLabel = "Workspace coming soon";
-              let ctaHref: string | undefined;
-              let ctaDisabled = true;
-
-              if (canOpenWorkspace) {
-                ctaLabel = "Open workspace";
-                ctaHref = workspaceHref;
-                ctaDisabled = false;
-              } else if (canOpenExpert) {
-                ctaLabel = "Open Expert / Trust Surface";
-                ctaHref = p.reviewEndpoint || undefined;
-                ctaDisabled = false;
-              }
+              const href = `/web?workspace=${encodeURIComponent(w.id)}`;
 
               return (
-                <div key={p.productCode} className="card home-card">
+                <div key={w.id} className="card home-card">
                   <h3>{name}</h3>
                   <p className="muted">
-                    <strong>Code:</strong> {p.productCode}
+                    <strong>Workspace:</strong> {w.id}
                     <br />
                     <strong>Type:</strong> {type}
+                    <br />
+                    <strong>Carrier:</strong> {carrier}
                   </p>
                   <table className="kv-table">
                     <tbody>
                       <tr>
-                        <th>Understanding</th>
-                        <td>{understanding}</td>
+                        <th>Status</th>
+                        <td>{statusLabel}</td>
                       </tr>
                       <tr>
                         <th>Documents</th>
@@ -169,25 +208,28 @@ export const ProductCatalogPage: React.FC = () => {
                         <th>Compliance</th>
                         <td>
                           {complianceLabel}
-                          {p.complianceImplemented != null && (
-                            <span className="muted">{` - Impl: ${p.complianceImplemented}, Part: ${
-                              p.compliancePartial ?? 0
-                            }, Miss: ${p.complianceMissing ?? 0}`}</span>
+                          {w.complianceImplemented != null && (
+                            <span className="muted">{` - Impl: ${w.complianceImplemented}, Part: ${
+                              w.compliancePartial ?? 0
+                            }, Miss: ${w.complianceMissing ?? 0}`}</span>
                           )}
                         </td>
                       </tr>
                     </tbody>
                   </table>
                   <p>
-                    {ctaHref ? (
-                      <a href={ctaHref} className="button">
-                        {ctaLabel}
-                      </a>
-                    ) : (
-                      <button className="button" disabled={ctaDisabled}>
-                        {ctaLabel}
-                      </button>
-                    )}
+                    <a href={href} className="button">
+                      Open workspace
+                    </a>
+                  </p>
+                  <p>
+                    <button
+                      type="button"
+                      className="button button-secondary"
+                      onClick={() => handleDeleteWorkspace(w.id)}
+                    >
+                      Delete workspace
+                    </button>
                   </p>
                 </div>
               );
@@ -197,32 +239,12 @@ export const ProductCatalogPage: React.FC = () => {
       </section>
 
       <section className="card home-card">
-        <h2>Add Product</h2>
+        <h2>Add Workspace (coming soon)</h2>
         <p className="muted">
-          This is a placeholder for the future onboarding flow. Upload key filings and enter basic product metadata to
-          register a new product in the catalog.
+          This is a placeholder for future workspace templates and cloning. For now, use Create Workspace above and
+          upload filing documents directly.
         </p>
-        <div className="add-product-form">
-          <div className="form-row">
-            <label>
-              Product code
-              <input type="text" placeholder="e.g. P12TRF" disabled />
-            </label>
-          </div>
-          <div className="form-row">
-            <label>
-              Product name
-              <input type="text" placeholder="e.g. Pacific Life ICC12 P12TRF Term" disabled />
-            </label>
-          </div>
-          <div className="form-row">
-            <label className="button button-secondary">
-              Upload filings (coming soon)
-              <input type="file" multiple style={{ display: "none" }} disabled />
-            </label>
-          </div>
-          <p className="muted">Storing new products and filings is not yet wired in this slice.</p>
-        </div>
+        <div className="add-product-form" />
       </section>
     </div>
   );

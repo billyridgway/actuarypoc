@@ -1,7 +1,14 @@
 FROM python:3.11-slim
 
+ARG GIT_SHA=unknown
+ARG BUILD_TIME=unknown
+ARG IMAGE_TAG=unknown
+
 ENV DAGSTER_HOME=/opt/dagster/dagster_home \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    GIT_SHA=${GIT_SHA} \
+    BUILD_TIME=${BUILD_TIME} \
+    IMAGE_TAG=${IMAGE_TAG}
 
 WORKDIR /opt/dagster/app
 
