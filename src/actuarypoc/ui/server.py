@@ -4790,6 +4790,124 @@ def build_product_workspace_snapshot(product_code: str) -> Dict[str, Any]:
     else:
         overall_status = "green"
 
+    # --- Product Readiness Dashboard -----------------------------------------
+
+    # Overall understanding status mirrors the compliance colour for now,
+    # but is kept as a distinct field for future expansion.
+    overall_understanding_status = overall_status
+
+    # Human-readable explanation derived from counts and overall status.
+    if overall_status == "green":
+        readiness_explanation = (
+            "All high-impact filed requirements appear implemented; the current workspace "
+            "understanding is strong for review and comparison."
+        )
+    elif overall_status == "yellow":
+        readiness_explanation = (
+            "At least one high-impact requirement remains partially implemented; the workspace "
+            "is suitable for draft review but not yet filed-rate ready."
+        )
+    elif overall_status == "red":
+        readiness_explanation = (
+            "At least one high-impact requirement is missing; the workspace is not yet ready "
+            "for formal review or filed-rate comparisons."
+        )
+    else:
+        readiness_explanation = (
+            "Compliance status is unknown; treat projections as exploratory until requirements "
+            "and evidence are reviewed."
+        )
+
+    # Projection trust level from illustration presence and compliance colour.
+    # Levels: exploration_only | draft_illustration | review_ready | filed_rate_ready
+    if projection_snapshot is None:
+        projection_trust_level = "exploration_only"
+    else:
+        if has_high_missing:
+            projection_trust_level = "exploration_only"
+        elif has_high_partial or missing_count > 0:
+            projection_trust_level = "draft_illustration"
+        elif partial_count > 0:
+            projection_trust_level = "review_ready"
+        else:
+            projection_trust_level = "filed_rate_ready"
+
+    # Critical issues: high-impact requirements that are missing or partial,
+    # plus medium-impact missing items. These drive the dashboard list.
+    critical_issues: List[Dict[str, Any]] = []
+    for r in compliance_requirements:
+        status = str(r.get("status") or "").lower()
+        impact = str(r.get("impact") or "").lower()
+        rid = str(r.get("id") or "")
+        if not rid:
+            continue
+        include = False
+        if impact == "high" and status in {"missing", "partial"}:
+            include = True
+        elif impact == "medium" and status == "missing":
+            include = True
+        if not include:
+            continue
+        critical_issues.append(
+            {
+                "id": rid,
+                "name": r.get("name"),
+                "status": status,
+                "impact": impact,
+            }
+        )
+
+    # Recommended next action: choose the highest-leverage requirement to
+    # resolve, with a Promise‑UL‑specific mapping for clearer labels.
+    recommended_next_action = None
+    # Prefer high-impact missing, then high-impact partial, then medium-impact missing.
+    def _pick_requirement(predicate) -> Optional[Dict[str, Any]]:
+        for r in compliance_requirements:
+            if predicate(r):
+                return r
+        return None
+
+    cand = _pick_requirement(
+        lambda r: str(r.get("impact") or "").lower() == "high"
+        and str(r.get("status") or "").lower() == "missing"
+    )
+    if cand is None:
+        cand = _pick_requirement(
+            lambda r: str(r.get("impact") or "").lower() == "high"
+            and str(r.get("status") or "").lower() == "partial"
+        )
+    if cand is None:
+        cand = _pick_requirement(
+            lambda r: str(r.get("impact") or "").lower() == "medium"
+            and str(r.get("status") or "").lower() == "missing"
+        )
+
+    if cand is not None:
+        rid = str(cand.get("id") or "")
+        if rid == "coi_table":
+            recommended_next_action = "Upload COI rate table."
+        elif rid == "policy_admin_fees":
+            recommended_next_action = "Upload policy/admin fee schedule."
+        elif rid == "surrender_schedule":
+            recommended_next_action = "Upload filed surrender charge schedule."
+        else:
+            # Generic fallback.
+            recommended_next_action = f"Resolve requirement: {cand.get('name') or rid}."
+
+    readiness_dashboard = {
+        "overallStatus": overall_understanding_status,
+        "overallExplanation": readiness_explanation,
+        "complianceSummary": {
+            "implemented": implemented_count,
+            "partial": partial_count,
+            "missing": missing_count,
+            "overallStatus": overall_status,
+        },
+        "projectionTrustLevel": projection_trust_level,
+        "criticalIssues": critical_issues,
+        "recommendedNextAction": recommended_next_action,
+    }
+
     # --- PMR / readiness summary (when available) ------------------------------
     readiness_status = "no_review"
     readiness_messages: List[str] = []
@@ -4845,6 +4963,7 @@ def build_product_workspace_snapshot(product_code: str) -> Dict[str, Any]:
         "assumptions": {
             "provenance": assumptions_payload,
         },
+        "readinessDashboard": readiness_dashboard,
         "complianceMatrix": {
             "summary": compliance_summary,
             "requirements": compliance_requirements,

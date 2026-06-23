@@ -53,6 +53,24 @@ interface WorkspacePayload {
   assumptions?: {
     provenance?: WorkspaceAssumption[];
   };
+  readinessDashboard?: {
+    overallStatus?: string;
+    overallExplanation?: string;
+    complianceSummary?: {
+      implemented?: number;
+      partial?: number;
+      missing?: number;
+      overallStatus?: string;
+    };
+    projectionTrustLevel?: string;
+    criticalIssues?: Array<{
+      id: string;
+      name?: string;
+      status?: string;
+      impact?: string;
+    }>;
+    recommendedNextAction?: string | null;
+  };
   complianceMatrix?: {
     summary?: {
       implemented?: number;
@@ -162,6 +180,22 @@ const formatStatusLabel = (value?: string | null): string => {
     .join(" ");
 };
 
+const formatProjectionTrustLevel = (value?: string | null): string => {
+  const v = (value || "").toLowerCase();
+  switch (v) {
+    case "exploration_only":
+      return "Exploration Only";
+    case "draft_illustration":
+      return "Draft Illustration";
+    case "review_ready":
+      return "Review Ready";
+    case "filed_rate_ready":
+      return "Filed-Rate Ready";
+    default:
+      return "Unknown";
+  }
+};
+
 export const ProductWorkspacePage: React.FC<{ productCode: string }> = ({ productCode }) => {
   const [data, setData] = React.useState<WorkspacePayload | null>(null);
   const [loading, setLoading] = React.useState<boolean>(true);
@@ -228,6 +262,7 @@ export const ProductWorkspacePage: React.FC<{ productCode: string }> = ({ produc
   const assumptions = data?.assumptions?.provenance ?? [];
   const evidenceItems = data?.evidence?.items ?? [];
   const compliance = data?.complianceMatrix;
+  const readiness = data?.readinessDashboard;
   const gaps = data?.gaps;
   const illustration = data?.illustration;
   const mechanicsExplanation = data?.mechanicsExplanation;
@@ -374,6 +409,68 @@ export const ProductWorkspacePage: React.FC<{ productCode: string }> = ({ produc
         {loading && <p className="muted">Loading product workspace…</p>}
         {error && !loading && <p className="error">{error}</p>}
       </header>
+
+      <section className="card home-card">
+        <h2>Product Readiness Dashboard</h2>
+        <p className="muted">
+          Quick view of how complete the current understanding is, whether you can trust the projection, and what
+          should happen next.
+        </p>
+        {readiness ? (
+          <>
+            <h3>Overall Understanding Status</h3>
+            <p>
+              <strong>Status:</strong>{" "}
+              <span
+                className={`tag tag--understanding-${(readiness.overallStatus || "unknown").toLowerCase()}`}
+              >
+                {formatStatusLabel(readiness.overallStatus || "unknown")}
+              </span>
+            </p>
+            {readiness.overallExplanation && <p className="muted">{readiness.overallExplanation}</p>}
+
+            <h3>Compliance Summary</h3>
+            <p>
+              {readiness.complianceSummary
+                ? `Implemented: ${readiness.complianceSummary.implemented ?? 0}, Partial: ${
+                    readiness.complianceSummary.partial ?? 0
+                  }, Missing: ${readiness.complianceSummary.missing ?? 0}`
+                : "Compliance summary is not available yet for this product."}
+            </p>
+
+            <h3>Projection Trust Level</h3>
+            <p>
+              <strong>Level:</strong> {formatProjectionTrustLevel(readiness.projectionTrustLevel || "unknown")}
+            </p>
+
+            <h3>Critical Missing Requirements</h3>
+            {readiness.criticalIssues && readiness.criticalIssues.length > 0 ? (
+              <ul className="muted">
+                {readiness.criticalIssues.map((ci) => (
+                  <li key={ci.id}>
+                    {(ci.name || ci.id) + " – " + formatStatusLabel(ci.status || "unknown") + " (" +
+                      formatStatusLabel(ci.impact || "unknown") + " impact)"}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="muted">No critical missing or partial high-impact requirements identified.</p>
+            )}
+
+            <h3>Recommended Next Action</h3>
+            <p className="muted">
+              {readiness.recommendedNextAction ||
+                "Review the compliance matrix and evidence to decide the next best action for this product."}
+            </p>
+          </>
+        ) : (
+          <p className="muted">
+            {loading
+              ? "Loading readiness dashboard…"
+              : "Readiness dashboard is not available yet for this product. Use Expert / Debug mode for more detail."}
+          </p>
+        )}
+      </section>
 
       <section className="card home-card">
         <h2>Product Understanding Summary</h2>
