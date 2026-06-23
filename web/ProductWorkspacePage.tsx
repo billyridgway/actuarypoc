@@ -276,36 +276,9 @@ export const ProductWorkspacePage: React.FC<{ productCode: string }> = ({ produc
   const pmr = data?.pmrReadiness;
 
   const gapItems = gaps?.items ?? [];
-
-  // Derive a simple high-level understanding status from current
-  // mechanics, illustration, and gap items. This is intentionally
-  // conservative and uses only existing workspace data.
-  const hasMaterialGaps = gapItems.some((g) => {
-    const sev = (g.severity || "").toLowerCase();
-    return sev === "high" || sev === "medium";
-  });
-
-  let understandingStatusLevel: "green" | "yellow" | "red" | "unknown" = "unknown";
-  let understandingStatusLabel = "Understanding status is unknown.";
-
-  if (illustration && mechanicsSummary) {
-    if (hasMaterialGaps) {
-      understandingStatusLevel = "yellow";
-      understandingStatusLabel = "Draft understanding available with material gaps.";
-    } else {
-      understandingStatusLevel = "green";
-      understandingStatusLabel = "Understanding appears substantially complete.";
-    }
-  } else {
-    understandingStatusLevel = "red";
-    understandingStatusLabel = "Major information is missing; understanding is incomplete.";
-  }
-
-  // Promise UL currently has an illustration plus known gaps, so this
-  // resolves to yellow in practice.
-
-  // Build a short, deterministic overview paragraph from existing
-  // product and mechanics data.
+  // Build a short, deterministic product description from existing
+  // product and mechanics data. Detailed readiness, compliance, and
+  // projection narratives live in the dedicated cards below.
   const overviewParts: string[] = [];
   if (product) {
     const name = product.name || product.code || "This product";
@@ -338,67 +311,7 @@ export const ProductWorkspacePage: React.FC<{ productCode: string }> = ({ produc
     }
   }
 
-  if (illustration) {
-    overviewParts.push(
-      "A draft illustration projection is available based on the currently discovered mechanics and assumptions.",
-    );
-  } else {
-    overviewParts.push(
-      "A draft illustration projection is not yet available; mechanics and assumptions are still being assembled.",
-    );
-  }
-
   const overviewText = overviewParts.join(" ");
-
-  // Key mechanics bullets for quick scanning.
-  const keyMechanics: string[] = [];
-  if (mechanicsSummary?.deathBenefitOption) {
-    keyMechanics.push(
-      mechanicsSummary.deathBenefitOption.toLowerCase() === "level"
-        ? "Level death benefit option"
-        : `Death benefit option: ${mechanicsSummary.deathBenefitOption}`,
-    );
-  }
-  if (mechanicsSummary?.interestCrediting) {
-    keyMechanics.push(mechanicsSummary.interestCrediting);
-  }
-  if (mechanicsSummary?.coiApproach) {
-    keyMechanics.push(mechanicsSummary.coiApproach);
-  }
-  if (mechanicsSummary?.surrenderMechanics) {
-    keyMechanics.push(mechanicsSummary.surrenderMechanics);
-  }
-
-  // Highest-severity gaps for the summary view.
-  const severityRank = (s?: string): number => {
-    const v = (s || "").toLowerCase();
-    if (v === "high") return 3;
-    if (v === "medium") return 2;
-    if (v === "low") return 1;
-    return 0;
-  };
-
-  const majorGaps = [...gapItems].sort((a, b) => severityRank(b.severity) - severityRank(a.severity)).slice(0, 3);
-
-  // Projection readiness narrative based on illustration presence and
-  // known gaps.
-  let projectionReadiness = "Projection readiness is unknown.";
-  if (illustration) {
-    const hasCoiGap = gapItems.some((g) => g.id === "missing_coi_table");
-    const hasSurrGap = gapItems.some((g) => g.id === "surrender_schedule_placeholder");
-    const hasFeeGap = gapItems.some((g) => g.id === "policy_admin_fee_missing");
-
-    if (hasCoiGap || hasSurrGap || hasFeeGap) {
-      projectionReadiness =
-        "Draft projection available. Projection currently relies on placeholder COI rates, simplified surrender mechanics, and/or missing fee schedules and should not be considered filed-rate compliant.";
-    } else {
-      projectionReadiness =
-        "Draft projection available. This surface is intended for product understanding and should not be treated as a filed-rate projection.";
-    }
-  } else {
-    projectionReadiness =
-      "No draft projection is currently available; projection readiness cannot yet be assessed from this workspace.";
-  }
 
   return (
     <div className="home-page">
@@ -527,40 +440,6 @@ export const ProductWorkspacePage: React.FC<{ productCode: string }> = ({ produc
       <section className="card home-card">
         <h2>Product Understanding Summary</h2>
         <p>{overviewText}</p>
-        <div className="summary-status">
-          <strong>Current understanding status: </strong>
-          <span className={`tag tag--understanding-${understandingStatusLevel}`}>
-            {understandingStatusLevel === "unknown" ? "UNKNOWN" : understandingStatusLevel.toUpperCase()}
-          </span>
-          <span className="muted" style={{ marginLeft: "0.5rem" }}>
-            {understandingStatusLabel}
-          </span>
-        </div>
-
-        {keyMechanics.length > 0 && (
-          <>
-            <h3>Key mechanics discovered</h3>
-            <ul>
-              {keyMechanics.map((m, idx) => (
-                <li key={idx}>{m}</li>
-              ))}
-            </ul>
-          </>
-        )}
-
-        {majorGaps.length > 0 && (
-          <>
-            <h3>Major gaps</h3>
-            <ul>
-              {majorGaps.map((g) => (
-                <li key={g.id}>{g.title}</li>
-              ))}
-            </ul>
-          </>
-        )}
-
-        <h3>Projection readiness</h3>
-        <p className="muted">{projectionReadiness}</p>
       </section>
 
       <section className="card home-card">

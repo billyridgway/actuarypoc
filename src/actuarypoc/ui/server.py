@@ -487,6 +487,51 @@ class ProductMechanicsApproveRequest(BaseModel):  # type: ignore[misc]
     mechanics: List[Dict[str, Any]]
 
 
+class RequirementEvaluationEvent(BaseModel):  # type: ignore[misc]
+    """Design stub: lifecycle event for a single compliance requirement.
+
+    This is not yet persisted or exposed via API, but captures the
+    fields we expect a future requirement re-evaluation pipeline to
+    record so the Compliance Matrix can become a living artefact
+    instead of a one-shot report.
+
+    A future re-evaluation flow would:
+      - receive a request describing which documents/evidence changed,
+      - re-run the understanding pipeline for affected products, and
+      - emit one RequirementEvaluationEvent per impacted requirement.
+    """
+
+    productCode: str
+    requirementId: str
+    previousStatus: Optional[str] = None  # implemented | partial | missing | unknown
+    newStatus: str
+    affectedEvidenceIds: List[str] = []  # e.g. ["coi_rates", "surrender_schedule"]
+    triggeredBy: str  # "manual" | "pipeline" | "upload_support_document"
+    runId: Optional[str] = None  # understanding/pipeline run identifier
+    createdAt: Optional[str] = None  # ISO-8601 timestamp
+    note: Optional[str] = None
+
+
+class RequirementReevaluationRequest(BaseModel):  # type: ignore[misc]
+    """Design stub: request shape for requirement re-evaluation.
+
+    A future endpoint such as
+      POST /api/product-workspace/{product_code}/requirements/re-evaluate
+    could accept this payload, re-run the understanding pipeline for the
+    given product, and then refresh the Compliance Matrix + Readiness
+    Dashboard in place.
+    """
+
+    productCode: str
+    # Optional: explicit subset of requirement IDs to re-evaluate.
+    requirementIds: Optional[List[str]] = None
+    # Optional: hints about what changed so the engine can scope work.
+    changedDocumentIds: Optional[List[int]] = None
+    changedEvidenceIds: Optional[List[str]] = None
+    # Optional free-form note from the actuary / caller.
+    note: Optional[str] = None
+
+
 class ProductRegistrationRequest(BaseModel):  # type: ignore[misc]
     reviewer: Optional[str] = None
     notes: Optional[str] = None
