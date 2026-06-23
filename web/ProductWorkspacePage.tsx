@@ -202,6 +202,13 @@ export const ProductWorkspacePage: React.FC<{ productCode: string }> = ({ produc
   const [error, setError] = React.useState<string | null>(null);
   const [uploadingId, setUploadingId] = React.useState<string | null>(null);
   const [uploadMessage, setUploadMessage] = React.useState<string | null>(null);
+  const [dashboardUploading, setDashboardUploading] = React.useState<boolean>(false);
+  const [dashboardUploadMessage, setDashboardUploadMessage] = React.useState<string | null>(null);
+  const [showEvidence, setShowEvidence] = React.useState<boolean>(false);
+  const [showMechanics, setShowMechanics] = React.useState<boolean>(false);
+  const [showAssumptions, setShowAssumptions] = React.useState<boolean>(false);
+  const [showGapWarnings, setShowGapWarnings] = React.useState<boolean>(false);
+  const [showDocuments, setShowDocuments] = React.useState<boolean>(false);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -462,6 +469,51 @@ export const ProductWorkspacePage: React.FC<{ productCode: string }> = ({ produc
               {readiness.recommendedNextAction ||
                 "Review the compliance matrix and evidence to decide the next best action for this product."}
             </p>
+            {readiness.recommendedNextAction === "Upload COI rate table." && (
+              <div className="next-action">
+                <label className="button">
+                  {dashboardUploading ? "Uploading COI rate table…" : "Upload COI rate table"}
+                  <input
+                    type="file"
+                    style={{ display: "none" }}
+                    disabled={dashboardUploading}
+                    onChange={async (event: React.ChangeEvent<HTMLInputElement>) => {
+                      const file = event.target.files && event.target.files[0];
+                      if (!file) return;
+                      setDashboardUploading(true);
+                      setDashboardUploadMessage(null);
+                      try {
+                        const form = new FormData();
+                        form.append("file", file);
+                        const dashProductCode = product?.code || productCode || "ICC18 P18PR UL";
+                        const resp = await fetch(
+                          `/api/product-assumptions/${encodeURIComponent(dashProductCode)}/support`,
+                          {
+                            method: "POST",
+                            body: form,
+                          },
+                        );
+                        if (!resp.ok) {
+                          const text = await resp.text();
+                          throw new Error(text || `Upload failed with status ${resp.status}`);
+                        }
+                        setDashboardUploadMessage(
+                          "Uploaded. Use Expert / Debug mode to rerun the pipeline until workspace rerun is wired.",
+                        );
+                      } catch (e: any) {
+                        setDashboardUploadMessage(e?.message || "Upload failed.");
+                      } finally {
+                        setDashboardUploading(false);
+                        if (event.target) {
+                          event.target.value = "";
+                        }
+                      }
+                    }}
+                  />
+                </label>
+                {dashboardUploadMessage && <p className="muted">{dashboardUploadMessage}</p>}
+              </div>
+            )}
           </>
         ) : (
           <p className="muted">
@@ -553,58 +605,69 @@ export const ProductWorkspacePage: React.FC<{ productCode: string }> = ({ produc
           Traceability from filings and assumptions to the mechanics used in this workspace. This helps explain why the
           system believes the product behaves the way it does.
         </p>
-        {evidenceItems.length > 0 ? (
-          <div className="evidence-list">
-            {evidenceItems.map((ev) => {
-              const statusLabel = formatStatusLabel(ev.status || "unknown");
-              const conf =
-                typeof ev.confidence === "number" ? `${(ev.confidence * 100).toFixed(0)}%` : "Unknown";
-              const impactLabel = formatStatusLabel(ev.impact || "unknown");
-              const src = (ev.sources && ev.sources[0]) || null;
-              const valueText =
-                typeof ev.value === "number"
-                  ? ev.label.toLowerCase().includes("rate")
-                    ? `${(ev.value * 100).toFixed(2)}%`
-                    : formatCurrency(ev.value)
-                  : String(ev.value ?? "");
+        <p>
+          <button
+            type="button"
+            className="button button-ghost"
+            onClick={() => setShowEvidence((v) => !v)}
+          >
+            {showEvidence ? "Hide evidence details" : "Show evidence details"}
+          </button>
+        </p>
+        {showEvidence ? (
+          evidenceItems.length > 0 ? (
+            <div className="evidence-list">
+              {evidenceItems.map((ev) => {
+                const statusLabel = formatStatusLabel(ev.status || "unknown");
+                const conf =
+                  typeof ev.confidence === "number" ? `${(ev.confidence * 100).toFixed(0)}%` : "Unknown";
+                const impactLabel = formatStatusLabel(ev.impact || "unknown");
+                const src = (ev.sources && ev.sources[0]) || null;
+                const valueText =
+                  typeof ev.value === "number"
+                    ? ev.label.toLowerCase().includes("rate")
+                      ? `${(ev.value * 100).toFixed(2)}%`
+                      : formatCurrency(ev.value)
+                    : String(ev.value ?? "");
 
-              return (
-                <div key={ev.id} className="evidence-item">
-                  <h3>{ev.label}</h3>
-                  <p className="muted">{ev.notes}</p>
-                  <p>
-                    <strong>Status:</strong> {statusLabel} | <strong>Impact:</strong> {impactLabel}
-                  </p>
-                  <p>
-                    <strong>Value:</strong> {valueText || "(not set)"}
-                  </p>
-                  <p>
-                    <strong>Confidence:</strong> {conf}
-                  </p>
-                  <div>
-                    <strong>Source:</strong>
-                    {src ? (
-                      <div className="muted">
-                        {src.document && <div>{src.document}</div>}
-                        {src.page && <div>p. {src.page}</div>}
-                        {src.snippet && <div>{src.snippet}</div>}
-                        {src.origin && <div>Origin: {formatStatusLabel(src.origin)}</div>}
-                      </div>
-                    ) : (
-                      <span className="muted"> (no direct filing source)</span>
-                    )}
+                return (
+                  <div key={ev.id} className="evidence-item">
+                    <h3>{ev.label}</h3>
+                    <p className="muted">{ev.notes}</p>
+                    <p>
+                      <strong>Status:</strong> {statusLabel} | <strong>Impact:</strong> {impactLabel}
+                    </p>
+                    <p>
+                      <strong>Value:</strong> {valueText || "(not set)"}
+                    </p>
+                    <p>
+                      <strong>Confidence:</strong> {conf}
+                    </p>
+                    <div>
+                      <strong>Source:</strong>
+                      {src ? (
+                        <div className="muted">
+                          {src.document && <div>{src.document}</div>}
+                          {src.page && <div>p. {src.page}</div>}
+                          {src.snippet && <div>{src.snippet}</div>}
+                          {src.origin && <div>Origin: {formatStatusLabel(src.origin)}</div>}
+                        </div>
+                      ) : (
+                        <span className="muted"> (no direct filing source)</span>
+                      )}
+                    </div>
                   </div>
-                </div>
-              );
-            })}
-          </div>
-        ) : (
-          <p className="muted">
-            {loading
-              ? "Loading evidence…"
-              : "No structured evidence snapshot is available yet for this product. Use Expert / Debug mode or the Trust Surface for more detail."}
-          </p>
-        )}
+                );
+              })}
+            </div>
+          ) : (
+            <p className="muted">
+              {loading
+                ? "Loading evidence…"
+                : "No structured evidence snapshot is available yet for this product. Use Expert / Debug mode or the Trust Surface for more detail."}
+            </p>
+          )
+        ) : null}
       </section>
 
       <section className="card home-card">
@@ -678,73 +741,95 @@ export const ProductWorkspacePage: React.FC<{ productCode: string }> = ({ produc
 
       <section className="card home-card">
         <h2>Mechanics discovered</h2>
-        {mechanicsSummary ? (
-          <>
-            <p className="muted">Draft mechanics currently inferred for Promise UL.</p>
-            <table className="kv-table">
-              <tbody>
-                <tr>
-                  <th>Death benefit option</th>
-                  <td>{mechanicsSummary.deathBenefitOption || "level"}</td>
-                </tr>
-                <tr>
-                  <th>COI approach</th>
-                  <td>{mechanicsSummary.coiApproach}</td>
-                </tr>
-                <tr>
-                  <th>Interest crediting</th>
-                  <td>{mechanicsSummary.interestCrediting}</td>
-                </tr>
-                <tr>
-                  <th>Surrender mechanics</th>
-                  <td>{mechanicsSummary.surrenderMechanics}</td>
-                </tr>
-                <tr>
-                  <th>Mechanics discovered</th>
-                  <td>{mechanicsSummary.mechanicsCount ?? 0}</td>
-                </tr>
-              </tbody>
-            </table>
-          </>
-        ) : (
-          <p className="muted">{loading ? "Loading mechanics…" : "No mechanics registry found for Promise UL yet."}</p>
-        )}
+        <p>
+          <button
+            type="button"
+            className="button button-ghost"
+            onClick={() => setShowMechanics((v) => !v)}
+          >
+            {showMechanics ? "Hide mechanics" : "Show mechanics"}
+          </button>
+        </p>
+        {showMechanics ? (
+          mechanicsSummary ? (
+            <>
+              <p className="muted">Draft mechanics currently inferred for Promise UL.</p>
+              <table className="kv-table">
+                <tbody>
+                  <tr>
+                    <th>Death benefit option</th>
+                    <td>{mechanicsSummary.deathBenefitOption || "level"}</td>
+                  </tr>
+                  <tr>
+                    <th>COI approach</th>
+                    <td>{mechanicsSummary.coiApproach}</td>
+                  </tr>
+                  <tr>
+                    <th>Interest crediting</th>
+                    <td>{mechanicsSummary.interestCrediting}</td>
+                  </tr>
+                  <tr>
+                    <th>Surrender mechanics</th>
+                    <td>{mechanicsSummary.surrenderMechanics}</td>
+                  </tr>
+                  <tr>
+                    <th>Mechanics discovered</th>
+                    <td>{mechanicsSummary.mechanicsCount ?? 0}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </>
+          ) : (
+            <p className="muted">{loading ? "Loading mechanics…" : "No mechanics registry found for Promise UL yet."}</p>
+          )
+        ) : null}
       </section>
 
       <section className="card home-card">
         <h2>Assumptions extracted</h2>
-        {assumptions.length > 0 ? (
-          <table className="kv-table">
-            <thead>
-              <tr>
-                <th>Assumption</th>
-                <th>Value</th>
-                <th>Source</th>
-              </tr>
-            </thead>
-            <tbody>
-              {assumptions.map((a, idx) => (
-                <tr key={idx}>
-                  <td>{a.name || "(unnamed)"}</td>
-                  <td>
-                    {typeof a.value === "number"
-                      ? a.name?.toLowerCase().includes("rate")
-                        ? `${(a.value * 100).toFixed(2)}%`
-                        : formatCurrency(a.value)
-                      : String(a.value ?? "")}
-                  </td>
-                  <td>{a.source || "(unknown)"}</td>
+        <p>
+          <button
+            type="button"
+            className="button button-ghost"
+            onClick={() => setShowAssumptions((v) => !v)}
+          >
+            {showAssumptions ? "Hide assumptions" : "Show assumptions"}
+          </button>
+        </p>
+        {showAssumptions ? (
+          assumptions.length > 0 ? (
+            <table className="kv-table">
+              <thead>
+                <tr>
+                  <th>Assumption</th>
+                  <th>Value</th>
+                  <th>Source</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        ) : (
-          <p className="muted">
-            {loading
-              ? "Loading assumptions…"
-              : "No UL projection assumptions have been discovered for Promise UL yet."}
-          </p>
-        )}
+              </thead>
+              <tbody>
+                {assumptions.map((a, idx) => (
+                  <tr key={idx}>
+                    <td>{a.name || "(unnamed)"}</td>
+                    <td>
+                      {typeof a.value === "number"
+                        ? a.name?.toLowerCase().includes("rate")
+                          ? `${(a.value * 100).toFixed(2)}%`
+                          : formatCurrency(a.value)
+                        : String(a.value ?? "")}
+                    </td>
+                    <td>{a.source || "(unknown)"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <p className="muted">
+              {loading
+                ? "Loading assumptions…"
+                : "No UL projection assumptions have been discovered for Promise UL yet."}
+            </p>
+          )
+        ) : null}
       </section>
 
       <section className="card home-card">
@@ -755,7 +840,7 @@ export const ProductWorkspacePage: React.FC<{ productCode: string }> = ({ produc
           the full pipeline.
         </p>
         {uploadMessage && <p className="muted">{uploadMessage}</p>}
-        {gaps && gaps.items && gaps.items.length > 0 ? (
+            {gaps && gaps.items && gaps.items.length > 0 ? (
           <>
             {gaps.items.map((item) => {
               const isUploading = uploadingId === item.id;
@@ -835,24 +920,37 @@ export const ProductWorkspacePage: React.FC<{ productCode: string }> = ({ produc
             {/* Preserve raw warnings/notes for additional context. */}
             {(gaps.warnings && gaps.warnings.length > 0) || (gaps.notes && gaps.notes.length > 0) ? (
               <div className="gap-raw-summary">
-                {gaps.warnings && gaps.warnings.length > 0 && (
+                <p>
+                  <button
+                    type="button"
+                    className="button button-ghost"
+                    onClick={() => setShowGapWarnings((v) => !v)}
+                  >
+                    {showGapWarnings ? "Hide raw warnings / notes" : "Show raw warnings / notes"}
+                  </button>
+                </p>
+                {showGapWarnings && (
                   <>
-                    <h3>Raw warnings</h3>
-                    <ul className="muted">
-                      {gaps.warnings.map((w, idx) => (
-                        <li key={idx}>{w}</li>
-                      ))}
-                    </ul>
-                  </>
-                )}
-                {gaps.notes && gaps.notes.length > 0 && (
-                  <>
-                    <h3>Notes</h3>
-                    <ul className="muted">
-                      {gaps.notes.map((n, idx) => (
-                        <li key={idx}>{n}</li>
-                      ))}
-                    </ul>
+                    {gaps.warnings && gaps.warnings.length > 0 && (
+                      <>
+                        <h3>Raw warnings</h3>
+                        <ul className="muted">
+                          {gaps.warnings.map((w, idx) => (
+                            <li key={idx}>{w}</li>
+                          ))}
+                        </ul>
+                      </>
+                    )}
+                    {gaps.notes && gaps.notes.length > 0 && (
+                      <>
+                        <h3>Notes</h3>
+                        <ul className="muted">
+                          {gaps.notes.map((n, idx) => (
+                            <li key={idx}>{n}</li>
+                          ))}
+                        </ul>
+                      </>
+                    )}
                   </>
                 )}
               </div>
@@ -868,10 +966,13 @@ export const ProductWorkspacePage: React.FC<{ productCode: string }> = ({ produc
       </section>
 
       <section className="card home-card">
-        <h2>Draft illustration projection</h2>
+        <h2>Draft illustration (product understanding only)</h2>
         {illustration ? (
           <>
-            <p className="muted">Draft Promise UL projection based on the current mechanics and assumptions.</p>
+            <p className="muted">
+              Draft Promise UL projection for product understanding. This is not a filed-rate compliant carrier
+              illustration.
+            </p>
             {illustration.metrics && (
               <div className="projection-summary">
                 {typeof illustration.metrics.maximumYear === "number" && (
@@ -997,38 +1098,49 @@ export const ProductWorkspacePage: React.FC<{ productCode: string }> = ({ produc
 
       <section className="card home-card">
         <h2>Uploaded documents</h2>
-        {data?.documents && data.documents.length > 0 ? (
-          <table className="kv-table">
-            <thead>
-              <tr>
-                <th>ID</th>
-                <th>Kind</th>
-                <th>Description</th>
-                <th>Object path</th>
-                <th>Filing</th>
-                <th>Uploaded at</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.documents.map((d) => (
-                <tr key={d.id ?? d.objectPath ?? String(d.createdAt)}>
-                  <td>{d.id}</td>
-                  <td>{d.kind || "filing"}</td>
-                  <td>{d.description || "(none)"}</td>
-                  <td>{d.objectPath}</td>
-                  <td>{d.filingId || product?.filingId || "(n/a)"}</td>
-                  <td>{d.createdAt || ""}</td>
+        <p>
+          <button
+            type="button"
+            className="button button-ghost"
+            onClick={() => setShowDocuments((v) => !v)}
+          >
+            {showDocuments ? "Hide documents" : "Show documents"}
+          </button>
+        </p>
+        {showDocuments ? (
+          data?.documents && data.documents.length > 0 ? (
+            <table className="kv-table">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Kind</th>
+                  <th>Description</th>
+                  <th>Object path</th>
+                  <th>Filing</th>
+                  <th>Uploaded at</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        ) : (
-          <p className="muted">
-            {loading
-              ? "Loading documents…"
-              : "No filings or support documents are registered for Promise UL yet."}
-          </p>
-        )}
+              </thead>
+              <tbody>
+                {data.documents.map((d) => (
+                  <tr key={d.id ?? d.objectPath ?? String(d.createdAt)}>
+                    <td>{d.id}</td>
+                    <td>{d.kind || "filing"}</td>
+                    <td>{d.description || "(none)"}</td>
+                    <td>{d.objectPath}</td>
+                    <td>{d.filingId || product?.filingId || "(n/a)"}</td>
+                    <td>{d.createdAt || ""}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <p className="muted">
+              {loading
+                ? "Loading documents…"
+                : "No filings or support documents are registered for Promise UL yet."}
+            </p>
+          )
+        ) : null}
       </section>
     </div>
   );
