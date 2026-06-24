@@ -272,7 +272,14 @@ def _build_extracted_facts(snapshot: Optional[Dict[str, Any]]) -> List[Dict[str,
     try:
         from actuarypoc.product_registry import get_product_definition  # local import to avoid cycles
 
-        pd = get_product_definition(product_code or "P12TRF")
+        pd = None
+        for code_candidate in [product_code, "P12TRF"]:
+            if not code_candidate:
+                continue
+            candidate = get_product_definition(code_candidate)
+            if isinstance(candidate, dict):
+                pd = candidate
+                break
     except Exception:
         pd = None
 
