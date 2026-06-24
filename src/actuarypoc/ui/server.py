@@ -190,6 +190,153 @@ def api_list_workspaces() -> Dict[str, Any]:
     return {"workspaces": [_workspace_to_api(ws) for ws in rows]}
 
 
+def _build_document_inventory(
+    workspace_documents: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Build a simple document inventory for a workspace.
+
+    This is intentionally conservative and derived only from the
+    workspace's own uploaded documents. We do *not* attempt to infer
+    whether a document was "used" in analysis beyond the fact that it
+    was uploaded and recorded in the workspace.
+    """
+
+    inventory: List[Dict[str, Any]] = []
+    for d in workspace_documents:
+        inventory.append(
+            {
+                "id": d.get("id"),
+                "description": d.get("description"),
+                "kind": d.get("kind"),
+                "objectPath": d.get("object_path"),
+                "createdAt": d.get("created_at"),
+                # For this slice we only assert that the document is
+                # present in the workspace; deeper processing state is
+                # intentionally left for future iterations.
+                "processingStatus": "uploaded",
+            }
+        )
+    return inventory
+
+
+def _build_extracted_facts(snapshot: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Summarise key product facts from an existing workspace snapshot.
+
+    Facts are derived *only* from structured fields already present in
+    the snapshot. When a field is not available we mark it as
+    ``not_available`` instead of fabricating a value.
+    """
+
+    facts: List[Dict[str, Any]] = []
+    product_block: Dict[str, Any] = {}
+    if isinstance(snapshot, dict):
+        product_block = snapshot.get("product") or {}
+        if not isinstance(product_block, dict):
+            product_block = {}
+
+    def _add_fact(label: str, value: Any, *, source: Optional[str] = None, status: str = "extracted") -> None:
+        if value is None or value == "":
+            facts.append(
+                {
+                    "label": label,
+                    "value": None,
+                    "source": source,
+                    "confidence": None,
+                    "status": "not_available",
+                }
+            )
+        else:
+            facts.append(
+                {
+                    "label": label,
+                    "value": value,
+                    "source": source,
+                    "confidence": None,
+                    "status": status,
+                }
+            )
+
+    # Directly-available product-level fields.
+    _add_fact("Product name", product_block.get("name"), source="snapshot.product.name")
+    _add_fact("Product code", product_block.get("code"), source="snapshot.product.code")
+    _add_fact("Product type", product_block.get("type"), source="snapshot.product.type")
+    _add_fact("Carrier", product_block.get("carrier"), source="snapshot.product.carrier")
+    _add_fact("Filing context", product_block.get("filingId"), source="snapshot.product.filingId")
+
+    # The current Promise‑UL workspace snapshot does not yet expose
+    # structured fields for these items. We include them as
+    # ``not_available`` slots so the UI can display that the current
+    # MVP has not extracted them yet.
+    _add_fact("Form numbers", None)
+    _add_fact("Issue age range", None)
+    _add_fact("Risk classes", None)
+    _add_fact("Riders", None)
+    _add_fact("States", None)
+
+    return facts
+
+
+def _build_requirements_candidates(snapshot: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Derive candidate requirements from the compliance matrix.
+
+    This reuses the existing ``complianceMatrix.requirements`` section
+    and reformats each requirement as an AI-generated *candidate* that
+    requires actuarial review. No new LLM calls are introduced here.
+    """
+
+    out: List[Dict[str, Any]] = []
+    if not isinstance(snapshot, dict):
+        return out
+
+    cm = snapshot.get("complianceMatrix") or {}
+    if not isinstance(cm, dict):
+        return out
+    reqs = cm.get("requirements") or []
+    if not isinstance(reqs, list):
+        return out
+
+    for r in reqs:
+        if not isinstance(r, dict):
+            continue
+        text = r.get("filedRequirement") or r.get("name")
+        if not text:
+            # Skip requirements that do not have a meaningful
+            # description; we avoid fabricating requirement text.
+            continue
+
+        source_document: Optional[str] = None
+        source_reference: Optional[str] = None
+        confidence: Optional[float] = None
+
+        evidence_list = r.get("evidence") or []
+        if isinstance(evidence_list, list) and evidence_list:
+            ev0 = evidence_list[0]
+            if isinstance(ev0, dict):
+                sources = ev0.get("sources") or []
+                if isinstance(sources, list) and sources:
+                    src0 = sources[0]
+                    if isinstance(src0, dict):
+                        source_document = src0.get("document")
+                        source_reference = src0.get("page")
+                        raw_conf = src0.get("confidence")
+                        if isinstance(raw_conf, (int, float)):
+                            confidence = float(raw_conf)
+
+        out.append(
+            {
+                "id": r.get("id"),
+                "text": text,
+                "sourceDocument": source_document,
+                "sourceReference": source_reference,
+                "confidence": confidence,
+                "status": "candidate",
+                "aiGenerated": True,
+            }
+        )
+
+    return out
+
+
 @app.get("/api/workspaces/{workspace_id}")
 def api_get_workspace(workspace_id: str) -> Dict[str, Any]:
     """Return workspace metadata, documents, and latest snapshot (if any)."""
@@ -213,10 +360,22 @@ def api_get_workspace(workspace_id: str) -> Dict[str, Any]:
             }
         )
 
+    raw_snapshot = ws.get("latest_snapshot_json") or {}
+    if not isinstance(raw_snapshot, dict):
+        raw_snapshot = {}
+
+    # Enrich the snapshot with document inventory, extracted facts, and
+    # requirements candidates. These are derived views over existing
+    # structured data; they do not change projection behaviour.
+    snapshot: Dict[str, Any] = dict(raw_snapshot)
+    snapshot.setdefault("documentInventory", _build_document_inventory(docs))
+    snapshot.setdefault("extractedFacts", _build_extracted_facts(raw_snapshot))
+    snapshot.setdefault("requirementsCandidates", _build_requirements_candidates(raw_snapshot))
+
     return {
         "workspace": _workspace_to_api(ws),
         "documents": documents_payload,
-        "snapshot": ws.get("latest_snapshot_json"),
+        "snapshot": snapshot,
     }
 
 
@@ -399,6 +558,17 @@ def api_workspace_analyze(workspace_id: str) -> Dict[str, Any]:
     product_block = snapshot.get("product") or {}
     compliance = (snapshot.get("complianceMatrix") or {}).get("summary") or {}
     readiness = snapshot.get("readinessDashboard") or {}
+
+    # Attach derived, read-only views so that the workspace response
+    # can surface document inventory, extracted facts, and candidate
+    # requirements without requiring additional API calls.
+    try:
+        docs_for_inventory = list_workspace_documents(workspace_id)
+    except Exception:
+        docs_for_inventory = []
+    snapshot["documentInventory"] = _build_document_inventory(docs_for_inventory)
+    snapshot["extractedFacts"] = _build_extracted_facts(snapshot)
+    snapshot["requirementsCandidates"] = _build_requirements_candidates(snapshot)
 
     updated = update_workspace_analysis(
         workspace_id,

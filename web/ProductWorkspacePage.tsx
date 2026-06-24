@@ -142,6 +142,30 @@ interface WorkspacePayload {
     status?: string;
     messages?: string[];
   };
+  documentInventory?: Array<{
+    id?: number | string;
+    description?: string | null;
+    kind?: string | null;
+    objectPath?: string | null;
+    createdAt?: string | null;
+    processingStatus?: string | null;
+  }>;
+  extractedFacts?: Array<{
+    label: string;
+    value?: any;
+    source?: string | null;
+    confidence?: number | null;
+    status?: string;
+  }>;
+  requirementsCandidates?: Array<{
+    id?: string;
+    text: string;
+    sourceDocument?: string | null;
+    sourceReference?: string | null;
+    confidence?: number | null;
+    status: string;
+    aiGenerated: boolean;
+  }>;
 }
 
 const formatCurrency = (value: any): string => {
@@ -291,6 +315,9 @@ export const ProductWorkspacePage: React.FC<{ productCode?: string; snapshot?: W
   const illustration = data?.illustration;
   const mechanicsExplanation = data?.mechanicsExplanation;
   const pmr = data?.pmrReadiness;
+  const documentInventory = data?.documentInventory;
+  const extractedFacts = data?.extractedFacts ?? [];
+  const requirementsCandidates = data?.requirementsCandidates ?? [];
 
   const gapItems = gaps?.items ?? [];
   // Build a short, deterministic product description from existing
@@ -457,6 +484,84 @@ export const ProductWorkspacePage: React.FC<{ productCode?: string; snapshot?: W
       <section className="card home-card">
         <h2>Product Understanding Summary</h2>
         <p>{overviewText}</p>
+      </section>
+
+      <section className="card home-card">
+        <h2>Document Inventory</h2>
+        <p className="muted">
+          Workspace documents that the system has recorded for this analysis. This is a read-only, AI-assisted view and
+          does not change projection behaviour.
+        </p>
+        {documentInventory && documentInventory.length > 0 ? (
+          <table className="kv-table">
+            <thead>
+              <tr>
+                <th>Description</th>
+                <th>Kind</th>
+                <th>Object path</th>
+                <th>Uploaded at</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {documentInventory.map((d, idx) => (
+                <tr key={d.id ?? d.objectPath ?? String(d.createdAt) ?? idx}>
+                  <td>{d.description || "(no description)"}</td>
+                  <td>{d.kind || "(unknown)"}</td>
+                  <td>{d.objectPath || "(not set)"}</td>
+                  <td>{d.createdAt || ""}</td>
+                  <td>{formatStatusLabel(d.processingStatus || "uploaded")}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <p className="muted">
+            {loading
+              ? "Loading document inventory…"
+              : "No workspace-specific document inventory is available. This MVP does not yet link product snapshots to individual workspace documents."}
+          </p>
+        )}
+      </section>
+
+      <section className="card home-card">
+        <h2>Extracted Facts (AI-generated draft)</h2>
+        <p className="muted">
+          Key product facts the system believes it has extracted from existing metadata and the current workspace
+          snapshot. These are AI-generated drafts and need actuarial review.
+        </p>
+        {extractedFacts && extractedFacts.length > 0 ? (
+          <table className="kv-table">
+            <thead>
+              <tr>
+                <th>Fact</th>
+                <th>Value</th>
+                <th>Status</th>
+                <th>Source</th>
+              </tr>
+            </thead>
+            <tbody>
+              {extractedFacts.map((f, idx) => (
+                <tr key={idx}>
+                  <td>{f.label}</td>
+                  <td>
+                    {f.value == null || f.value === ""
+                      ? "Not available in current analysis"
+                      : String(f.value)}
+                  </td>
+                  <td>{formatStatusLabel(f.status || "extracted")}</td>
+                  <td>{f.source || "(not recorded)"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <p className="muted">
+            {loading
+              ? "Loading extracted facts…"
+              : "No extracted facts snapshot is available yet for this workspace."}
+          </p>
+        )}
       </section>
 
       <section className="card home-card">
@@ -631,6 +736,46 @@ export const ProductWorkspacePage: React.FC<{ productCode?: string; snapshot?: W
             {loading
               ? "Loading compliance matrix…"
               : "No compliance matrix is available yet for this product. Use Expert / Debug mode or the Trust Surface for more detail."}
+          </p>
+        )}
+      </section>
+
+      <section className="card home-card">
+        <h2>Candidate Requirements (AI-generated)</h2>
+        <p className="muted">
+          Draft filing and implementation requirements inferred from the current compliance matrix and evidence. These
+          are AI-generated candidates and must be reviewed and, if appropriate, translated into formal requirements.
+        </p>
+        {requirementsCandidates && requirementsCandidates.length > 0 ? (
+          <table className="kv-table">
+            <thead>
+              <tr>
+                <th>Requirement</th>
+                <th>Source document</th>
+                <th>Reference</th>
+                <th>Confidence</th>
+              </tr>
+            </thead>
+            <tbody>
+              {requirementsCandidates.map((r) => (
+                <tr key={r.id ?? r.text}>
+                  <td>{r.text}</td>
+                  <td>{r.sourceDocument || "(not recorded)"}</td>
+                  <td>{r.sourceReference || "(not recorded)"}</td>
+                  <td>
+                    {typeof r.confidence === "number"
+                      ? `${(r.confidence * 100).toFixed(0)}%`
+                      : "Unknown"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <p className="muted">
+            {loading
+              ? "Loading candidate requirements…"
+              : "No candidate requirements are available yet for this workspace."}
           </p>
         )}
       </section>
