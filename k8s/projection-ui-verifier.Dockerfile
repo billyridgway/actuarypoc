@@ -22,8 +22,9 @@ RUN apk add --no-cache \
     CRANE_VERSION="v0.19.1" && \
     CRANE_OS="Linux" && \
     curl -fsSL -o /tmp/crane.tgz "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/crane_${CRANE_OS}_${K_ARCH}.tar.gz" && \
-    tar -C /usr/local/bin -xzf /tmp/crane.tgz crane && \
-    chmod +x /usr/local/bin/crane
+    tar -C /usr/local/bin -xzf /tmp/crane.tgz && \
+    chmod +x /usr/local/bin/crane && \
+    /usr/local/bin/crane version
 
 ENV VERIFIER_GIT_SHA=$GIT_SHA \
     VERIFIER_BUILD_TIME=$BUILD_TIME \
