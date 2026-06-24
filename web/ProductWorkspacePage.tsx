@@ -526,6 +526,10 @@ export const ProductWorkspacePage: React.FC<{ productCode?: string; snapshot?: W
 
       <section className="card home-card">
         <h2>Extracted Facts (AI-generated draft)</h2>
+        <p>
+          <span className="tag">AI-generated draft</span>{" "}
+          <span className="tag">Needs actuarial review</span>
+        </p>
         <p className="muted">
           Key product facts the system believes it has extracted from existing metadata and the current workspace
           snapshot. These are AI-generated drafts and need actuarial review.
@@ -742,6 +746,10 @@ export const ProductWorkspacePage: React.FC<{ productCode?: string; snapshot?: W
 
       <section className="card home-card">
         <h2>Candidate Requirements (AI-generated)</h2>
+        <p>
+          <span className="tag">AI-generated draft</span>{" "}
+          <span className="tag">Needs actuarial review</span>
+        </p>
         <p className="muted">
           Draft filing and implementation requirements inferred from the current compliance matrix and evidence. These
           are AI-generated candidates and must be reviewed and, if appropriate, translated into formal requirements.
