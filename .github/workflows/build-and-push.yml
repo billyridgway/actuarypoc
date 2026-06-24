@@ -9,7 +9,7 @@ on:
   workflow_dispatch: {}
 
 jobs:
-  build-and-push:
+  build-app:
     runs-on: ubuntu-latest
 
     permissions:
@@ -61,6 +61,43 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/actuarypoc:${{ steps.vars.outputs.ref_sanitized }}
           cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/actuarypoc:buildcache
           cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/actuarypoc:buildcache,mode=max
+
+  build-verifier:
+    runs-on: ubuntu-latest
+    needs: build-app
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute image tag suffix
+        id: vars
+        run: |
+          SAFE_REF="${GITHUB_REF_NAME//\//-}"
+          echo "ref_sanitized=${SAFE_REF}" >> "$GITHUB_OUTPUT"
+
+      - name: Compute build metadata
+        id: meta
+        run: |
+          echo "git_sha=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push verifier image
         uses: docker/build-push-action@v6
