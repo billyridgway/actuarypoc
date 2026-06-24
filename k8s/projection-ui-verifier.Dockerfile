@@ -7,7 +7,8 @@ ARG IMAGE_TAG=unknown
 RUN apk add --no-cache \
       ca-certificates \
       curl \
-      jq && \
+      jq \
+      tar && \
     update-ca-certificates && \
     ARCH="$(uname -m)" && \
     case "$ARCH" in \
@@ -17,7 +18,12 @@ RUN apk add --no-cache \
     esac && \
     KUBECTL_VERSION="v1.30.0" && \
     curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${K_ARCH}/kubectl" && \
-    chmod +x /usr/local/bin/kubectl
+    chmod +x /usr/local/bin/kubectl && \
+    CRANE_VERSION="v0.19.1" && \
+    CRANE_OS="Linux" && \
+    curl -fsSL -o /tmp/crane.tgz "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/crane_${CRANE_OS}_${K_ARCH}.tar.gz" && \
+    tar -C /usr/local/bin -xzf /tmp/crane.tgz crane && \
+    chmod +x /usr/local/bin/crane
 
 ENV VERIFIER_GIT_SHA=$GIT_SHA \
     VERIFIER_BUILD_TIME=$BUILD_TIME \
