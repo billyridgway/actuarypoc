@@ -263,12 +263,48 @@ def _build_extracted_facts(snapshot: Optional[Dict[str, Any]]) -> List[Dict[str,
     _add_fact("Carrier", product_block.get("carrier"), source="snapshot.product.carrier")
     _add_fact("Filing context", product_block.get("filingId"), source="snapshot.product.filingId")
 
+    # Issue age range – derive deterministically from the current
+    # ProductDefinition when available. This uses existing parsed
+    # artefacts only; no new LLM calls are introduced.
+    issue_age_value = None
+    issue_age_source = None
+    product_code = (product_block.get("code") or "").strip().upper()
+    try:
+        from actuarypoc.product_registry import get_product_definition  # local import to avoid cycles
+
+        pd = get_product_definition(product_code or "P12TRF")
+    except Exception:
+        pd = None
+
+    if isinstance(pd, dict):
+        limits = pd.get("issue_age_limits")
+        if isinstance(limits, dict):
+            age_min = limits.get("min")
+            age_max = limits.get("max")
+            if isinstance(age_min, (int, float)) and isinstance(age_max, (int, float)):
+                issue_age_value = f"{int(age_min)}–{int(age_max)}"
+                # Traceability back to the ProductDefinition and its
+                # declared filing reference (when present).
+                filing_refs = pd.get("filing_refs") or []
+                filing_ref_str = None
+                if isinstance(filing_refs, list) and filing_refs:
+                    ref0 = filing_refs[0]
+                    if isinstance(ref0, dict):
+                        filing_id = ref0.get("filing_id") or ref0.get("serff_tracking_id")
+                        if filing_id:
+                            filing_ref_str = str(filing_id)
+                if filing_ref_str:
+                    issue_age_source = f"ProductDefinition.issue_age_limits (from {filing_ref_str})"
+                else:
+                    issue_age_source = "ProductDefinition.issue_age_limits"
+
+    _add_fact("Issue age range", issue_age_value, source=issue_age_source)
+
     # The current Promise‑UL workspace snapshot does not yet expose
     # structured fields for these items. We include them as
     # ``not_available`` slots so the UI can display that the current
     # MVP has not extracted them yet.
     _add_fact("Form numbers", None)
-    _add_fact("Issue age range", None)
     _add_fact("Risk classes", None)
     _add_fact("Riders", None)
     _add_fact("States", None)
