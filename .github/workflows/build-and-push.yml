@@ -46,7 +46,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push image
+      - name: Build and push application image
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -61,3 +61,20 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/actuarypoc:${{ steps.vars.outputs.ref_sanitized }}
           cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/actuarypoc:buildcache
           cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/actuarypoc:buildcache,mode=max
+
+      - name: Build and push verifier image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: k8s/projection-ui-verifier.Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            GIT_SHA=${{ steps.meta.outputs.git_sha }}
+            BUILD_TIME=${{ steps.meta.outputs.build_time }}
+            IMAGE_TAG=${{ steps.vars.outputs.ref_sanitized }}
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/projection-ui-verifier:latest
+            ghcr.io/${{ github.repository_owner }}/projection-ui-verifier:${{ steps.vars.outputs.ref_sanitized }}
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/projection-ui-verifier:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/projection-ui-verifier:buildcache,mode=max
