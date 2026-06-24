@@ -4,6 +4,7 @@ import os
 import time
 import json
 import uuid
+from datetime import date, datetime
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -320,6 +321,19 @@ def _note_failure(exc: Exception) -> None:
     # For now we just log to stderr; a future iteration can expose this via
     # a proper /metrics endpoint.
     print(f"[postgres_client] write failure (count={_POSTGRES_WRITE_FAILURES}): {exc}", flush=True)
+
+
+def _json_default(obj: object) -> str:
+    """Best-effort JSON serializer for non-primitive types.
+
+    We currently only expect datetime/date objects inside workspace
+    analysis snapshots; represent them as ISO-8601 strings so the
+    snapshot can be stored in Postgres JSONB without failing.
+    """
+
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    return str(obj)
 
 
 def ensure_schema() -> None:
@@ -827,7 +841,7 @@ def update_workspace_analysis(
                     """,
                     (
                         status,
-                        json.dumps(snapshot),
+                        json.dumps(snapshot, default=_json_default),
                         inferred_product_name,
                         inferred_product_code,
                         inferred_product_type,
