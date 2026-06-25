@@ -270,6 +270,8 @@ def _build_extracted_facts(snapshot: Optional[Dict[str, Any]]) -> List[Dict[str,
     issue_age_source = None
     risk_classes_value: Optional[List[str]] = None
     risk_classes_source: Optional[str] = None
+    form_numbers_value: Optional[List[str]] = None
+    form_numbers_source: Optional[str] = None
 
     product_code = (product_block.get("code") or "").strip().upper()
     try:
@@ -305,6 +307,12 @@ def _build_extracted_facts(snapshot: Optional[Dict[str, Any]]) -> List[Dict[str,
             risk_classes_value = [str(v) for v in raw_uw if isinstance(v, (str, int, float))]
             risk_classes_source = "ProductDefinition.underwriting_classes"
 
+        # Form numbers from ProductDefinition.form_numbers
+        raw_forms = pd.get("form_numbers")
+        if isinstance(raw_forms, list) and raw_forms:
+            form_numbers_value = [str(v) for v in raw_forms if isinstance(v, (str, int, float))]
+            form_numbers_source = "ProductDefinition.form_numbers"
+
         # Traceability back to ProductDefinition filing refs when
         # possible.
         filing_ref_str = None
@@ -317,21 +325,24 @@ def _build_extracted_facts(snapshot: Optional[Dict[str, Any]]) -> List[Dict[str,
                     filing_ref_str = str(filing_id)
 
         if issue_age_value is not None:
-            if filing_ref_str:
-                issue_age_source = f"ProductDefinition.issue_age_limits (from {filing_ref_str})"
-            else:
-                issue_age_source = "ProductDefinition.issue_age_limits"
+            issue_age_source = (
+                f"ProductDefinition.issue_age_limits (from {filing_ref_str})"
+                if filing_ref_str
+                else "ProductDefinition.issue_age_limits"
+            )
 
-        if risk_classes_value:
-            if filing_ref_str and risk_classes_source:
-                risk_classes_source = f"{risk_classes_source} (from {filing_ref_str})"
+        if risk_classes_value and filing_ref_str and risk_classes_source:
+            risk_classes_source = f"{risk_classes_source} (from {filing_ref_str})"
+
+        if form_numbers_value and filing_ref_str and form_numbers_source:
+            form_numbers_source = f"{form_numbers_source} (from {filing_ref_str})"
 
     _add_fact("Issue age range", issue_age_value, source=issue_age_source)
 
     # The current Promise‑UL workspace snapshot does not yet expose
     # structured fields for these items. We include them as
     # ``not_available`` slots when we could not derive a value.
-    _add_fact("Form numbers", None)
+    _add_fact("Form numbers", form_numbers_value, source=form_numbers_source)
     _add_fact("Risk classes", risk_classes_value, source=risk_classes_source)
     _add_fact("Riders", None)
     _add_fact("States", None)
