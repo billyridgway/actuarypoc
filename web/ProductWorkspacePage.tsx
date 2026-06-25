@@ -33,6 +33,17 @@ interface WorkspacePayload {
     filingId?: string | null;
     understandingStatus?: string;
   };
+  productUnderstanding?: {
+    productName?: string | null;
+    productCode?: string | null;
+    productType?: string | null;
+    formNumbers?: string[] | null;
+    issueAgeRange?: string | null;
+    riskClasses?: string[] | null;
+    documentsReviewed?: number;
+    requirementsIdentified?: number;
+    confidence?: string | null;
+  };
   documents?: Array<{
     id?: number | string;
     kind?: string;
@@ -306,6 +317,7 @@ export const ProductWorkspacePage: React.FC<{ productCode?: string; snapshot?: W
   }, [productCode, snapshot]);
 
   const product = data?.product;
+  const productUnderstanding = data?.productUnderstanding;
   const mechanicsSummary = data?.mechanics?.summary;
   const assumptions = data?.assumptions?.provenance ?? [];
   const evidenceItems = data?.evidence?.items ?? [];
@@ -482,8 +494,71 @@ export const ProductWorkspacePage: React.FC<{ productCode?: string; snapshot?: W
       </section>
 
       <section className="card home-card">
-        <h2>Product Understanding Summary</h2>
-        <p>{overviewText}</p>
+        <h2>Product Understanding (AI-generated draft)</h2>
+        <p>
+          <span className="tag">AI-generated draft</span>{" "}
+          <span className="tag">Needs actuarial review</span>
+        </p>
+        <p className="muted">
+          High-level summary of what the system currently believes about this product based on existing structured
+          data. This does not change projection behaviour.
+        </p>
+        {productUnderstanding ? (
+          <table className="kv-table">
+            <tbody>
+              <tr>
+                <th>Product Name</th>
+                <td>{productUnderstanding.productName || "Not available in current analysis"}</td>
+              </tr>
+              <tr>
+                <th>Product Code</th>
+                <td>{productUnderstanding.productCode || "Not available in current analysis"}</td>
+              </tr>
+              <tr>
+                <th>Product Type</th>
+                <td>{productUnderstanding.productType || "Not available in current analysis"}</td>
+              </tr>
+              <tr>
+                <th>Form Numbers</th>
+                <td>
+                  {productUnderstanding.formNumbers && productUnderstanding.formNumbers.length > 0
+                    ? productUnderstanding.formNumbers.join(", ")
+                    : "Not available in current analysis"}
+                </td>
+              </tr>
+              <tr>
+                <th>Issue Age Range</th>
+                <td>{productUnderstanding.issueAgeRange || "Not available in current analysis"}</td>
+              </tr>
+              <tr>
+                <th>Risk Classes</th>
+                <td>
+                  {productUnderstanding.riskClasses && productUnderstanding.riskClasses.length > 0
+                    ? productUnderstanding.riskClasses.join(", ")
+                    : "Not available in current analysis"}
+                </td>
+              </tr>
+              <tr>
+                <th>Documents Reviewed</th>
+                <td>{productUnderstanding.documentsReviewed ?? 0}</td>
+              </tr>
+              <tr>
+                <th>Candidate Requirements</th>
+                <td>{productUnderstanding.requirementsIdentified ?? 0}</td>
+              </tr>
+              <tr>
+                <th>Understanding Confidence</th>
+                <td>{formatStatusLabel(productUnderstanding.confidence || "partial")}</td>
+              </tr>
+            </tbody>
+          </table>
+        ) : (
+          <p className="muted">
+            {loading
+              ? "Loading product understanding…"
+              : "Product understanding summary is not yet available for this workspace."}
+          </p>
+        )}
       </section>
 
       <section className="card home-card">

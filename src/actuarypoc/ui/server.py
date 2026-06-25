@@ -411,6 +411,91 @@ def _build_requirements_candidates(snapshot: Optional[Dict[str, Any]]) -> List[D
     return out
 
 
+def _build_product_understanding(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a high-level product understanding summary from existing data.
+
+    This is a structured synthesis over snapshot.product,
+    snapshot.extractedFacts, snapshot.documentInventory, and
+    snapshot.requirementsCandidates. It does not introduce any new
+    extraction logic or LLM calls.
+    """
+
+    product_block = snapshot.get("product") or {}
+    if not isinstance(product_block, dict):
+        product_block = {}
+
+    extracted_facts = snapshot.get("extractedFacts") or []
+    if not isinstance(extracted_facts, list):
+        extracted_facts = []
+
+    def _fact(label: str) -> Dict[str, Any]:
+        for f in extracted_facts:
+            if isinstance(f, dict) and f.get("label") == label:
+                return f
+        return {}
+
+    f_product_name = _fact("Product name")
+    f_product_code = _fact("Product code")
+    f_product_type = _fact("Product type")
+    f_form_numbers = _fact("Form numbers")
+    f_issue_age = _fact("Issue age range")
+    f_risk_classes = _fact("Risk classes")
+
+    product_name = f_product_name.get("value") or product_block.get("name")
+    product_code = f_product_code.get("value") or product_block.get("code")
+    product_type = f_product_type.get("value") or product_block.get("type")
+
+    form_numbers = f_form_numbers.get("value")
+    if not isinstance(form_numbers, list):
+        form_numbers = None
+
+    issue_age_range = f_issue_age.get("value")
+    if not isinstance(issue_age_range, str):
+        issue_age_range = None
+
+    risk_classes = f_risk_classes.get("value")
+    if not isinstance(risk_classes, list):
+        risk_classes = None
+
+    documents = snapshot.get("documentInventory") or []
+    if not isinstance(documents, list):
+        documents = []
+    requirements = snapshot.get("requirementsCandidates") or []
+    if not isinstance(requirements, list):
+        requirements = []
+
+    documents_reviewed = len(documents)
+    requirements_identified = len(requirements)
+
+    # Deterministic confidence level.
+    has_name = bool(product_name)
+    has_code = bool(product_code)
+    has_forms = bool(form_numbers)
+    has_issue_age = bool(issue_age_range)
+    has_risk_classes = bool(risk_classes)
+
+    if has_name and has_code and has_forms and has_issue_age and has_risk_classes:
+        confidence = "high"
+    elif (has_name or has_code) and (has_forms or has_issue_age or has_risk_classes):
+        confidence = "partial"
+    elif has_name or has_code:
+        confidence = "low"
+    else:
+        confidence = "low"
+
+    return {
+        "productName": product_name,
+        "productCode": product_code,
+        "productType": product_type,
+        "formNumbers": form_numbers,
+        "issueAgeRange": issue_age_range,
+        "riskClasses": risk_classes,
+        "documentsReviewed": documents_reviewed,
+        "requirementsIdentified": requirements_identified,
+        "confidence": confidence,
+    }
+
+
 @app.get("/api/workspaces/{workspace_id}")
 def api_get_workspace(workspace_id: str) -> Dict[str, Any]:
     """Return workspace metadata, documents, and latest snapshot (if any)."""
@@ -439,12 +524,14 @@ def api_get_workspace(workspace_id: str) -> Dict[str, Any]:
         raw_snapshot = {}
 
     # Enrich the snapshot with document inventory, extracted facts, and
-    # requirements candidates. These are derived views over existing
-    # structured data; they do not change projection behaviour.
+    # requirements candidates, and product understanding. These are
+    # derived views over existing structured data; they do not change
+    # projection behaviour.
     snapshot: Dict[str, Any] = dict(raw_snapshot)
     snapshot.setdefault("documentInventory", _build_document_inventory(docs))
     snapshot.setdefault("extractedFacts", _build_extracted_facts(raw_snapshot))
     snapshot.setdefault("requirementsCandidates", _build_requirements_candidates(raw_snapshot))
+    snapshot.setdefault("productUnderstanding", _build_product_understanding(snapshot))
 
     return {
         "workspace": _workspace_to_api(ws),
@@ -643,6 +730,7 @@ def api_workspace_analyze(workspace_id: str) -> Dict[str, Any]:
     snapshot["documentInventory"] = _build_document_inventory(docs_for_inventory)
     snapshot["extractedFacts"] = _build_extracted_facts(snapshot)
     snapshot["requirementsCandidates"] = _build_requirements_candidates(snapshot)
+    snapshot["productUnderstanding"] = _build_product_understanding(snapshot)
 
     updated = update_workspace_analysis(
         workspace_id,
