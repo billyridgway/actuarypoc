@@ -547,11 +547,13 @@ export const ProductWorkspacePage: React.FC<{ productCode?: string; snapshot?: W
             <tbody>
               {extractedFacts.map((f, idx) => (
                 <tr key={idx}>
-                  <td>{f.label}</td>
+                 <td>{f.label}</td>
                   <td>
                     {f.value == null || f.value === ""
                       ? "Not available in current analysis"
-                      : String(f.value)}
+                      : Array.isArray(f.value)
+                        ? (f.value as any[]).join(", ")
+                        : String(f.value)}
                   </td>
                   <td>{formatStatusLabel(f.status || "extracted")}</td>
                   <td>{f.source || "(not recorded)"}</td>

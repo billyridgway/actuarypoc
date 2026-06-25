@@ -263,11 +263,14 @@ def _build_extracted_facts(snapshot: Optional[Dict[str, Any]]) -> List[Dict[str,
     _add_fact("Carrier", product_block.get("carrier"), source="snapshot.product.carrier")
     _add_fact("Filing context", product_block.get("filingId"), source="snapshot.product.filingId")
 
-    # Issue age range – derive deterministically from the current
-    # ProductDefinition when available. This uses existing parsed
-    # artefacts only; no new LLM calls are introduced.
+    # Issue age range and risk classes – derive deterministically from
+    # the current ProductDefinition when available. This uses existing
+    # parsed artefacts only; no new LLM calls are introduced.
     issue_age_value = None
     issue_age_source = None
+    risk_classes_value: Optional[List[str]] = None
+    risk_classes_source: Optional[str] = None
+
     product_code = (product_block.get("code") or "").strip().upper()
     try:
         from actuarypoc.product_registry import get_product_definition  # local import to avoid cycles
@@ -284,35 +287,52 @@ def _build_extracted_facts(snapshot: Optional[Dict[str, Any]]) -> List[Dict[str,
         pd = None
 
     if isinstance(pd, dict):
+        # Issue ages from ProductDefinition.issue_age_limits
         limits = pd.get("issue_age_limits")
         if isinstance(limits, dict):
             age_min = limits.get("min")
             age_max = limits.get("max")
             if isinstance(age_min, (int, float)) and isinstance(age_max, (int, float)):
                 issue_age_value = f"{int(age_min)}–{int(age_max)}"
-                # Traceability back to the ProductDefinition and its
-                # declared filing reference (when present).
-                filing_refs = pd.get("filing_refs") or []
-                filing_ref_str = None
-                if isinstance(filing_refs, list) and filing_refs:
-                    ref0 = filing_refs[0]
-                    if isinstance(ref0, dict):
-                        filing_id = ref0.get("filing_id") or ref0.get("serff_tracking_id")
-                        if filing_id:
-                            filing_ref_str = str(filing_id)
-                if filing_ref_str:
-                    issue_age_source = f"ProductDefinition.issue_age_limits (from {filing_ref_str})"
-                else:
-                    issue_age_source = "ProductDefinition.issue_age_limits"
+
+        # Risk classes from either risk_classes or underwriting_classes
+        raw_risk = pd.get("risk_classes")
+        raw_uw = pd.get("underwriting_classes")
+        if isinstance(raw_risk, list) and raw_risk:
+            risk_classes_value = [str(v) for v in raw_risk if isinstance(v, (str, int, float))]
+            risk_classes_source = "ProductDefinition.risk_classes"
+        elif isinstance(raw_uw, list) and raw_uw:
+            risk_classes_value = [str(v) for v in raw_uw if isinstance(v, (str, int, float))]
+            risk_classes_source = "ProductDefinition.underwriting_classes"
+
+        # Traceability back to ProductDefinition filing refs when
+        # possible.
+        filing_ref_str = None
+        filing_refs = pd.get("filing_refs") or []
+        if isinstance(filing_refs, list) and filing_refs:
+            ref0 = filing_refs[0]
+            if isinstance(ref0, dict):
+                filing_id = ref0.get("filing_id") or ref0.get("serff_tracking_id")
+                if filing_id:
+                    filing_ref_str = str(filing_id)
+
+        if issue_age_value is not None:
+            if filing_ref_str:
+                issue_age_source = f"ProductDefinition.issue_age_limits (from {filing_ref_str})"
+            else:
+                issue_age_source = "ProductDefinition.issue_age_limits"
+
+        if risk_classes_value:
+            if filing_ref_str and risk_classes_source:
+                risk_classes_source = f"{risk_classes_source} (from {filing_ref_str})"
 
     _add_fact("Issue age range", issue_age_value, source=issue_age_source)
 
     # The current Promise‑UL workspace snapshot does not yet expose
     # structured fields for these items. We include them as
-    # ``not_available`` slots so the UI can display that the current
-    # MVP has not extracted them yet.
+    # ``not_available`` slots when we could not derive a value.
     _add_fact("Form numbers", None)
-    _add_fact("Risk classes", None)
+    _add_fact("Risk classes", risk_classes_value, source=risk_classes_source)
     _add_fact("Riders", None)
     _add_fact("States", None)
 
