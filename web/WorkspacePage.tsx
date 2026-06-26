@@ -85,7 +85,7 @@ export const WorkspacePage: React.FC<{ workspaceId: string }> = ({ workspaceId }
   if (hasSnapshot && snapshot) {
     // Once analysis has populated the snapshot, reuse the existing
     // Product Understanding Workspace view directly from the snapshot.
-    return <ProductWorkspacePage snapshot={snapshot} />;
+    return <ProductWorkspacePage snapshot={snapshot} workspaceId={workspaceId} />;
   }
 
   const statusLabel = formatWorkspaceStatus(workspace?.status);
@@ -93,20 +93,22 @@ export const WorkspacePage: React.FC<{ workspaceId: string }> = ({ workspaceId }
   const analyzeDisabled = docCount <= 0 || !!loading || !!analyzing;
 
   const handleFileChange: React.ChangeEventHandler<HTMLInputElement> = async (event) => {
-    const file = event.target.files && event.target.files[0];
-    if (!file) return;
+    const files = event.target.files;
+    if (!files || files.length === 0) return;
     setUploading(true);
     setUploadMessage(null);
     try {
-      const form = new FormData();
-      form.append("file", file);
-      const resp = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/documents`, {
-        method: "POST",
-        body: form,
-      });
-      if (!resp.ok) {
-        const text = await resp.text();
-        throw new Error(text || `Upload failed with status ${resp.status}`);
+      for (const file of Array.from(files)) {
+        const form = new FormData();
+        form.append("file", file);
+        const resp = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/documents`, {
+          method: "POST",
+          body: form,
+        });
+        if (!resp.ok) {
+          const text = await resp.text();
+          throw new Error(text || `Upload failed with status ${resp.status}`);
+        }
       }
       setUploadMessage("Uploaded. Analyze Product will use these documents in the next run.");
       await loadWorkspace();
@@ -208,7 +210,13 @@ export const WorkspacePage: React.FC<{ workspaceId: string }> = ({ workspaceId }
         {uploadMessage && <p className="muted">{uploadMessage}</p>}
         <label className="button button-secondary">
           {uploading ? "Uploading…" : "Upload document"}
-          <input type="file" style={{ display: "none" }} disabled={uploading} onChange={handleFileChange} />
+          <input
+            type="file"
+            multiple
+            style={{ display: "none" }}
+            disabled={uploading}
+            onChange={handleFileChange}
+          />
         </label>
       </section>
 

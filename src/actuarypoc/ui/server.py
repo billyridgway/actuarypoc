@@ -74,6 +74,9 @@ from actuarypoc.storage.postgres_client import (
     list_workspace_documents,
     update_workspace_analysis,
     delete_workspace_and_documents,
+    create_feature_request,
+    list_feature_requests,
+    update_feature_request_status,
 )
 
 try:  # FastAPI can be configured with either Pydantic v1 or v2
@@ -496,6 +499,203 @@ def _build_product_understanding(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Capability assessment – Unsupported Platform Features (MVP)
+# ---------------------------------------------------------------------------
+
+
+UNSUPPORTED_CAPABILITY_RULES: List[Dict[str, Any]] = [
+    {
+        "capabilityId": "shadow_account",
+        "name": "Shadow Account",
+        "keywords": ["shadow account"],
+        "impact": "high",
+    },
+    {
+        "capabilityId": "secondary_guarantee",
+        "name": "Secondary Guarantee",
+        "keywords": ["secondary guarantee"],
+        "impact": "high",
+    },
+    {
+        "capabilityId": "indexed_crediting",
+        "name": "Indexed Crediting / Indexed Account",
+        "keywords": ["indexed account", "indexed crediting", "index account"],
+        "impact": "high",
+    },
+    {
+        "capabilityId": "policy_loan",
+        "name": "Policy Loan Mechanics",
+        "keywords": ["policy loan", "loan interest", "loan rate"],
+        "impact": "medium",
+    },
+    {
+        "capabilityId": "waiver_of_premium",
+        "name": "Waiver of Premium / Waiver Rider",
+        "keywords": ["waiver of premium", "waiver rider", "waiver benefit"],
+        "impact": "medium",
+    },
+    {
+        "capabilityId": "market_value_adjustment",
+        "name": "Market Value Adjustment",
+        "keywords": ["market value adjustment", "mva"],
+        "impact": "medium",
+    },
+    {
+        "capabilityId": "persistency_bonus",
+        "name": "Persistency Bonus",
+        "keywords": ["persistency bonus", "loyalty bonus"],
+        "impact": "medium",
+    },
+    {
+        "capabilityId": "variable_account",
+        "name": "Variable / Separate Account Allocation",
+        "keywords": [
+            "separate account",
+            "variable account",
+            "subaccount",
+            "sub-account",
+        ],
+        "impact": "high",
+    },
+]
+
+
+# For this slice, platform capability flags are a simple, explicit map.
+# All capabilities above are treated as *not yet implemented* until this
+# table is updated alongside actual platform support.
+PLATFORM_CAPABILITY_FLAGS: Dict[str, bool] = {
+    rule["capabilityId"]: False for rule in UNSUPPORTED_CAPABILITY_RULES
+}
+
+
+def _build_capability_assessment(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    """Derive a lightweight capability assessment from existing data.
+
+    This is deterministic and rule-based:
+
+    - Uses candidate requirements plus the underlying compliance matrix
+      to search for capability-specific keywords.
+    - Marks a capability as "unsupported" when keywords are detected
+      and the corresponding platform capability flag is False.
+    - Does *not* attempt to infer gaps from missing documents; if no
+      keyword matches, no unsupported item is emitted.
+    """
+
+    items: List[Dict[str, Any]] = []
+
+    product_block = snapshot.get("product") or {}
+    if not isinstance(product_block, dict):
+        product_block = {}
+    product_code = product_block.get("code") or None
+
+    requirements_candidates = snapshot.get("requirementsCandidates") or []
+    if not isinstance(requirements_candidates, list):
+        requirements_candidates = []
+
+    # Optional: join back to complianceMatrix.requirements for richer
+    # evidence snippets when available.
+    cm = snapshot.get("complianceMatrix") or {}
+    if not isinstance(cm, dict):
+        cm = {}
+    cm_requirements = cm.get("requirements") or []
+    if not isinstance(cm_requirements, list):
+        cm_requirements = []
+    cm_by_id: Dict[str, Dict[str, Any]] = {}
+    for r in cm_requirements:
+        if isinstance(r, dict):
+            rid = str(r.get("id")) if r.get("id") is not None else None
+            if rid:
+                cm_by_id[rid] = r
+
+    for cand in requirements_candidates:
+        if not isinstance(cand, dict):
+            continue
+        text = (cand.get("text") or "").lower()
+        if not text:
+            continue
+
+        source_requirement_id_raw = cand.get("id")
+        source_requirement_id = str(source_requirement_id_raw) if source_requirement_id_raw is not None else None
+
+        cm_req = cm_by_id.get(source_requirement_id or "")
+        source_requirement_text = None
+        snippet_text = None
+        if isinstance(cm_req, dict):
+            fr = cm_req.get("filedRequirement") or cm_req.get("name")
+            if fr:
+                source_requirement_text = str(fr)
+            ev_list = cm_req.get("evidence") or []
+            if isinstance(ev_list, list) and ev_list:
+                ev0 = ev_list[0]
+                if isinstance(ev0, dict):
+                    sources = ev0.get("sources") or []
+                    if isinstance(sources, list) and sources:
+                        src0 = sources[0]
+                        if isinstance(src0, dict):
+                            snippet_text = (src0.get("snippet") or "")
+
+        base_source_document = cand.get("sourceDocument")
+        base_source_reference = cand.get("sourceReference")
+
+        searchable = " ".join(
+            part
+            for part in [
+                text,
+                (source_requirement_text or "").lower(),
+                (snippet_text or "").lower(),
+            ]
+            if part
+        )
+
+        for rule in UNSUPPORTED_CAPABILITY_RULES:
+            cap_id = rule.get("capabilityId") or ""
+            if not cap_id or PLATFORM_CAPABILITY_FLAGS.get(cap_id, False):
+                # Capability is already supported (or flag set to True);
+                # do not mark it as unsupported.
+                continue
+
+            keywords = [k.lower() for k in rule.get("keywords", []) if isinstance(k, str)]
+            if not keywords:
+                continue
+
+            matched = any(kw in searchable for kw in keywords)
+            if not matched:
+                continue
+
+            reason = (
+                f"Filing appears to require {rule.get('name', cap_id)}, but the current platform "
+                f"does not model this capability explicitly (detected from candidate requirements)."
+            )
+
+            items.append(
+                {
+                    "capabilityId": cap_id,
+                    "name": rule.get("name"),
+                    "status": "unsupported",
+                    "impact": rule.get("impact", "medium"),
+                    "reason": reason,
+                    "productCode": product_code,
+                    "sourceRequirementId": source_requirement_id,
+                    "sourceRequirementText": source_requirement_text or cand.get("text"),
+                    "sourceDocument": base_source_document,
+                    "sourceReference": base_source_reference,
+                    "recommendedAction": "Create feature request",
+                }
+            )
+
+    summary = {
+        "supported": 0,
+        "partial": 0,
+        "unsupported": len(items),
+    }
+
+    return {
+        "summary": summary,
+        "items": items,
+    }
+
+
 @app.get("/api/workspaces/{workspace_id}")
 def api_get_workspace(workspace_id: str) -> Dict[str, Any]:
     """Return workspace metadata, documents, and latest snapshot (if any)."""
@@ -524,7 +724,8 @@ def api_get_workspace(workspace_id: str) -> Dict[str, Any]:
         raw_snapshot = {}
 
     # Enrich the snapshot with document inventory, extracted facts, and
-    # requirements candidates, and product understanding. These are
+    # requirements candidates, product understanding, and capability
+    # assessment. These are
     # derived views over existing structured data; they do not change
     # projection behaviour.
     snapshot: Dict[str, Any] = dict(raw_snapshot)
@@ -532,6 +733,7 @@ def api_get_workspace(workspace_id: str) -> Dict[str, Any]:
     snapshot.setdefault("extractedFacts", _build_extracted_facts(raw_snapshot))
     snapshot.setdefault("requirementsCandidates", _build_requirements_candidates(raw_snapshot))
     snapshot.setdefault("productUnderstanding", _build_product_understanding(snapshot))
+    snapshot.setdefault("capabilityAssessment", _build_capability_assessment(snapshot))
 
     return {
         "workspace": _workspace_to_api(ws),
@@ -722,7 +924,8 @@ def api_workspace_analyze(workspace_id: str) -> Dict[str, Any]:
 
     # Attach derived, read-only views so that the workspace response
     # can surface document inventory, extracted facts, and candidate
-    # requirements without requiring additional API calls.
+    # requirements and capability assessment without requiring additional
+    # API calls.
     try:
         docs_for_inventory = list_workspace_documents(workspace_id)
     except Exception:
@@ -731,6 +934,7 @@ def api_workspace_analyze(workspace_id: str) -> Dict[str, Any]:
     snapshot["extractedFacts"] = _build_extracted_facts(snapshot)
     snapshot["requirementsCandidates"] = _build_requirements_candidates(snapshot)
     snapshot["productUnderstanding"] = _build_product_understanding(snapshot)
+    snapshot["capabilityAssessment"] = _build_capability_assessment(snapshot)
 
     updated = update_workspace_analysis(
         workspace_id,
@@ -757,6 +961,181 @@ def api_workspace_analyze(workspace_id: str) -> Dict[str, Any]:
         "workspace": _workspace_to_api(updated),
         "snapshot": snapshot,
     }
+
+
+FEATURE_REQUEST_STATUSES = {
+    "proposed",
+    "approved",
+    "rejected",
+    "in_progress",
+    "complete",
+    "deferred",
+}
+
+
+class FeatureRequestCreateRequest(BaseModel):  # type: ignore[misc]
+    capabilityId: str
+    name: Optional[str] = None
+    impact: Optional[str] = None
+    reason: Optional[str] = None
+    sourceRequirementId: Optional[str] = None
+    sourceRequirementText: Optional[str] = None
+    sourceDocument: Optional[str] = None
+    sourceReference: Optional[str] = None
+    productCode: Optional[str] = None
+    priority: Optional[str] = None
+    title: Optional[str] = None
+    description: Optional[str] = None
+
+
+class FeatureRequestUpdateRequest(BaseModel):  # type: ignore[misc]
+    status: str
+
+
+def _feature_request_to_api(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalise a feature_requests row into API shape (camelCase)."""
+
+    return {
+        "id": row.get("id"),
+        "workspaceId": row.get("workspace_id"),
+        "productCode": row.get("product_code"),
+        "capabilityId": row.get("capability_id"),
+        "title": row.get("title"),
+        "description": row.get("description"),
+        "impact": row.get("impact"),
+        "priority": row.get("priority"),
+        "status": row.get("status"),
+        "sourceRequirementId": row.get("source_requirement_id"),
+        "sourceRequirementText": row.get("source_requirement_text"),
+        "sourceDocument": row.get("source_document"),
+        "sourceReference": row.get("source_reference"),
+        "createdAt": row.get("created_at"),
+        "updatedAt": row.get("updated_at"),
+    }
+
+
+@app.get("/api/workspaces/{workspace_id}/feature-requests")
+def api_list_feature_requests(workspace_id: str) -> Dict[str, Any]:
+    """List local feature requests for a workspace.
+
+    This is a purely local surface; no external systems (e.g. Jira) are
+    contacted.
+    """
+
+    # Do not fail the workspace UI when Postgres is unavailable; return
+    # an empty list instead.
+    rows = list_feature_requests(workspace_id) or []
+    return {"featureRequests": [_feature_request_to_api(r) for r in rows]}
+
+
+@app.post("/api/workspaces/{workspace_id}/feature-requests")
+def api_create_feature_request(workspace_id: str, payload: FeatureRequestCreateRequest) -> Dict[str, Any]:
+    """Create (or reuse) a local feature request from a capability item.
+
+    If a feature request already exists for the same workspace and
+    capability, this endpoint returns the existing request instead of
+    creating a duplicate.
+    """
+
+    ws = get_workspace(workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+
+    capability_id = (payload.capabilityId or "").strip()
+    if not capability_id:
+        raise HTTPException(status_code=400, detail="capabilityId is required")
+
+    # First, check whether a feature request already exists for this
+    # workspace + capability. This keeps the surface idempotent and
+    # avoids duplicate requests by default.
+    existing = [
+        fr
+        for fr in list_feature_requests(workspace_id)
+        if isinstance(fr, dict) and (fr.get("capability_id") or "") == capability_id
+    ]
+    if existing:
+        # Reuse the earliest request for stability.
+        existing_sorted = sorted(existing, key=lambda r: (r.get("created_at"), r.get("id")))
+        return {"featureRequest": _feature_request_to_api(existing_sorted[0])}
+
+    product_code = (payload.productCode or ws.get("inferred_product_code") or ws.get("inferred_primary_product_code"))
+    if isinstance(product_code, str) and not product_code.strip():
+        product_code = None
+
+    rule = next((r for r in UNSUPPORTED_CAPABILITY_RULES if r.get("capabilityId") == capability_id), None)
+    default_name = rule.get("name") if isinstance(rule, dict) else capability_id
+
+    title = (payload.title or default_name or capability_id).strip()
+    if not title:
+        title = capability_id
+
+    description_parts: List[str] = []
+    if payload.reason:
+        description_parts.append(str(payload.reason))
+    if payload.sourceRequirementText:
+        description_parts.append(f"Source requirement: {payload.sourceRequirementText}")
+    description = "\n".join(description_parts) if description_parts else None
+
+    row = create_feature_request(
+        workspace_id=workspace_id,
+        product_code=product_code,
+        capability_id=capability_id,
+        title=title,
+        description=description or payload.description,
+        impact=payload.impact,
+        priority=payload.priority,
+        status="proposed",
+        source_requirement_id=payload.sourceRequirementId,
+        source_requirement_text=payload.sourceRequirementText,
+        source_document=payload.sourceDocument,
+        source_reference=payload.sourceReference,
+    )
+    if row is None:
+        raise HTTPException(status_code=503, detail="Feature request storage is not available (Postgres DSN not configured)")
+
+    return {"featureRequest": _feature_request_to_api(row)}
+
+
+@app.patch("/api/workspaces/{workspace_id}/feature-requests/{feature_request_id}")
+def api_update_feature_request(
+    workspace_id: str,
+    feature_request_id: int,
+    payload: FeatureRequestUpdateRequest,
+) -> Dict[str, Any]:
+    """Update the status of a local feature request.
+
+    Status transitions are intentionally loose for this MVP but are
+    constrained to a small, known enum.
+    """
+
+    ws = get_workspace(workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+
+    status_norm = (payload.status or "").strip().lower()
+    if not status_norm:
+        raise HTTPException(status_code=400, detail="status is required")
+
+    # Treat the enum as case-insensitive on input but normalise to
+    # canonical lowercase values in storage.
+    if status_norm not in FEATURE_REQUEST_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid status. Expected one of: "
+                + ", ".join(sorted(FEATURE_REQUEST_STATUSES))
+            ),
+        )
+
+    row = update_feature_request_status(
+        feature_request_id=feature_request_id,
+        workspace_id=workspace_id,
+        status=status_norm,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Feature request not found for this workspace")
+
+    return {"featureRequest": _feature_request_to_api(row)}
 
 
 def _normalise_promise_ul_code(product_code: str) -> str:

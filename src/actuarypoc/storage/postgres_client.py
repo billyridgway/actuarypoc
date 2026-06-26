@@ -291,6 +291,30 @@ CREATE TABLE IF NOT EXISTS workspace_documents (
 
 CREATE INDEX IF NOT EXISTS idx_workspace_documents_workspace
     ON workspace_documents(workspace_id);
+
+CREATE TABLE IF NOT EXISTS feature_requests (
+    id bigserial PRIMARY KEY,
+    workspace_id text NOT NULL,
+    product_code text,
+    capability_id text NOT NULL,
+    title text NOT NULL,
+    description text,
+    impact text,
+    priority text,
+    status text NOT NULL,
+    source_requirement_id text,
+    source_requirement_text text,
+    source_document text,
+    source_reference text,
+    created_at timestamptz DEFAULT now(),
+    updated_at timestamptz DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_feature_requests_workspace
+    ON feature_requests(workspace_id);
+
+CREATE INDEX IF NOT EXISTS idx_feature_requests_workspace_capability
+    ON feature_requests(workspace_id, capability_id);
 """
 
 
@@ -427,6 +451,49 @@ def _workspace_row_to_dict(row: Any, include_snapshot: bool = True) -> Dict[str,
     }
 
 
+def _feature_request_row_to_dict(row: Any) -> Dict[str, Any]:
+    """Map a feature_requests row to a dict.
+
+    The column order must match the SELECT clauses in helpers below.
+    """
+
+    (
+        fr_id,
+        workspace_id,
+        product_code,
+        capability_id,
+        title,
+        description,
+        impact,
+        priority,
+        status,
+        source_requirement_id,
+        source_requirement_text,
+        source_document,
+        source_reference,
+        created_at,
+        updated_at,
+    ) = row
+
+    return {
+        "id": fr_id,
+        "workspace_id": workspace_id,
+        "product_code": product_code,
+        "capability_id": capability_id,
+        "title": title,
+        "description": description,
+        "impact": impact,
+        "priority": priority,
+        "status": status,
+        "source_requirement_id": source_requirement_id,
+        "source_requirement_text": source_requirement_text,
+        "source_document": source_document,
+        "source_reference": source_reference,
+        "created_at": created_at,
+        "updated_at": updated_at,
+    }
+
+
 def record_assumption_set(
     *,
     set_id: str,
@@ -548,6 +615,260 @@ def record_illustration_run(
         _note_failure(exc)
 
 
+def create_feature_request(
+    *,
+    workspace_id: str,
+    product_code: Optional[str],
+    capability_id: str,
+    title: str,
+    description: Optional[str] = None,
+    impact: Optional[str] = None,
+    priority: Optional[str] = None,
+    status: str = "proposed",
+    source_requirement_id: Optional[str] = None,
+    source_requirement_text: Optional[str] = None,
+    source_document: Optional[str] = None,
+    source_reference: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Create a single local feature request for a workspace.
+
+    This helper performs a straightforward INSERT and returns the stored
+    row as a dict. Callers are responsible for enforcing idempotency
+    (e.g. avoiding duplicates per workspace+capability) at a higher
+    level.
+    """
+
+    ensure_schema()
+    try:
+        with _conn() as conn:
+            if conn is None:
+                return None
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO feature_requests (
+                        workspace_id,
+                        product_code,
+                        capability_id,
+                        title,
+                        description,
+                        impact,
+                        priority,
+                        status,
+                        source_requirement_id,
+                        source_requirement_text,
+                        source_document,
+                        source_reference
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING
+                        id,
+                        workspace_id,
+                        product_code,
+                        capability_id,
+                        title,
+                        description,
+                        impact,
+                        priority,
+                        status,
+                        source_requirement_id,
+                        source_requirement_text,
+                        source_document,
+                        source_reference,
+                        created_at,
+                        updated_at
+                    """,
+                    (
+                        workspace_id,
+                        product_code,
+                        capability_id,
+                        title,
+                        description,
+                        impact,
+                        priority,
+                        status,
+                        source_requirement_id,
+                        source_requirement_text,
+                        source_document,
+                        source_reference,
+                    ),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                return _feature_request_row_to_dict(row)
+    except Exception as exc:  # noqa: BLE001
+        _note_failure(exc)
+        return None
+
+
+def list_feature_requests(workspace_id: str) -> List[Dict[str, Any]]:
+    """Return all feature requests for a workspace.
+
+    Results are ordered by created_at ascending to provide a stable
+    review order in the UI.
+    """
+
+    ensure_schema()
+    try:
+        with _conn() as conn:
+            if conn is None:
+                return []
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        id,
+                        workspace_id,
+                        product_code,
+                        capability_id,
+                        title,
+                        description,
+                        impact,
+                        priority,
+                        status,
+                        source_requirement_id,
+                        source_requirement_text,
+                        source_document,
+                        source_reference,
+                        created_at,
+                        updated_at
+                      FROM feature_requests
+                     WHERE workspace_id = %s
+                  ORDER BY created_at ASC, id ASC
+                    """,
+                    (workspace_id,),
+                )
+                rows = cur.fetchall() or []
+                return [_feature_request_row_to_dict(r) for r in rows]
+    except Exception as exc:  # noqa: BLE001
+        _note_failure(exc)
+        return []
+
+
+def get_feature_request(feature_request_id: int) -> Optional[Dict[str, Any]]:
+    """Fetch a single feature request by id.
+
+    When Postgres is unavailable or the id does not exist, returns
+    ``None`` instead of raising.
+    """
+
+    ensure_schema()
+    try:
+        with _conn() as conn:
+            if conn is None:
+                return None
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        id,
+                        workspace_id,
+                        product_code,
+                        capability_id,
+                        title,
+                        description,
+                        impact,
+                        priority,
+                        status,
+                        source_requirement_id,
+                        source_requirement_text,
+                        source_document,
+                        source_reference,
+                        created_at,
+                        updated_at
+                      FROM feature_requests
+                     WHERE id = %s
+                    """,
+                    (feature_request_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                return _feature_request_row_to_dict(row)
+    except Exception as exc:  # noqa: BLE001
+        _note_failure(exc)
+        return None
+
+
+def update_feature_request_status(
+    *, feature_request_id: int, workspace_id: Optional[str], status: str
+) -> Optional[Dict[str, Any]]:
+    """Update the status of a feature request.
+
+    When ``workspace_id`` is provided the update is scoped to that
+    workspace to avoid cross-workspace edits.
+    """
+
+    ensure_schema()
+    try:
+        with _conn() as conn:
+            if conn is None:
+                return None
+            with conn.cursor() as cur:
+                if workspace_id:
+                    cur.execute(
+                        """
+                        UPDATE feature_requests
+                           SET status = %s,
+                               updated_at = now()
+                         WHERE id = %s
+                           AND workspace_id = %s
+                     RETURNING
+                        id,
+                        workspace_id,
+                        product_code,
+                        capability_id,
+                        title,
+                        description,
+                        impact,
+                        priority,
+                        status,
+                        source_requirement_id,
+                        source_requirement_text,
+                        source_document,
+                        source_reference,
+                        created_at,
+                        updated_at
+                        """,
+                        (status, feature_request_id, workspace_id),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        UPDATE feature_requests
+                           SET status = %s,
+                               updated_at = now()
+                         WHERE id = %s
+                     RETURNING
+                        id,
+                        workspace_id,
+                        product_code,
+                        capability_id,
+                        title,
+                        description,
+                        impact,
+                        priority,
+                        status,
+                        source_requirement_id,
+                        source_requirement_text,
+                        source_document,
+                        source_reference,
+                        created_at,
+                        updated_at
+                        """,
+                        (status, feature_request_id),
+                    )
+
+                row = cur.fetchone()
+                if not row:
+                    return None
+                return _feature_request_row_to_dict(row)
+    except Exception as exc:  # noqa: BLE001
+        _note_failure(exc)
+        return None
+
+
 def create_workspace() -> Optional[Dict[str, Any]]:
     """Create a new document-first workspace.
 
@@ -610,26 +931,32 @@ def list_workspaces() -> List[Dict[str, Any]]:
                 cur.execute(
                     """
                     SELECT
-                        id,
-                        status,
-                        document_count,
-                        inferred_product_name,
-                        inferred_product_code,
-                        inferred_product_type,
-                        inferred_carrier,
-                        inferred_filing_context,
-                        inferred_primary_product_code,
-                        understanding_status,
-                        compliance_overall_status,
-                        compliance_implemented_count,
-                        compliance_partial_count,
-                        compliance_missing_count,
-                        projection_trust_level,
-                        last_analysis_run_id,
-                        created_at,
-                        updated_at
-                      FROM workspaces
-                  ORDER BY created_at DESC
+                        w.id,
+                        w.status,
+                        COALESCE(dc.doc_count, 0) AS document_count,
+                        w.inferred_product_name,
+                        w.inferred_product_code,
+                        w.inferred_product_type,
+                        w.inferred_carrier,
+                        w.inferred_filing_context,
+                        w.inferred_primary_product_code,
+                        w.understanding_status,
+                        w.compliance_overall_status,
+                        w.compliance_implemented_count,
+                        w.compliance_partial_count,
+                        w.compliance_missing_count,
+                        w.projection_trust_level,
+                        w.last_analysis_run_id,
+                        w.created_at,
+                        w.updated_at
+                      FROM workspaces w
+                 LEFT JOIN (
+                        SELECT workspace_id, COUNT(document_id) AS doc_count
+                          FROM workspace_documents
+                      GROUP BY workspace_id
+                      ) dc
+                        ON dc.workspace_id = w.id
+                  ORDER BY w.created_at DESC
                     """,
                 )
                 rows = cur.fetchall() or []
@@ -651,27 +978,33 @@ def get_workspace(workspace_id: str) -> Optional[Dict[str, Any]]:
                 cur.execute(
                     """
                     SELECT
-                        id,
-                        status,
-                        document_count,
-                        latest_snapshot_json,
-                        inferred_product_name,
-                        inferred_product_code,
-                        inferred_product_type,
-                        inferred_carrier,
-                        inferred_filing_context,
-                        inferred_primary_product_code,
-                        understanding_status,
-                        compliance_overall_status,
-                        compliance_implemented_count,
-                        compliance_partial_count,
-                        compliance_missing_count,
-                        projection_trust_level,
-                        last_analysis_run_id,
-                        created_at,
-                        updated_at
-                      FROM workspaces
-                     WHERE id = %s
+                        w.id,
+                        w.status,
+                        COALESCE(dc.doc_count, 0) AS document_count,
+                        w.latest_snapshot_json,
+                        w.inferred_product_name,
+                        w.inferred_product_code,
+                        w.inferred_product_type,
+                        w.inferred_carrier,
+                        w.inferred_filing_context,
+                        w.inferred_primary_product_code,
+                        w.understanding_status,
+                        w.compliance_overall_status,
+                        w.compliance_implemented_count,
+                        w.compliance_partial_count,
+                        w.compliance_missing_count,
+                        w.projection_trust_level,
+                        w.last_analysis_run_id,
+                        w.created_at,
+                        w.updated_at
+                      FROM workspaces w
+                 LEFT JOIN (
+                        SELECT workspace_id, COUNT(document_id) AS doc_count
+                          FROM workspace_documents
+                      GROUP BY workspace_id
+                      ) dc
+                        ON dc.workspace_id = w.id
+                     WHERE w.id = %s
                     """,
                     (workspace_id,),
                 )
@@ -697,6 +1030,9 @@ def record_workspace_document(workspace_id: str, document_id: int) -> None:
             if conn is None:
                 return
             with conn.cursor() as cur:
+                # Link the document to the workspace. ON CONFLICT ensures
+                # we do not create duplicate links for the same
+                # (workspace_id, document_id) pair.
                 cur.execute(
                     """
                     INSERT INTO workspace_documents (workspace_id, document_id)
@@ -705,12 +1041,13 @@ def record_workspace_document(workspace_id: str, document_id: int) -> None:
                     """,
                     (workspace_id, document_id),
                 )
+                inserted = cur.rowcount or 0
                 # Bump document_count and move from waiting_for_documents
                 # to ready_for_analysis when appropriate.
                 cur.execute(
                     """
                     UPDATE workspaces
-                       SET document_count = document_count + 1,
+                       SET document_count = document_count + CASE WHEN %s > 0 THEN 1 ELSE 0 END,
                            status = CASE
                                       WHEN status IN ('waiting_for_documents', 'analysis_failed')
                                       THEN 'ready_for_analysis'
@@ -719,7 +1056,7 @@ def record_workspace_document(workspace_id: str, document_id: int) -> None:
                            updated_at = now()
                      WHERE id = %s
                     """,
-                    (workspace_id,),
+                    (inserted, workspace_id),
                 )
     except Exception as exc:  # noqa: BLE001
         _note_failure(exc)

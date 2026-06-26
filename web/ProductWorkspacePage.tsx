@@ -177,6 +177,44 @@ interface WorkspacePayload {
     status: string;
     aiGenerated: boolean;
   }>;
+  capabilityAssessment?: {
+    summary?: {
+      supported?: number;
+      partial?: number;
+      unsupported?: number;
+    };
+    items?: Array<{
+      capabilityId: string;
+      name?: string;
+      status?: string;
+      impact?: string;
+      reason?: string;
+      productCode?: string | null;
+      sourceRequirementId?: string | null;
+      sourceRequirementText?: string | null;
+      sourceDocument?: string | null;
+      sourceReference?: string | null;
+      recommendedAction?: string | null;
+    }>;
+  };
+}
+
+interface FeatureRequest {
+  id: number;
+  workspaceId?: string;
+  productCode?: string | null;
+  capabilityId: string;
+  title: string;
+  description?: string | null;
+  impact?: string | null;
+  priority?: string | null;
+  status: string;
+  sourceRequirementId?: string | null;
+  sourceRequirementText?: string | null;
+  sourceDocument?: string | null;
+  sourceReference?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
 }
 
 const formatCurrency = (value: any): string => {
@@ -231,10 +269,20 @@ const formatProjectionTrustLevel = (value?: string | null): string => {
   }
 };
 
-export const ProductWorkspacePage: React.FC<{ productCode?: string; snapshot?: WorkspacePayload | null }> = ({
-  productCode,
-  snapshot,
-}) => {
+const FEATURE_REQUEST_STATUSES = [
+  "proposed",
+  "approved",
+  "rejected",
+  "in_progress",
+  "complete",
+  "deferred",
+] as const;
+
+export const ProductWorkspacePage: React.FC<{
+  productCode?: string;
+  snapshot?: WorkspacePayload | null;
+  workspaceId?: string;
+}> = ({ productCode, snapshot, workspaceId }) => {
   const [data, setData] = React.useState<WorkspacePayload | null>(snapshot ?? null);
   const [loading, setLoading] = React.useState<boolean>(!snapshot);
   const [error, setError] = React.useState<string | null>(null);
@@ -247,6 +295,11 @@ export const ProductWorkspacePage: React.FC<{ productCode?: string; snapshot?: W
   const [showAssumptions, setShowAssumptions] = React.useState<boolean>(false);
   const [showGapWarnings, setShowGapWarnings] = React.useState<boolean>(false);
   const [showDocuments, setShowDocuments] = React.useState<boolean>(false);
+  const [featureRequests, setFeatureRequests] = React.useState<FeatureRequest[] | null>(null);
+  const [featureRequestsLoading, setFeatureRequestsLoading] = React.useState<boolean>(false);
+  const [featureRequestsError, setFeatureRequestsError] = React.useState<string | null>(null);
+  const [creatingCapabilityId, setCreatingCapabilityId] = React.useState<string | null>(null);
+  const [updatingFeatureRequestId, setUpdatingFeatureRequestId] = React.useState<number | null>(null);
 
   React.useEffect(() => {
     if (snapshot) {
@@ -316,6 +369,47 @@ export const ProductWorkspacePage: React.FC<{ productCode?: string; snapshot?: W
     };
   }, [productCode, snapshot]);
 
+  // Load existing feature requests when viewing a workspace-backed snapshot.
+  React.useEffect(() => {
+    if (!workspaceId) {
+      setFeatureRequests(null);
+      setFeatureRequestsError(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    const load = async () => {
+      try {
+        setFeatureRequestsLoading(true);
+        setFeatureRequestsError(null);
+        const resp = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/feature-requests`);
+        if (!resp.ok) {
+          const text = await resp.text();
+          throw new Error(text || `Failed to load feature requests (HTTP ${resp.status})`);
+        }
+        const body = (await resp.json()) as { featureRequests?: FeatureRequest[] };
+        if (!cancelled) {
+          setFeatureRequests(body.featureRequests ?? []);
+        }
+      } catch (err: any) {
+        if (!cancelled) {
+          setFeatureRequestsError(err?.message || "Failed to load feature requests.");
+          setFeatureRequests([]);
+        }
+      } finally {
+        if (!cancelled) {
+          setFeatureRequestsLoading(false);
+        }
+      }
+    };
+
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceId]);
+
   const product = data?.product;
   const productUnderstanding = data?.productUnderstanding;
   const mechanicsSummary = data?.mechanics?.summary;
@@ -330,6 +424,7 @@ export const ProductWorkspacePage: React.FC<{ productCode?: string; snapshot?: W
   const documentInventory = data?.documentInventory;
   const extractedFacts = data?.extractedFacts ?? [];
   const requirementsCandidates = data?.requirementsCandidates ?? [];
+  const capabilityAssessment = data?.capabilityAssessment;
 
   const gapItems = gaps?.items ?? [];
   // Build a short, deterministic product description from existing
@@ -368,6 +463,130 @@ export const ProductWorkspacePage: React.FC<{ productCode?: string; snapshot?: W
   }
 
   const overviewText = overviewParts.join(" ");
+
+  const capabilityItems =
+    capabilityAssessment && Array.isArray(capabilityAssessment.items) ? capabilityAssessment.items : [];
+
+  const capabilityHasUnsupportedItems =
+    capabilityItems && capabilityItems.length > 0 &&
+    capabilityItems.some((item) => (item.status || "unsupported").toLowerCase() !== "supported");
+
+  const featureRequestForCapability = (capabilityId: string): FeatureRequest | undefined => {
+    if (!featureRequests || !Array.isArray(featureRequests)) return undefined;
+    const cid = (capabilityId || "").toString();
+    return featureRequests.find((fr) => (fr.capabilityId || "") === cid);
+  };
+
+  const reloadFeatureRequests = async () => {
+    if (!workspaceId) return;
+    try {
+      setFeatureRequestsLoading(true);
+      setFeatureRequestsError(null);
+      const resp = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/feature-requests`);
+      if (!resp.ok) {
+        const text = await resp.text();
+        throw new Error(text || `Failed to load feature requests (HTTP ${resp.status})`);
+      }
+      const body = (await resp.json()) as { featureRequests?: FeatureRequest[] };
+      setFeatureRequests(body.featureRequests ?? []);
+    } catch (err: any) {
+      setFeatureRequestsError(err?.message || "Failed to load feature requests.");
+    } finally {
+      setFeatureRequestsLoading(false);
+    }
+  };
+
+  const handleCreateFeatureRequest = async (item: any) => {
+    if (!workspaceId) return;
+    const cid = (item.capabilityId || "").toString();
+    if (!cid) return;
+    setCreatingCapabilityId(cid);
+    try {
+      const payload = {
+        capabilityId: cid,
+        name: item.name || undefined,
+        impact: item.impact || undefined,
+        reason: item.reason || undefined,
+        sourceRequirementId: item.sourceRequirementId || undefined,
+        sourceRequirementText: item.sourceRequirementText || undefined,
+        sourceDocument: item.sourceDocument || undefined,
+        sourceReference: item.sourceReference || undefined,
+        productCode: item.productCode || product?.code || productCode || undefined,
+        priority: undefined,
+      };
+
+      const resp = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/feature-requests`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!resp.ok) {
+        const text = await resp.text();
+        throw new Error(text || `Failed to create feature request (HTTP ${resp.status})`);
+      }
+      const body = (await resp.json()) as { featureRequest?: FeatureRequest };
+      if (body.featureRequest) {
+        // Merge into local list without duplicating.
+        setFeatureRequests((prev) => {
+          const base = Array.isArray(prev) ? [...prev] : [];
+          const existingIdx = base.findIndex((fr) => fr.id === body.featureRequest!.id);
+          if (existingIdx >= 0) {
+            base[existingIdx] = body.featureRequest!;
+          } else {
+            base.push(body.featureRequest!);
+          }
+          return base;
+        });
+      } else {
+        // Fallback: reload from server if shape was unexpected.
+        await reloadFeatureRequests();
+      }
+    } catch (err: any) {
+      setFeatureRequestsError(err?.message || "Failed to create feature request.");
+    } finally {
+      setCreatingCapabilityId(null);
+    }
+  };
+
+  const handleUpdateFeatureRequestStatus = async (featureRequest: FeatureRequest, status: string) => {
+    if (!workspaceId || !featureRequest?.id) return;
+    const next = (status || "").toLowerCase();
+    if (!next) return;
+    setUpdatingFeatureRequestId(featureRequest.id);
+    try {
+      const resp = await fetch(
+        `/api/workspaces/${encodeURIComponent(workspaceId)}/feature-requests/${encodeURIComponent(String(featureRequest.id))}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: next }),
+        },
+      );
+      if (!resp.ok) {
+        const text = await resp.text();
+        throw new Error(text || `Failed to update feature request (HTTP ${resp.status})`);
+      }
+      const body = (await resp.json()) as { featureRequest?: FeatureRequest };
+      if (body.featureRequest) {
+        setFeatureRequests((prev) => {
+          const base = Array.isArray(prev) ? [...prev] : [];
+          const idx = base.findIndex((fr) => fr.id === body.featureRequest!.id);
+          if (idx >= 0) {
+            base[idx] = body.featureRequest!;
+          } else {
+            base.push(body.featureRequest!);
+          }
+          return base;
+        });
+      } else {
+        await reloadFeatureRequests();
+      }
+    } catch (err: any) {
+      setFeatureRequestsError(err?.message || "Failed to update feature request status.");
+    } finally {
+      setUpdatingFeatureRequestId(null);
+    }
+  };
 
   return (
     <div className="home-page">
@@ -862,6 +1081,135 @@ export const ProductWorkspacePage: React.FC<{ productCode?: string; snapshot?: W
               ? "Loading candidate requirements…"
               : "No candidate requirements are available yet for this workspace."}
           </p>
+        )}
+      </section>
+
+      <section className="card home-card">
+        <h2>Unsupported Platform Features</h2>
+        <p className="muted">
+          Deterministic detection of potential unsupported platform features based on candidate requirements and
+          existing evidence. This indicates where the filing appears to require functionality that the current
+          platform does not explicitly support.
+        </p>
+        {capabilityHasUnsupportedItems ? (
+          <>
+            {capabilityAssessment?.summary && (
+              <p className="muted">
+                Summary: Unsupported {capabilityAssessment.summary?.unsupported ?? 0}, Partial{" "}
+                {capabilityAssessment.summary?.partial ?? 0}, Supported {" "}
+                {capabilityAssessment.summary?.supported ?? 0}
+              </p>
+            )}
+            <div className="compliance-list">
+              {capabilityItems.map((item) => {
+                const fr = featureRequestForCapability(item.capabilityId);
+                const statusLabel = formatStatusLabel(item.status || "unsupported");
+                const impactLabel = formatStatusLabel(item.impact || "unknown");
+                const frStatusLabel = fr ? formatStatusLabel(fr.status || "proposed") : null;
+                const createDisabled = !workspaceId || !!fr || creatingCapabilityId === item.capabilityId;
+                const buttonLabel =
+                  creatingCapabilityId === item.capabilityId ? "Creating…" : "Create Feature Request";
+
+                return (
+                  <div key={item.capabilityId} className="compliance-item">
+                    <h3>{item.name || item.capabilityId}</h3>
+                    <p className="muted">
+                      <strong>Status:</strong> {statusLabel} | <strong>Impact:</strong> {impactLabel}
+                    </p>
+                    {item.reason && <p className="muted">{item.reason}</p>}
+                    {item.sourceRequirementText && (
+                      <p className="muted">
+                        <strong>Source requirement:</strong> {item.sourceRequirementText}
+                      </p>
+                    )}
+                    {(item.sourceDocument || item.sourceReference) && (
+                      <p className="muted">
+                        <strong>Source document:</strong> {item.sourceDocument || "(not recorded)"};{" "}
+                        <strong>Reference:</strong> {item.sourceReference || "(not recorded)"}
+                      </p>
+                    )}
+                    {fr ? (
+                      <p className="muted">
+                        Feature Request:{" "}
+                        <span className="tag">{frStatusLabel}</span>
+                      </p>
+                    ) : workspaceId ? (
+                      <button
+                        type="button"
+                        className="button button-secondary"
+                        disabled={createDisabled}
+                        onClick={() => handleCreateFeatureRequest(item)}
+                      >
+                        {buttonLabel}
+                      </button>
+                    ) : (
+                      <p className="muted">Open this product via a workspace to file feature requests.</p>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        ) : (
+          <p className="muted">
+            {loading
+              ? "Loading capability assessment…"
+              : "No unsupported platform features were deterministically detected from the current candidate requirements."}
+          </p>
+        )}
+      </section>
+
+      <section className="card home-card">
+        <h2>Feature Requests</h2>
+        <p className="muted">
+          Local feature requests for this workspace. These stay within the product workspace and are not synced to
+          Jira, Linear, or any external system.
+        </p>
+        {!workspaceId ? (
+          <p className="muted">Feature requests are available only when viewing a specific workspace.</p>
+        ) : featureRequestsLoading ? (
+          <p className="muted">Loading feature requests…</p>
+        ) : featureRequestsError ? (
+          <p className="error">{featureRequestsError}</p>
+        ) : featureRequests && featureRequests.length > 0 ? (
+          <table className="kv-table">
+            <thead>
+              <tr>
+                <th>Title</th>
+                <th>Capability</th>
+                <th>Priority</th>
+                <th>Status</th>
+                <th>Source requirement</th>
+                <th>Created at</th>
+              </tr>
+            </thead>
+            <tbody>
+              {featureRequests.map((fr) => (
+                <tr key={fr.id}>
+                  <td>{fr.title}</td>
+                  <td>{fr.capabilityId}</td>
+                  <td>{fr.priority || "(unset)"}</td>
+                  <td>
+                    <select
+                      value={fr.status}
+                      onChange={(e) => handleUpdateFeatureRequestStatus(fr, e.target.value)}
+                      disabled={updatingFeatureRequestId === fr.id}
+                    >
+                      {FEATURE_REQUEST_STATUSES.map((s) => (
+                        <option key={s} value={s}>
+                          {formatStatusLabel(s)}
+                        </option>
+                      ))}
+                    </select>
+                  </td>
+                  <td>{fr.sourceRequirementText || fr.sourceRequirementId || "(not recorded)"}</td>
+                  <td>{fr.createdAt || ""}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <p className="muted">No feature requests have been created for this workspace yet.</p>
         )}
       </section>
 
