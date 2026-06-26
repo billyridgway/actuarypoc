@@ -49,6 +49,13 @@ export const ProductCatalogPage: React.FC = () => {
   const [workspaces, setWorkspaces] = React.useState<CatalogWorkspace[]>([]);
   const [loading, setLoading] = React.useState<boolean>(true);
   const [error, setError] = React.useState<string | null>(null);
+  const [creating, setCreating] = React.useState<boolean>(false);
+  const [uploadProgress, setUploadProgress] = React.useState<{
+    total: number;
+    uploaded: number;
+  } | null>(null);
+
+  const fileInputRef = React.useRef<HTMLInputElement | null>(null);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -126,43 +133,103 @@ export const ProductCatalogPage: React.FC = () => {
     }
   };
 
+  const handleNewProductReviewFiles: React.ChangeEventHandler<HTMLInputElement> = async (event) => {
+    const files = event.target.files;
+    if (!files || files.length === 0) return;
+
+    const fileArray = Array.from(files);
+    setCreating(true);
+    setUploadProgress({ total: fileArray.length, uploaded: 0 });
+    setError(null);
+
+    try {
+      // Step 1: create a new workspace to host these filings.
+      const respWorkspace = await fetch("/api/workspaces", { method: "POST" });
+      if (!respWorkspace.ok) {
+        const text = await respWorkspace.text();
+        throw new Error(text || `Failed to create workspace (HTTP ${respWorkspace.status})`);
+      }
+      const bodyWs: any = await respWorkspace.json();
+      const ws = bodyWs.workspace;
+      const workspaceId: string | undefined = ws && ws.id ? String(ws.id) : undefined;
+      if (!workspaceId) {
+        throw new Error("Workspace ID was not returned from create endpoint.");
+      }
+
+      // Step 2: upload each selected filing document into the new workspace.
+      let uploaded = 0;
+      for (const file of fileArray) {
+        const form = new FormData();
+        form.append("file", file);
+        const respUpload = await fetch(
+          `/api/workspaces/${encodeURIComponent(workspaceId)}/documents`,
+          {
+            method: "POST",
+            body: form,
+          },
+        );
+        if (!respUpload.ok) {
+          const text = await respUpload.text();
+          throw new Error(text || `Upload failed with status ${respUpload.status}`);
+        }
+        uploaded += 1;
+        setUploadProgress({ total: fileArray.length, uploaded });
+      }
+
+      // Step 3: open the workspace so the user can immediately click Analyze Product.
+      window.location.href = `/web?workspace=${encodeURIComponent(workspaceId)}`;
+    } catch (err: any) {
+      setError(err?.message || "Failed to create product review workspace.");
+    } finally {
+      setCreating(false);
+      setUploadProgress(null);
+      if (event.target) {
+        event.target.value = "";
+      }
+    }
+  };
+
   return (
     <div className="home-page">
       <section className="card home-card">
         <h2>Workspace Catalog</h2>
         <p className="muted">
-          Create a product workspace, upload filings, and then analyze the product. Use Expert / Debug mode for
-          detailed pipeline control.
+          Start a new product review by uploading one or more filing documents. The system will create a workspace for
+          you and attach those documents automatically. Use Expert / Debug mode for detailed pipeline control.
         </p>
         <p>
           <button
             type="button"
             className="button"
-            onClick={async () => {
-              try {
-                setError(null);
-                const resp = await fetch("/api/workspaces", { method: "POST" });
-                if (!resp.ok) {
-                  const text = await resp.text();
-                  throw new Error(text || `HTTP ${resp.status}`);
-                }
-                const body = await resp.json();
-                const ws = body.workspace;
-                if (ws && ws.id) {
-                  window.location.href = `/web?workspace=${encodeURIComponent(ws.id)}`;
-                }
-              } catch (err: any) {
-                setError(err?.message || "Failed to create workspace.");
+            disabled={creating}
+            onClick={() => {
+              setError(null);
+              if (fileInputRef.current) {
+                fileInputRef.current.click();
               }
             }}
           >
-            Create Workspace
+            New Product Review
           </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            style={{ display: "none" }}
+            onChange={handleNewProductReviewFiles}
+          />
         </p>
+        {uploadProgress && (
+          <p className="muted">
+            Uploading filings… {uploadProgress.uploaded} of {uploadProgress.total}
+          </p>
+        )}
         {loading && <p className="muted">Loading products…</p>}
         {error && !loading && <p className="error">{error}</p>}
         {!loading && !error && !hasWorkspaces && (
-          <p className="muted">No workspaces exist yet. Click Create Workspace to get started.</p>
+          <p className="muted">
+            No workspaces exist yet. Click New Product Review and upload filings to get started.
+          </p>
         )}
 
         {hasWorkspaces && (
@@ -174,7 +241,7 @@ export const ProductCatalogPage: React.FC = () => {
               const projectionLabel = w.projectionTrustLevel
                 ? normaliseComplianceLabel(w.projectionTrustLevel)
                 : "Unknown";
-              const name = w.inferredProductName || "(Not analyzed yet)";
+              const name = w.inferredProductName || "New Product Review";
               const type = w.inferredProductType || "(unknown)";
               const carrier = w.inferredCarrier || "(unknown)";
 
