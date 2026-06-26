@@ -167,6 +167,7 @@ interface WorkspacePayload {
     source?: string | null;
     confidence?: number | null;
     status?: string;
+    provenanceKind?: string;
   }>;
   requirementsCandidates?: Array<{
     id?: string;
@@ -269,6 +270,24 @@ const formatProjectionTrustLevel = (value?: string | null): string => {
   }
 };
 
+const formatProvenance = (value?: string | null): string => {
+  const v = (value || "").toLowerCase();
+  switch (v) {
+    case "workspace_snapshot":
+      return "Workspace snapshot";
+    case "product_definition":
+      return "Structured ProductDefinition";
+    case "user_entered":
+      return "User-entered";
+    case "system_default":
+      return "System default";
+    case "unresolved":
+      return "Unresolved / missing";
+    default:
+      return v ? formatStatusLabel(v) : "Unknown";
+  }
+};
+
 const FEATURE_REQUEST_STATUSES = [
   "proposed",
   "approved",
@@ -300,6 +319,7 @@ export const ProductWorkspacePage: React.FC<{
   const [featureRequestsError, setFeatureRequestsError] = React.useState<string | null>(null);
   const [creatingCapabilityId, setCreatingCapabilityId] = React.useState<string | null>(null);
   const [updatingFeatureRequestId, setUpdatingFeatureRequestId] = React.useState<number | null>(null);
+  const [showAdvancedDebug, setShowAdvancedDebug] = React.useState<boolean>(false);
 
   React.useEffect(() => {
     if (snapshot) {
@@ -588,13 +608,22 @@ export const ProductWorkspacePage: React.FC<{
     }
   };
 
+  const hasMaterialProjectionGaps = gapItems.some((g) => {
+    const id = (g.id || "").toString().toLowerCase();
+    return (
+      id === "missing_coi_table" ||
+      id === "surrender_schedule_placeholder" ||
+      id === "policy_admin_fee_missing"
+    );
+  });
+
   return (
     <div className="home-page">
       <header className="card">
         <h1>Product Understanding Workspace</h1>
         <p className="muted">
-          High-level, read-only view of the current product understanding. Use this as the default workspace; switch to
-          Expert / Debug mode when you need full control over each pipeline stage.
+          Guided review surface for the current product understanding. Start at the top, work through each section,
+          and use Expert / Debug mode when you need full control over each pipeline stage.
         </p>
         <p>
           <a href="/web?view=expert" className="button">
@@ -603,113 +632,76 @@ export const ProductWorkspacePage: React.FC<{
         </p>
         {loading && <p className="muted">Loading product workspace…</p>}
         {error && !loading && <p className="error">{error}</p>}
+        <p className="muted" style={{ marginTop: "0.5rem" }}>
+          <button
+            type="button"
+            className="button button-ghost"
+            onClick={() => setShowAdvancedDebug((v) => !v)}
+          >
+            {showAdvancedDebug ? "Hide advanced debug sections" : "Show advanced debug sections"}
+          </button>
+        </p>
       </header>
 
       <section className="card home-card">
-        <h2>Product Readiness Dashboard</h2>
+        <h2>Executive Review Summary</h2>
         <p className="muted">
-          Quick view of how complete the current understanding is, whether you can trust the projection, and what
-          should happen next.
+          Quick view of what product this appears to be, how trustworthy the current analysis is, and what you should
+          do next.
         </p>
-        {readiness ? (
-          <>
-            <h3>Overall Understanding Status</h3>
-            <p>
-              <strong>Status:</strong>{" "}
-              <span
-                className={`tag tag--understanding-${(readiness.overallStatus || "unknown").toLowerCase()}`}
-              >
-                {formatStatusLabel(readiness.overallStatus || "unknown")}
-              </span>
-            </p>
-            {readiness.overallExplanation && <p className="muted">{readiness.overallExplanation}</p>}
-
-            <h3>Compliance Summary</h3>
-            <p>
-              {readiness.complianceSummary
-                ? `Implemented: ${readiness.complianceSummary.implemented ?? 0}, Partial: ${
-                    readiness.complianceSummary.partial ?? 0
-                  }, Missing: ${readiness.complianceSummary.missing ?? 0}`
-                : "Compliance summary is not available yet for this product."}
-            </p>
-
-            <h3>Projection Trust Level</h3>
-            <p>
-              <strong>Level:</strong> {formatProjectionTrustLevel(readiness.projectionTrustLevel || "unknown")}
-            </p>
-
-            <h3>Critical Missing Requirements</h3>
-            {readiness.criticalIssues && readiness.criticalIssues.length > 0 ? (
-              <ul className="muted">
-                {readiness.criticalIssues.map((ci) => (
-                  <li key={ci.id}>
-                    {(ci.name || ci.id) + " – " + formatStatusLabel(ci.status || "unknown") + " (" +
-                      formatStatusLabel(ci.impact || "unknown") + " impact)"}
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <p className="muted">No critical missing or partial high-impact requirements identified.</p>
-            )}
-
-            <h3>Recommended Next Action</h3>
-            <p className="muted">
-              {readiness.recommendedNextAction ||
-                "Review the compliance matrix and evidence to decide the next best action for this product."}
-            </p>
-            {readiness.recommendedNextAction === "Upload COI rate table." && (
-              <div className="next-action">
-                <label className="button">
-                  {dashboardUploading ? "Uploading COI rate table…" : "Upload COI rate table"}
-                  <input
-                    type="file"
-                    style={{ display: "none" }}
-                    disabled={dashboardUploading}
-                    onChange={async (event: React.ChangeEvent<HTMLInputElement>) => {
-                      const file = event.target.files && event.target.files[0];
-                      if (!file) return;
-                      setDashboardUploading(true);
-                      setDashboardUploadMessage(null);
-                      try {
-                        const form = new FormData();
-                        form.append("file", file);
-                        const dashProductCode = product?.code || productCode || "ICC18 P18PR UL";
-                        const resp = await fetch(
-                          `/api/product-assumptions/${encodeURIComponent(dashProductCode)}/support`,
-                          {
-                            method: "POST",
-                            body: form,
-                          },
-                        );
-                        if (!resp.ok) {
-                          const text = await resp.text();
-                          throw new Error(text || `Upload failed with status ${resp.status}`);
-                        }
-                        setDashboardUploadMessage(
-                          "Uploaded. Use Expert / Debug mode to rerun the pipeline until workspace rerun is wired.",
-                        );
-                      } catch (e: any) {
-                        setDashboardUploadMessage(e?.message || "Upload failed.");
-                      } finally {
-                        setDashboardUploading(false);
-                        if (event.target) {
-                          event.target.value = "";
-                        }
-                      }
-                    }}
-                  />
-                </label>
-                {dashboardUploadMessage && <p className="muted">{dashboardUploadMessage}</p>}
-              </div>
-            )}
-          </>
-        ) : (
-          <p className="muted">
-            {loading
-              ? "Loading readiness dashboard…"
-              : "Readiness dashboard is not available yet for this product. Use Expert / Debug mode for more detail."}
-          </p>
-        )}
+        <table className="kv-table">
+          <tbody>
+            <tr>
+              <th>Product identity</th>
+              <td>{overviewText || "Not available in current analysis"}</td>
+            </tr>
+            <tr>
+              <th>Product identity confidence</th>
+              <td>{formatStatusLabel(productUnderstanding?.confidence || "partial")}</td>
+            </tr>
+            <tr>
+              <th>Document coverage</th>
+              <td>
+                {Array.isArray(documentInventory) && documentInventory.length > 0
+                  ? `${documentInventory.length} workspace document${
+                      documentInventory.length === 1 ? "" : "s"
+                    }`
+                  : "No workspace documents recorded yet"}
+              </td>
+            </tr>
+            <tr>
+              <th>Requirements identified</th>
+              <td>{productUnderstanding?.requirementsIdentified ?? 0}</td>
+            </tr>
+            <tr>
+              <th>Implementation alignment</th>
+              <td>
+                {compliance && compliance.summary
+                  ? `Implemented: ${compliance.summary.implemented ?? 0}, Partial: ${
+                      compliance.summary.partial ?? 0
+                    }, Missing: ${compliance.summary.missing ?? 0}`
+                  : "Compliance summary is not available yet for this product."}
+              </td>
+            </tr>
+            <tr>
+              <th>Projection readiness</th>
+              <td>
+                {hasMaterialProjectionGaps
+                  ? "Diagnostic only – key inputs are missing or provisional"
+                  : formatProjectionTrustLevel(readiness?.projectionTrustLevel || "unknown")}
+              </td>
+            </tr>
+            <tr>
+              <th>Next suggested action</th>
+              <td>
+                {readiness?.recommendedNextAction ||
+                  (Array.isArray(gapItems) && gapItems.length > 0
+                    ? "Review gaps and upload supporting documents where suggested, then rerun understanding."
+                    : "Review requirements & compliance, then decide whether additional evidence is needed.")}
+              </td>
+            </tr>
+          </tbody>
+        </table>
       </section>
 
       <section className="card home-card">
@@ -756,18 +748,6 @@ export const ProductWorkspacePage: React.FC<{
                     ? productUnderstanding.riskClasses.join(", ")
                     : "Not available in current analysis"}
                 </td>
-              </tr>
-              <tr>
-                <th>Documents Reviewed</th>
-                <td>{productUnderstanding.documentsReviewed ?? 0}</td>
-              </tr>
-              <tr>
-                <th>Candidate Requirements</th>
-                <td>{productUnderstanding.requirementsIdentified ?? 0}</td>
-              </tr>
-              <tr>
-                <th>Understanding Confidence</th>
-                <td>{formatStatusLabel(productUnderstanding.confidence || "partial")}</td>
               </tr>
             </tbody>
           </table>
@@ -835,7 +815,8 @@ export const ProductWorkspacePage: React.FC<{
                 <th>Fact</th>
                 <th>Value</th>
                 <th>Status</th>
-                <th>Source</th>
+                <th>Provenance</th>
+                <th>Source detail</th>
               </tr>
             </thead>
             <tbody>
@@ -850,6 +831,7 @@ export const ProductWorkspacePage: React.FC<{
                         : String(f.value)}
                   </td>
                   <td>{formatStatusLabel(f.status || "extracted")}</td>
+                  <td>{formatProvenance(f.provenanceKind || "")}</td>
                   <td>{f.source || "(not recorded)"}</td>
                 </tr>
               ))}
@@ -871,15 +853,15 @@ export const ProductWorkspacePage: React.FC<{
             <tbody>
               <tr>
                 <th>Product code</th>
-                <td>{product.code || "ICC18 P18PR UL"}</td>
+                <td>{product.code || "(unknown)"}</td>
               </tr>
               <tr>
                 <th>Product name</th>
-                <td>{product.name || "Promise UL"}</td>
+                <td>{product.name || "(unknown)"}</td>
               </tr>
               <tr>
                 <th>Product type</th>
-                <td>{product.type || "UL"}</td>
+                <td>{product.type || "(unknown)"}</td>
               </tr>
               <tr>
                 <th>Carrier</th>
@@ -900,6 +882,7 @@ export const ProductWorkspacePage: React.FC<{
         )}
       </section>
 
+      {showAdvancedDebug && (
       <section className="card home-card">
         <h2>Product Understanding Evidence</h2>
         <p className="muted">
@@ -970,6 +953,7 @@ export const ProductWorkspacePage: React.FC<{
           )
         ) : null}
       </section>
+      )}
 
       <section className="card home-card">
         <h2>Product Compliance Matrix</h2>
@@ -1213,6 +1197,7 @@ export const ProductWorkspacePage: React.FC<{
         )}
       </section>
 
+      {showAdvancedDebug && (
       <section className="card home-card">
         <h2>Mechanics discovered</h2>
         <p>
@@ -1258,7 +1243,9 @@ export const ProductWorkspacePage: React.FC<{
           )
         ) : null}
       </section>
+      )}
 
+      {showAdvancedDebug && (
       <section className="card home-card">
         <h2>Assumptions extracted</h2>
         <p>
@@ -1305,6 +1292,7 @@ export const ProductWorkspacePage: React.FC<{
           )
         ) : null}
       </section>
+      )}
 
       <section className="card home-card">
         <h2>Missing information / gaps</h2>
@@ -1318,19 +1306,20 @@ export const ProductWorkspacePage: React.FC<{
           <>
             {gaps.items.map((item) => {
               const isUploading = uploadingId === item.id;
-              const gapProductCode = product?.code || "ICC18 P18PR UL";
+              const gapProductCode = product?.code || productCode || "";
 
-              const handleFileChange: React.ChangeEventHandler<HTMLInputElement> = async (event) => {
-                const file = event.target.files && event.target.files[0];
-                if (!file) return;
-                setUploadingId(item.id);
-                setUploadMessage(null);
-                try {
-                  const form = new FormData();
-                  form.append("file", file);
-                  const resp = await fetch(
-                    `/api/product-assumptions/${encodeURIComponent(gapProductCode)}/support`,
-                    {
+                const handleFileChange: React.ChangeEventHandler<HTMLInputElement> = async (event) => {
+                  const file = event.target.files && event.target.files[0];
+                  if (!file) return;
+                  setUploadingId(item.id);
+                  setUploadMessage(null);
+                  try {
+                    const form = new FormData();
+                    form.append("file", file);
+                    form.append("gap_id", item.id);
+                    const resp = await fetch(
+                      `/api/product-assumptions/${encodeURIComponent(gapProductCode)}/support`,
+                      {
                       method: "POST",
                       body: form,
                     },
@@ -1348,13 +1337,47 @@ export const ProductWorkspacePage: React.FC<{
                   setUploadingId(null);
                   event.target.value = "";
                 }
-              };
+                  };
 
-              const handleRerunClick = () => {
-                setUploadMessage(
-                  "Rerun understanding is not wired to orchestration yet. Use Expert / Debug mode to rerun the pipeline after uploading support.",
-                );
-              };
+                  const handleRerunClick = () => {
+                    const rerun = async () => {
+                      try {
+                        setUploadMessage("Rerunning understanding for this workspace…");
+                        if (workspaceId) {
+                          const resp = await fetch(
+                            `/api/workspaces/${encodeURIComponent(workspaceId)}/analyze`,
+                            { method: "POST" },
+                          );
+                          if (!resp.ok) {
+                            const text = await resp.text();
+                            throw new Error(text || `Analyze failed with status ${resp.status}`);
+                          }
+                          const body = await resp.json();
+                          const snap = body.snapshot as WorkspacePayload;
+                          setData(snap);
+                          setUploadMessage("Workspace understanding updated from latest evidence.");
+                        } else if (productCode) {
+                          const code = encodeURIComponent(productCode || "");
+                          const resp = await fetch(`/api/product-workspace/${code}`);
+                          if (!resp.ok) {
+                            const text = await resp.text();
+                            throw new Error(text || `Failed to reload workspace (HTTP ${resp.status})`);
+                          }
+                          const snap = (await resp.json()) as WorkspacePayload;
+                          setData(snap);
+                          setUploadMessage("Product workspace reloaded from latest evidence.");
+                        } else {
+                          setUploadMessage(
+                            "Unable to rerun understanding: no workspace or product context is available in this view.",
+                          );
+                        }
+                      } catch (err: any) {
+                        setUploadMessage(err?.message || "Failed to rerun understanding.");
+                      }
+                    };
+
+                    void rerun();
+                  };
 
               return (
                 <div key={item.id} className="gap-item">
@@ -1444,9 +1467,37 @@ export const ProductWorkspacePage: React.FC<{
         {illustration ? (
           <>
             <p className="muted">
-              Draft Promise UL projection for product understanding. This is not a filed-rate compliant carrier
-              illustration.
+              {hasMaterialProjectionGaps
+                ? "Diagnostic projection only. Not suitable for product validation, filed-rate review, or customer illustration. Key inputs are missing or provisional."
+                : "Draft projection for product understanding. This is not a filed-rate compliant carrier illustration."}
             </p>
+            {hasMaterialProjectionGaps && (
+              <div className="projection-summary">
+                <p className="muted">
+                  <strong>Why diagnostic only?</strong>
+                </p>
+                <ul className="muted">
+                  {gapItems.some((g) => (g.id || "") === "missing_coi_table") && (
+                    <li>
+                      COI rates are placeholder. Actual cost of insurance tables may materially change policy charges
+                      and cash values.
+                    </li>
+                  )}
+                  {gapItems.some((g) => (g.id || "") === "surrender_schedule_placeholder") && (
+                    <li>
+                      Surrender charges use a simplified schedule. Filed surrender patterns may change early duration
+                      surrender values.
+                    </li>
+                  )}
+                  {gapItems.some((g) => (g.id || "") === "policy_admin_fee_missing") && (
+                    <li>
+                      Policy/admin fees are missing. Actual fee schedules will reduce projected account and surrender
+                      values.
+                    </li>
+                  )}
+                </ul>
+              </div>
+            )}
             {illustration.metrics && (
               <div className="projection-summary">
                 {typeof illustration.metrics.maximumYear === "number" && (

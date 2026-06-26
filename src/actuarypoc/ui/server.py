@@ -226,8 +226,10 @@ def _build_extracted_facts(snapshot: Optional[Dict[str, Any]]) -> List[Dict[str,
     """Summarise key product facts from an existing workspace snapshot.
 
     Facts are derived *only* from structured fields already present in
-    the snapshot. When a field is not available we mark it as
-    ``not_available`` instead of fabricating a value.
+    the snapshot and, when available, from the ProductDefinition for
+    the *same* product. We intentionally avoid falling back to any
+    other product (e.g. P12TRF) so that cross-product placeholder data
+    cannot leak into a workspace.
     """
 
     facts: List[Dict[str, Any]] = []
@@ -237,7 +239,14 @@ def _build_extracted_facts(snapshot: Optional[Dict[str, Any]]) -> List[Dict[str,
         if not isinstance(product_block, dict):
             product_block = {}
 
-    def _add_fact(label: str, value: Any, *, source: Optional[str] = None, status: str = "extracted") -> None:
+    def _add_fact(
+        label: str,
+        value: Any,
+        *,
+        source: Optional[str] = None,
+        status: str = "extracted",
+        provenance: str = "workspace_snapshot",
+    ) -> None:
         if value is None or value == "":
             facts.append(
                 {
@@ -246,6 +255,7 @@ def _build_extracted_facts(snapshot: Optional[Dict[str, Any]]) -> List[Dict[str,
                     "source": source,
                     "confidence": None,
                     "status": "not_available",
+                    "provenanceKind": "unresolved",
                 }
             )
         else:
@@ -256,19 +266,22 @@ def _build_extracted_facts(snapshot: Optional[Dict[str, Any]]) -> List[Dict[str,
                     "source": source,
                     "confidence": None,
                     "status": status,
+                    "provenanceKind": provenance,
                 }
             )
 
-    # Directly-available product-level fields.
+    # Directly-available product-level fields from the current snapshot.
     _add_fact("Product name", product_block.get("name"), source="snapshot.product.name")
     _add_fact("Product code", product_block.get("code"), source="snapshot.product.code")
     _add_fact("Product type", product_block.get("type"), source="snapshot.product.type")
     _add_fact("Carrier", product_block.get("carrier"), source="snapshot.product.carrier")
     _add_fact("Filing context", product_block.get("filingId"), source="snapshot.product.filingId")
 
-    # Issue age range and risk classes – derive deterministically from
-    # the current ProductDefinition when available. This uses existing
-    # parsed artefacts only; no new LLM calls are introduced.
+    # Issue age range, form numbers, and risk classes – derive
+    # deterministically from the ProductDefinition *for this product
+    # only* when available. We intentionally do not fall back to any
+    # other product code (e.g. P12TRF demo data) to avoid cross-product
+    # contamination.
     issue_age_value = None
     issue_age_source = None
     risk_classes_value: Optional[List[str]] = None
@@ -277,21 +290,21 @@ def _build_extracted_facts(snapshot: Optional[Dict[str, Any]]) -> List[Dict[str,
     form_numbers_source: Optional[str] = None
 
     product_code = (product_block.get("code") or "").strip().upper()
-    try:
-        from actuarypoc.product_registry import get_product_definition  # local import to avoid cycles
+    pd: Optional[Dict[str, Any]] = None
+    if product_code:
+        try:
+            from actuarypoc.product_registry import (  # type: ignore[import-not-found]
+                get_product_definition,
+            )
 
-        pd = None
-        for code_candidate in [product_code, "P12TRF"]:
-            if not code_candidate:
-                continue
-            candidate = get_product_definition(code_candidate)
+            candidate = get_product_definition(product_code)
             if isinstance(candidate, dict):
                 pd = candidate
-                break
-    except Exception:
-        pd = None
+        except Exception:
+            pd = None
 
     if isinstance(pd, dict):
+        provenance_kind = "product_definition"
         # Issue ages from ProductDefinition.issue_age_limits
         limits = pd.get("issue_age_limits")
         if isinstance(limits, dict):
@@ -340,13 +353,20 @@ def _build_extracted_facts(snapshot: Optional[Dict[str, Any]]) -> List[Dict[str,
         if form_numbers_value and filing_ref_str and form_numbers_source:
             form_numbers_source = f"{form_numbers_source} (from {filing_ref_str})"
 
-    _add_fact("Issue age range", issue_age_value, source=issue_age_source)
+        _add_fact("Issue age range", issue_age_value, source=issue_age_source, provenance=provenance_kind)
+        _add_fact("Form numbers", form_numbers_value, source=form_numbers_source, provenance=provenance_kind)
+        _add_fact("Risk classes", risk_classes_value, source=risk_classes_source, provenance=provenance_kind)
+    else:
+        # When no product definition is available for this product, we
+        # leave these facts as unresolved instead of borrowing from any
+        # other product.
+        _add_fact("Issue age range", None, source=None)
+        _add_fact("Form numbers", None, source=None)
+        _add_fact("Risk classes", None, source=None)
 
     # The current Promise‑UL workspace snapshot does not yet expose
     # structured fields for these items. We include them as
     # ``not_available`` slots when we could not derive a value.
-    _add_fact("Form numbers", form_numbers_value, source=form_numbers_source)
-    _add_fact("Risk classes", risk_classes_value, source=risk_classes_source)
     _add_fact("Riders", None)
     _add_fact("States", None)
 
@@ -10017,6 +10037,7 @@ def api_product_assumptions_ai_generate(payload: ProductAssumptionsAIGenerateReq
 async def api_upload_assumption_support(
     product_code: str,
     file: UploadFile = File(...),
+    gap_id: Optional[str] = Form(None),
 ) -> Dict[str, Any]:
     """Upload assumption support files for Stage 3 assumption discovery.
 
@@ -10034,7 +10055,16 @@ async def api_upload_assumption_support(
 
     safe_name = Path(file.filename).name
     timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
-    object_name = f"assumption-support/{code}/{timestamp}_{safe_name}"
+    # When a specific gap id is provided, nest the object under a
+    # gap-scoped prefix so support files remain associated with the
+    # relevant gap in storage.
+    if gap_id:
+        import re as _re
+
+        safe_gap = _re.sub(r"[^a-zA-Z0-9_-]", "_", gap_id)
+        object_name = f"assumption-support/{code}/{safe_gap}/{timestamp}_{safe_name}"
+    else:
+        object_name = f"assumption-support/{code}/{timestamp}_{safe_name}"
 
     client = get_minio_client()
     ensure_bucket(client)
@@ -10061,6 +10091,7 @@ async def api_upload_assumption_support(
             "filename": safe_name,
             "objectPath": object_name,
             "kind": "assumption-support",
+            "gapId": gap_id,
         },
     }
 
