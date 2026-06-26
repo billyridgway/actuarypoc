@@ -80,11 +80,12 @@ export const WorkspacePage: React.FC<{ workspaceId: string }> = ({ workspaceId }
   const workspace = data?.workspace;
   const documents = data?.documents ?? [];
   const snapshot = data?.snapshot;
-  const hasSnapshot = !!snapshot;
+  const hasSnapshot = !!snapshot && workspace?.status === "analyzed";
 
   if (hasSnapshot && snapshot) {
-    // Once analysis has populated the snapshot, reuse the existing
-    // Product Understanding Workspace view directly from the snapshot.
+    // Once analysis has populated the snapshot and the workspace has
+    // reached the analyzed state, reuse the existing Product
+    // Understanding Workspace view directly from the snapshot.
     return <ProductWorkspacePage snapshot={snapshot} workspaceId={workspaceId} />;
   }
 
