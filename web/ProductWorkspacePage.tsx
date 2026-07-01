@@ -447,9 +447,10 @@ export const ProductWorkspacePage: React.FC<{
   const capabilityAssessment = data?.capabilityAssessment;
 
   const gapItems = gaps?.items ?? [];
-  // Build a short, deterministic product description from existing
-  // product and mechanics data. Detailed readiness, compliance, and
-  // projection narratives live in the dedicated cards below.
+  // Build a short product identity description from product metadata
+  // only. Mechanics and other provisional assumptions are surfaced in
+  // their own sections so they do not blur identity confidence with
+  // projection behaviour.
   const overviewParts: string[] = [];
   if (product) {
     const name = product.name || product.code || "This product";
@@ -457,29 +458,6 @@ export const ProductWorkspacePage: React.FC<{
     overviewParts.push(`${name} appears to be a ${type} product.`);
   } else {
     overviewParts.push("This product appears to be a universal life insurance product.");
-  }
-
-  if (mechanicsSummary) {
-    const mechBits: string[] = [];
-    if (mechanicsSummary.deathBenefitOption) {
-      mechBits.push(
-        mechanicsSummary.deathBenefitOption.toLowerCase() === "level"
-          ? "a level death benefit option"
-          : `a ${mechanicsSummary.deathBenefitOption} death benefit option`,
-      );
-    }
-    if (mechanicsSummary.interestCrediting) {
-      mechBits.push(mechanicsSummary.interestCrediting.toLowerCase());
-    }
-    if (mechanicsSummary.coiApproach) {
-      mechBits.push(mechanicsSummary.coiApproach.toLowerCase());
-    }
-    if (mechanicsSummary.surrenderMechanics) {
-      mechBits.push(mechanicsSummary.surrenderMechanics.toLowerCase());
-    }
-    if (mechBits.length > 0) {
-      overviewParts.push(`Key mechanics include ${mechBits.join(", ")}.`);
-    }
   }
 
   const overviewText = overviewParts.join(" ");
@@ -1407,7 +1385,7 @@ export const ProductWorkspacePage: React.FC<{
                       />
                     </label>
                     <button type="button" className="button button-ghost" onClick={handleRerunClick}>
-                      Rerun understanding (coming soon)
+                      Rerun understanding
                     </button>
                   </div>
                 </div>

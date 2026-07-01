@@ -38,6 +38,14 @@ from actuarypoc.domain.product_mechanics import (
     build_dsl_patch_preview_from_mechanics,
     save_mechanics_to_minio,
 )
+from actuarypoc.domain.requirements_classification import (
+    Applicability as ReqApplicability,
+    Evidence as ReqEvidence,
+    EvidenceKind as ReqEvidenceKind,
+    Impact as ReqImpact,
+    RequirementClassification,
+    classify_requirement,
+)
 from actuarypoc.projection.engine import ProjectionEngine
 from actuarypoc.projection.mortality import build_term23_surface
 from actuarypoc.projection.premium import PremiumLookupService, build_premium_table, load_premium_table_from_csv, select_face_band
@@ -244,15 +252,55 @@ def _build_extracted_facts(snapshot: Optional[Dict[str, Any]]) -> List[Dict[str,
         value: Any,
         *,
         source: Optional[str] = None,
-        status: str = "extracted",
+        status: str = "inferred",
         provenance: str = "workspace_snapshot",
     ) -> None:
-        if value is None or value == "":
+        """Append a single fact row with conservative defaults.
+
+        The default ``status`` is "inferred" rather than "extracted" so we
+        only treat values as truly extracted when callers explicitly mark
+        them as such. This avoids over-stating confidence for facts that
+        come from system defaults or product-level configuration.
+        """
+
+        effective_value = value
+        effective_source = source
+        effective_status = status
+        effective_provenance = provenance
+
+        # Defensive cross-product scrub: for non-P12TRF products, suppress
+        # any obvious P12TRF / POC placeholder strings so that unrelated
+        # demo artefacts never appear in Promise‑UL (or other product)
+        # workspaces. This operates at the fact layer so persisted
+        # snapshots and API responses remain clean.
+        try:
+            code_upper = (product_block.get("code") or "").strip().upper()
+        except Exception:  # pragma: no cover - extremely defensive
+            code_upper = ""
+
+        if code_upper and code_upper != "P12TRF" and effective_value not in (None, ""):
+            if isinstance(effective_value, str):
+                val_str = effective_value
+            elif isinstance(effective_value, list):
+                val_str = " ".join(str(v) for v in effective_value if v is not None)
+            else:
+                val_str = str(effective_value)
+
+            lowered = val_str.lower()
+            if "p12trf" in lowered or "p12trf-2020-01" in lowered or "(poc" in lowered:
+                # Treat as unresolved for this product; do not carry the
+                # value or source into the workspace snapshot.
+                effective_value = None
+                effective_source = None
+                effective_status = "not_available"
+                effective_provenance = "unresolved"
+
+        if effective_value is None or effective_value == "":
             facts.append(
                 {
                     "label": label,
                     "value": None,
-                    "source": source,
+                    "source": effective_source,
                     "confidence": None,
                     "status": "not_available",
                     "provenanceKind": "unresolved",
@@ -262,11 +310,11 @@ def _build_extracted_facts(snapshot: Optional[Dict[str, Any]]) -> List[Dict[str,
             facts.append(
                 {
                     "label": label,
-                    "value": value,
-                    "source": source,
+                    "value": effective_value,
+                    "source": effective_source,
                     "confidence": None,
-                    "status": status,
-                    "provenanceKind": provenance,
+                    "status": effective_status,
+                    "provenanceKind": effective_provenance,
                 }
             )
 
@@ -299,7 +347,19 @@ def _build_extracted_facts(snapshot: Optional[Dict[str, Any]]) -> List[Dict[str,
 
             candidate = get_product_definition(product_code)
             if isinstance(candidate, dict):
-                pd = candidate
+                # Only trust ProductDefinition artefacts that are
+                # explicitly scoped to this product. This prevents
+                # accidentally reusing P12TRF (or any other product)
+                # definitions for Promise UL workspaces.
+                cand_code = str(
+                    candidate.get("product_code")
+                    or candidate.get("productCode")
+                    or ""
+                ).strip().upper()
+                if cand_code and cand_code != product_code:
+                    pd = None
+                else:
+                    pd = candidate
         except Exception:
             pd = None
 
@@ -5844,20 +5904,122 @@ def build_product_workspace_snapshot(product_code: str) -> Dict[str, Any]:
         }
     )
 
-    # Compliance summary counts and overall status.
-    implemented_count = sum(1 for r in compliance_requirements if str(r.get("status")).lower() == "implemented")
-    partial_count = sum(1 for r in compliance_requirements if str(r.get("status")).lower() == "partial")
-    missing_count = sum(1 for r in compliance_requirements if str(r.get("status")).lower() == "missing")
+    # --- Canonical requirement classification layer -------------------------
 
-    # Overall compliance status based on high-impact requirements.
+    def _to_req_evidence(ev_list: List[Dict[str, Any]]) -> List[ReqEvidence]:
+        """Translate a requirement's evidence dicts into classifier Evidence.
+
+        We treat any evidence with filing sources (document/page/snippet)
+        as product-document evidence; everything else is engine
+        introspection. Placeholder statuses are marked via ``origin`` so
+        the classifier can treat them as placeholders for inputs.
+        """
+
+        out: List[ReqEvidence] = []
+        for ev in ev_list:
+            if not isinstance(ev, dict):
+                continue
+            sources = ev.get("sources") or []
+            has_filing = False
+            if isinstance(sources, list):
+                for s in sources:
+                    if not isinstance(s, dict):
+                        continue
+                    if s.get("document") or s.get("page") or s.get("snippet"):
+                        has_filing = True
+                        break
+
+            kind = ReqEvidenceKind.PRODUCT_DOCUMENT if has_filing else ReqEvidenceKind.ENGINE_INTROSPECTION
+            status = str(ev.get("status") or "")
+            origin = None
+            if status.lower() == "placeholder":
+                origin = "placeholder"
+            out.append(ReqEvidence(kind=kind, status=status, origin=origin))
+        return out
+
+    requirement_classifications: List[RequirementClassification] = []
+    classification_index: Dict[str, RequirementClassification] = {}
+    name_index: Dict[str, str] = {}
+
+    for req in compliance_requirements:
+        rid = str(req.get("id") or "")
+        if not rid:
+            continue
+        name_index[rid] = str(req.get("name") or "")
+
+        impact_str = str(req.get("impact") or "").lower()
+        if impact_str == "high":
+            impact = ReqImpact.HIGH
+        elif impact_str == "medium":
+            impact = ReqImpact.MEDIUM
+        else:
+            impact = ReqImpact.LOW
+
+        raw_evidence = req.get("evidence") or []
+        ev_list = raw_evidence if isinstance(raw_evidence, list) else []
+        evidence = _to_req_evidence(ev_list)
+
+        cls = classify_requirement(
+            requirement_id=rid,
+            impact=impact,
+            applicability_evidence=evidence,
+            implementation_evidence=evidence,
+            input_evidence=evidence,
+            reviewer_decisions=(),
+        )
+
+        requirement_classifications.append(cls)
+        classification_index[rid] = cls
+        # Attach classifier summary back onto the requirement for UI use.
+        req["classification"] = {
+            "applicability": cls.applicability.value,
+            "implementationState": cls.implementation_state.value,
+            "inputState": cls.input_state.value,
+            "isBlockingGap": cls.is_blocking_gap,
+        }
+
+    # Compliance summary counts and overall status based on canonical
+    # classification. Only confirmed_applicable requirements contribute to
+    # readiness counts; candidates still needing review are tracked
+    # separately and do not lower readiness.
+
+    def _is_missing(cls: RequirementClassification) -> bool:
+        return (
+            cls.implementation_state.name == "NOT_IMPLEMENTED"
+            and cls.input_state.name in {"MISSING", "UNKNOWN"}
+        )
+
+    def _is_implemented(cls: RequirementClassification) -> bool:
+        return cls.implementation_state.name == "IMPLEMENTED" and cls.input_state.name == "READY"
+
+    implemented_count = 0
+    partial_count = 0
+    missing_count = 0
+
+    for cls in requirement_classifications:
+        if cls.applicability is not ReqApplicability.CONFIRMED_APPLICABLE:
+            continue
+        if _is_implemented(cls):
+            implemented_count += 1
+        elif _is_missing(cls):
+            missing_count += 1
+        else:
+            partial_count += 1
+
+    # Overall compliance status based on high-impact confirmed requirements.
     overall_status: str
     has_high_missing = any(
-        str(r.get("impact")).lower() == "high" and str(r.get("status")).lower() == "missing"
-        for r in compliance_requirements
+        cls.applicability is ReqApplicability.CONFIRMED_APPLICABLE
+        and cls.impact is ReqImpact.HIGH
+        and _is_missing(cls)
+        for cls in requirement_classifications
     )
     has_high_partial = any(
-        str(r.get("impact")).lower() == "high" and str(r.get("status")).lower() == "partial"
-        for r in compliance_requirements
+        cls.applicability is ReqApplicability.CONFIRMED_APPLICABLE
+        and cls.impact is ReqImpact.HIGH
+        and not _is_implemented(cls)
+        and not _is_missing(cls)
+        for cls in requirement_classifications
     )
     if has_high_missing:
         overall_status = "red"
@@ -5908,67 +6070,75 @@ def build_product_workspace_snapshot(product_code: str) -> Dict[str, Any]:
         else:
             projection_trust_level = "filed_rate_ready"
 
-    # Critical issues: high-impact requirements that are missing or partial,
-    # plus medium-impact missing items. These drive the dashboard list.
+    # Critical issues: confirmed, high- or medium-impact requirements that
+    # are still blocking gaps. These drive the dashboard list.
     critical_issues: List[Dict[str, Any]] = []
-    for r in compliance_requirements:
-        status = str(r.get("status") or "").lower()
-        impact = str(r.get("impact") or "").lower()
-        rid = str(r.get("id") or "")
-        if not rid:
+    for rid, cls in classification_index.items():
+        if cls.applicability is not ReqApplicability.CONFIRMED_APPLICABLE:
             continue
-        include = False
-        if impact == "high" and status in {"missing", "partial"}:
-            include = True
-        elif impact == "medium" and status == "missing":
-            include = True
-        if not include:
+        if not cls.is_blocking_gap:
             continue
+        # Translate classification back into a simple status label so the
+        # UI can continue to distinguish "missing" vs "partial".
+        if _is_missing(cls):
+            status_label = "missing"
+        elif _is_implemented(cls):
+            # Should not be blocking, but guard defensively.
+            status_label = "implemented"
+        else:
+            status_label = "partial"
+
         critical_issues.append(
             {
                 "id": rid,
-                "name": r.get("name"),
-                "status": status,
-                "impact": impact,
+                "name": name_index.get(rid),
+                "status": status_label,
+                "impact": cls.impact.value,
             }
         )
 
-    # Recommended next action: choose the highest-leverage requirement to
-    # resolve, with a Promise‑UL‑specific mapping for clearer labels.
+    # Recommended next action: choose the highest-leverage confirmed
+    # requirement to resolve, with a Promise‑UL‑specific mapping for
+    # clearer labels.
     recommended_next_action = None
-    # Prefer high-impact missing, then high-impact partial, then medium-impact missing.
-    def _pick_requirement(predicate) -> Optional[Dict[str, Any]]:
-        for r in compliance_requirements:
-            if predicate(r):
-                return r
+
+    def _pick_requirement(predicate) -> Optional[str]:
+        for rid, cls in classification_index.items():
+            if predicate(rid, cls):
+                return rid
         return None
 
-    cand = _pick_requirement(
-        lambda r: str(r.get("impact") or "").lower() == "high"
-        and str(r.get("status") or "").lower() == "missing"
+    # Prefer high-impact missing, then high-impact partial, then
+    # medium-impact missing.
+    cand_id = _pick_requirement(
+        lambda rid, cls: cls.applicability is ReqApplicability.CONFIRMED_APPLICABLE
+        and cls.impact is ReqImpact.HIGH
+        and _is_missing(cls)
     )
-    if cand is None:
-        cand = _pick_requirement(
-            lambda r: str(r.get("impact") or "").lower() == "high"
-            and str(r.get("status") or "").lower() == "partial"
+    if cand_id is None:
+        cand_id = _pick_requirement(
+            lambda rid, cls: cls.applicability is ReqApplicability.CONFIRMED_APPLICABLE
+            and cls.impact is ReqImpact.HIGH
+            and not _is_implemented(cls)
+            and not _is_missing(cls)
         )
-    if cand is None:
-        cand = _pick_requirement(
-            lambda r: str(r.get("impact") or "").lower() == "medium"
-            and str(r.get("status") or "").lower() == "missing"
+    if cand_id is None:
+        cand_id = _pick_requirement(
+            lambda rid, cls: cls.applicability is ReqApplicability.CONFIRMED_APPLICABLE
+            and cls.impact is ReqImpact.MEDIUM
+            and _is_missing(cls)
         )
 
-    if cand is not None:
-        rid = str(cand.get("id") or "")
-        if rid == "coi_table":
+    if cand_id is not None:
+        if cand_id == "coi_table":
             recommended_next_action = "Upload COI rate table."
-        elif rid == "policy_admin_fees":
+        elif cand_id == "policy_admin_fees":
             recommended_next_action = "Upload policy/admin fee schedule."
-        elif rid == "surrender_schedule":
+        elif cand_id == "surrender_schedule":
             recommended_next_action = "Upload filed surrender charge schedule."
         else:
             # Generic fallback.
-            recommended_next_action = f"Resolve requirement: {cand.get('name') or rid}."
+            recommended_next_action = f"Resolve requirement: {name_index.get(cand_id) or cand_id}."
 
     readiness_dashboard = {
         "overallStatus": overall_understanding_status,
@@ -6043,6 +6213,20 @@ def build_product_workspace_snapshot(product_code: str) -> Dict[str, Any]:
         "complianceMatrix": {
             "summary": compliance_summary,
             "requirements": compliance_requirements,
+        },
+        "requirementsClassification": {
+            "all": [
+                {
+                    "id": cls.requirement_id,
+                    "name": name_index.get(cls.requirement_id),
+                    "impact": cls.impact.value,
+                    "applicability": cls.applicability.value,
+                    "implementationState": cls.implementation_state.value,
+                    "inputState": cls.input_state.value,
+                    "isBlockingGap": cls.is_blocking_gap,
+                }
+                for cls in requirement_classifications
+            ],
         },
         "evidence": {
             "items": evidence_items,
