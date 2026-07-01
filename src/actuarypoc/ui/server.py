@@ -45,6 +45,7 @@ from actuarypoc.domain.life_product_models import (
     FeeSchedule as LifeFeeSchedule,
     UniversalLifeModel,
 )
+from actuarypoc.domain.capabilities import CapabilityAssessmentItem, get_ul_capabilities
 from actuarypoc.domain.requirements_classification import (
     Applicability as ReqApplicability,
     Evidence as ReqEvidence,
@@ -656,18 +657,187 @@ PLATFORM_CAPABILITY_FLAGS: Dict[str, bool] = {
 }
 
 
-def _build_capability_assessment(snapshot: Dict[str, Any]) -> Dict[str, Any]:
-    """Derive a lightweight capability assessment from existing data.
+def _build_ul_capability_assessment(snapshot: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Build capability assessment for UL products using the UL model.
 
-    This is deterministic and rule-based:
-
-    - Uses candidate requirements plus the underlying compliance matrix
-      to search for capability-specific keywords.
-    - Marks a capability as "unsupported" when keywords are detected
-      and the corresponding platform capability flag is False.
-    - Does *not* attempt to infer gaps from missing documents; if no
-      keyword matches, no unsupported item is emitted.
+    This prefers the structured UniversalLifeModel snapshot over
+    keyword-based rules so that capability status reflects real
+    mechanics/evidence instead of text matches.
     """
+
+    product_model = snapshot.get("productModel") or {}
+    if not isinstance(product_model, dict):
+        return None
+
+    ptype = str(product_model.get("type") or "").lower()
+    if ptype != "ul":
+        return None
+
+    ul_dict = product_model.get("universalLife") or {}
+    if not isinstance(ul_dict, dict):
+        return None
+
+    try:
+        ul_model = UniversalLifeModel(**ul_dict)
+    except Exception:
+        return None
+
+    product_block = snapshot.get("product") or {}
+    if not isinstance(product_block, dict):
+        product_block = {}
+    product_code = product_block.get("code") or ul_model.product_code
+
+    cm = snapshot.get("complianceMatrix") or {}
+    if not isinstance(cm, dict):
+        cm = {}
+    cm_requirements = cm.get("requirements") or []
+    if not isinstance(cm_requirements, list):
+        cm_requirements = []
+    cm_by_id: Dict[str, Dict[str, Any]] = {}
+    for r in cm_requirements:
+        if isinstance(r, dict) and r.get("id"):
+            cm_by_id[str(r["id"])] = r
+
+    def _first_source(req: Optional[Dict[str, Any]]) -> Tuple[Optional[str], Optional[str]]:
+        if not isinstance(req, dict):
+            return None, None
+        ev_list = req.get("evidence") or []
+        if not isinstance(ev_list, list) or not ev_list:
+            return None, None
+        ev0 = ev_list[0]
+        if not isinstance(ev0, dict):
+            return None, None
+        sources = ev0.get("sources") or []
+        if not isinstance(sources, list) or not sources:
+            return None, None
+        src0 = sources[0]
+        if not isinstance(src0, dict):
+            return None, None
+        return src0.get("document"), src0.get("page")
+
+    items: List[Dict[str, Any]] = []
+
+    # COI tables – engine currently only supports a flat placeholder
+    # rate, so when the product appears to require COI tables this is
+    # treated as an unsupported capability.
+    coi_ev = ul_model.field_evidence.get("coi_rates")
+    if isinstance(coi_ev, LifeFieldEvidence) and (coi_ev.status or "").lower() not in {"", "missing"}:
+        req = cm_by_id.get("coi_table")
+        doc, ref = _first_source(req)
+        impact = (coi_ev.impact or "high").lower()
+        filed_text = None
+        if isinstance(req, dict):
+            filed_text = req.get("filedRequirement") or req.get("name")
+        reason = (
+            "Product appears to use COI rate tables, but the current UL engine "
+            "only supports a flat placeholder COI rate, not full age/gender/class tables."
+        )
+        items.append(
+            {
+                "capabilityId": "UL_CAP_COI_TABLE_AGE_GENDER_CLASS",
+                "name": (req.get("name") if isinstance(req, dict) else "COI rate tables"),
+                "status": "unsupported",
+                "impact": impact,
+                "reason": reason,
+                "productCode": product_code,
+                "sourceRequirementId": "coi_table",
+                "sourceRequirementText": filed_text,
+                "sourceDocument": doc,
+                "sourceReference": ref,
+                "recommendedAction": "Create feature request",
+            }
+        )
+
+    # Surrender schedule – engine supports a simple declining pattern;
+    # treat rich filed schedules as partially supported.
+    surr_ev = ul_model.field_evidence.get("surrender_schedule")
+    if isinstance(surr_ev, LifeFieldEvidence) and (surr_ev.status or "").lower() not in {"", "missing"}:
+        req = cm_by_id.get("surrender_schedule")
+        doc, ref = _first_source(req)
+        impact = (surr_ev.impact or "high").lower()
+        filed_text = None
+        if isinstance(req, dict):
+            filed_text = req.get("filedRequirement") or req.get("name")
+        reason = (
+            "Product has a filed surrender charge schedule; the current UL engine "
+            "implements a simple declining pattern and may only approximate the filed schedule."
+        )
+        items.append(
+            {
+                "capabilityId": "UL_CAP_SURRENDER_FIXED_SCHEDULE",
+                "name": (req.get("name") if isinstance(req, dict) else "Surrender charge schedule"),
+                "status": "partial",
+                "impact": impact,
+                "reason": reason,
+                "productCode": product_code,
+                "sourceRequirementId": "surrender_schedule",
+                "sourceRequirementText": filed_text,
+                "sourceDocument": doc,
+                "sourceReference": ref,
+                "recommendedAction": "Create feature request",
+            }
+        )
+
+    # Policy / admin fee – engine supports a level policy fee, so this
+    # is considered supported from a capability perspective when the
+    # product uses such fees.
+    fee_ev = ul_model.field_evidence.get("policy_admin_fee")
+    if isinstance(fee_ev, LifeFieldEvidence) and (fee_ev.status or "").lower() not in {"", "missing"}:
+        req = cm_by_id.get("policy_admin_fees")
+        doc, ref = _first_source(req)
+        impact = (fee_ev.impact or "medium").lower()
+        filed_text = None
+        if isinstance(req, dict):
+            filed_text = req.get("filedRequirement") or req.get("name")
+        reason = (
+            "Product includes policy/admin fees and the UL engine supports level per-policy fees; "
+            "implementation depends on loading the correct schedule."
+        )
+        items.append(
+            {
+                "capabilityId": "UL_CAP_LEVEL_POLICY_FEE",
+                "name": (req.get("name") if isinstance(req, dict) else "Policy / admin fees"),
+                "status": "supported",
+                "impact": impact,
+                "reason": reason,
+                "productCode": product_code,
+                "sourceRequirementId": "policy_admin_fees",
+                "sourceRequirementText": filed_text,
+                "sourceDocument": doc,
+                "sourceReference": ref,
+                "recommendedAction": None,
+            }
+        )
+
+    supported = sum(1 for it in items if (it.get("status") or "").lower() == "supported")
+    partial = sum(1 for it in items if (it.get("status") or "").lower() == "partial")
+    unsupported = sum(1 for it in items if (it.get("status") or "").lower() == "unsupported")
+
+    return {
+        "summary": {
+            "supported": supported,
+            "partial": partial,
+            "unsupported": unsupported,
+        },
+        "items": items,
+    }
+
+
+def _build_capability_assessment(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    """Derive a capability assessment from existing data.
+
+    For UL products we prefer the structured UniversalLifeModel and UL
+    capability catalogue; for all other cases we fall back to the
+    existing keyword-based heuristic over candidate requirements.
+    """
+
+    # 1) UL-specific assessment based on the product model.
+    ul_assessment = _build_ul_capability_assessment(snapshot)
+    if ul_assessment is not None:
+        return ul_assessment
+
+    # 2) Fallback: existing keyword-based heuristic for non-UL products
+    # or when no structured UL model is available.
 
     items: List[Dict[str, Any]] = []
 
@@ -680,8 +850,6 @@ def _build_capability_assessment(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(requirements_candidates, list):
         requirements_candidates = []
 
-    # Optional: join back to complianceMatrix.requirements for richer
-    # evidence snippets when available.
     cm = snapshot.get("complianceMatrix") or {}
     if not isinstance(cm, dict):
         cm = {}
@@ -738,8 +906,6 @@ def _build_capability_assessment(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         for rule in UNSUPPORTED_CAPABILITY_RULES:
             cap_id = rule.get("capabilityId") or ""
             if not cap_id or PLATFORM_CAPABILITY_FLAGS.get(cap_id, False):
-                # Capability is already supported (or flag set to True);
-                # do not mark it as unsupported.
                 continue
 
             keywords = [k.lower() for k in rule.get("keywords", []) if isinstance(k, str)]
