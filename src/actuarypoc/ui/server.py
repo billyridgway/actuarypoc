@@ -38,6 +38,13 @@ from actuarypoc.domain.product_mechanics import (
     build_dsl_patch_preview_from_mechanics,
     save_mechanics_to_minio,
 )
+from actuarypoc.domain.life_product_models import (
+    EvidenceRef as LifeEvidenceRef,
+    FieldEvidence as LifeFieldEvidence,
+    TableWithStatus as LifeTableWithStatus,
+    FeeSchedule as LifeFeeSchedule,
+    UniversalLifeModel,
+)
 from actuarypoc.domain.requirements_classification import (
     Applicability as ReqApplicability,
     Evidence as ReqEvidence,
@@ -5769,6 +5776,97 @@ def build_product_workspace_snapshot(product_code: str) -> Dict[str, Any]:
             key = str(ev["id"])
             evidence_by_id[key] = ev
 
+    # Build a UniversalLifeModel snapshot for UL-style products so
+    # downstream code (and future engines) have a product-line-aware
+    # representation rather than Promise-UL-specific dicts.
+    ul_field_evidence: Dict[str, LifeFieldEvidence] = {}
+    for evid_id, ev in evidence_by_id.items():
+        status = str(ev.get("status") or "")
+        label = str(ev.get("label") or evid_id)
+        value = ev.get("value")
+        value_summary: Optional[str]
+        if value is None:
+            value_summary = label
+        elif isinstance(value, (int, float)):
+            value_summary = str(value)
+        else:
+            value_summary = str(value)
+
+        sources_raw = ev.get("sources") or []
+        sources: List[LifeEvidenceRef] = []
+        if isinstance(sources_raw, list):
+            for s in sources_raw:
+                if not isinstance(s, dict):
+                    continue
+                src = LifeEvidenceRef(
+                    document=s.get("document"),
+                    page=s.get("page"),
+                    snippet=s.get("snippet"),
+                    confidence=(
+                        float(s.get("confidence"))
+                        if isinstance(s.get("confidence"), (int, float))
+                        else None
+                    ),
+                )
+                sources.append(src)
+
+        impact = _impact_for_id(evid_id)
+        ul_field_evidence[evid_id] = LifeFieldEvidence(
+            id=evid_id,
+            status=status,
+            value_summary=value_summary,
+            sources=sources,
+            impact=impact,
+        )
+
+    ul_model = UniversalLifeModel(
+        product_code=product_code_effective,
+        product_name=product_name,
+        carrier=carrier,
+        jurisdiction=None,
+        product_type="ul",
+        issue_age_min=None,
+        issue_age_max=None,
+        risk_classes=[],
+        premium_pattern=None,
+        premium_guarantee_description=None,
+        riders=[],
+        metadata_sources=[],
+        death_benefit_options=[
+            str(mechanics_summary.get("deathBenefitOption"))
+        ]
+        if mechanics_summary.get("deathBenefitOption")
+        else [],
+        guaranteed_rate=getattr(cfg_runtime, "guaranteed_rate", None),
+        current_rate=None,
+        crediting_rules=None,
+        coi_basis="face",
+        coi_tables=[
+            LifeTableWithStatus(
+                id="coi_rates",
+                description="COI rates",
+                evidence=ul_field_evidence.get("coi_rates"),
+            )
+        ],
+        policy_fees=[
+            LifeFeeSchedule(
+                id="policy_admin_fee",
+                description="Policy / admin fee",
+                evidence=ul_field_evidence.get("policy_admin_fee"),
+            )
+        ],
+        premium_loads=[],
+        surrender_schedule=LifeTableWithStatus(
+            id="surrender_schedule",
+            description="Surrender schedule",
+            evidence=ul_field_evidence.get("surrender_schedule"),
+        ),
+        mva_rules=None,
+        loan_rules=None,
+        withdrawal_rules=None,
+        field_evidence=ul_field_evidence,
+    )
+
     def _req_status_for_evidence(eid: str, *, gap_key: Optional[str] = None, default: str = "missing") -> str:
         ev = evidence_by_id.get(eid)
         if not isinstance(ev, dict):
@@ -6213,6 +6311,10 @@ def build_product_workspace_snapshot(product_code: str) -> Dict[str, Any]:
         "complianceMatrix": {
             "summary": compliance_summary,
             "requirements": compliance_requirements,
+        },
+        "productModel": {
+            "type": ul_model.product_type,
+            "universalLife": asdict(ul_model),
         },
         "requirementsClassification": {
             "all": [
