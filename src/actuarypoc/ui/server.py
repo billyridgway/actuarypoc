@@ -45,6 +45,7 @@ from actuarypoc.domain.life_product_models import (
     FeeSchedule as LifeFeeSchedule,
     UniversalLifeModel,
 )
+from actuarypoc.domain.ul_requirements import get_ul_requirement_definitions
 from actuarypoc.domain.capabilities import CapabilityAssessmentItem, get_ul_capabilities
 from actuarypoc.domain.requirements_classification import (
     Applicability as ReqApplicability,
@@ -5509,7 +5510,7 @@ def build_product_workspace_snapshot(product_code: str) -> Dict[str, Any]:
             }
         )
 
-    # --- Illustration snapshot (Promise UL draft projection) --------------------
+    # --- Illustration snapshot (UL draft projection) -------------------------
     illustration: Optional[Dict[str, Any]] = None
     provider = _get_illustration_provider(canonical_code)
     if provider is not None:
@@ -5556,10 +5557,10 @@ def build_product_workspace_snapshot(product_code: str) -> Dict[str, Any]:
         gap_warnings = list(illustration.get("warnings") or [])
         gap_notes = list(illustration.get("notes") or [])
 
-        # Normalised gap items for the Promise UL workspace. These
-        # reuse existing projection warnings rather than introducing
-        # new heuristics, so behaviour is driven entirely by the
-        # current UL illustration config.
+        # Normalised gap items for the UL workspace. These reuse
+        # existing projection warnings rather than introducing new
+        # heuristics, so behaviour is driven entirely by the current UL
+        # illustration config.
 
         def _has_warning(substr: str) -> bool:
             needle = (substr or "").lower()
@@ -6054,119 +6055,95 @@ def build_product_workspace_snapshot(product_code: str) -> Dict[str, Any]:
 
     compliance_requirements: List[Dict[str, Any]] = []
 
-    # 1) Guaranteed credited rate.
-    ev_gcr = evidence_by_id.get("guaranteed_credited_rate") or {}
-    status_gcr = _req_status_for_evidence("guaranteed_credited_rate", default="missing")
-    compliance_requirements.append(
-        {
-            "id": "guaranteed_credited_rate",
-            "name": "Guaranteed credited rate",
-            "category": "interest",
-            "filedRequirement": "Policy credits interest at least at the guaranteed minimum rate.",
-            "currentImplementation": "Guaranteed credited rate is loaded into UL runtime assumptions from assumption discovery or DSL.",
-            "status": status_gcr,
-            "impact": _impact_for_id("guaranteed_credited_rate"),
-            "evidence": [ev_gcr] if ev_gcr else [],
-            "notes": "If this requirement is not implemented, projected account values may be inconsistent with filed minimum-crediting guarantees.",
-        }
-    )
+    # Build compliance requirements from the UL requirement catalogue so
+    # semantics stay centralised and product-line-aware.
+    gap_key_by_req_id = {
+        "coi_table": "missing_coi_table",
+        "surrender_schedule": "surrender_schedule_placeholder",
+    }
 
-    # 2) Death benefit option.
-    ev_db = evidence_by_id.get("death_benefit_option") or {}
-    status_db = _req_status_for_evidence("death_benefit_option", default="missing")
-    compliance_requirements.append(
-        {
-            "id": "death_benefit_option",
-            "name": "Death benefit option",
-            "category": "benefits",
-            "filedRequirement": "Level death benefit equal to face amount (Option A).",
-            "currentImplementation": "Current mechanics model a level death benefit equal to the face amount.",
-            "status": status_db,
-            "impact": _impact_for_id("death_benefit_option"),
-            "evidence": [ev_db] if ev_db else [],
-            "notes": "Misalignment here would change the basic product promise (amount paid on death).",
-        }
-    )
+    for req_def in get_ul_requirement_definitions():
+        ev = evidence_by_id.get(req_def.field_evidence_id) or {}
 
-    # 3) Cash surrender value definition.
-    ev_csv = evidence_by_id.get("cash_surrender_value") or {}
-    status_csv = _req_status_for_evidence("cash_surrender_value", default="missing")
-    compliance_requirements.append(
-        {
-            "id": "cash_surrender_value",
-            "name": "Cash surrender value",
-            "category": "benefits",
-            "filedRequirement": "Cash surrender value equals policy value less any surrender charge.",
-            "currentImplementation": "Workspace CSV mechanics reflect CSV = Policy Value − Surrender Charge.",
-            "status": status_csv,
-            "impact": _impact_for_id("cash_surrender_value"),
-            "evidence": [ev_csv] if ev_csv else [],
-            "notes": "Ensures surrender benefits match filed definitions for policy value and surrender charges.",
-        }
-    )
-
-    # 4) COI rate table.
-    ev_coi = evidence_by_id.get("coi_rates") or {}
-    status_coi = _req_status_for_evidence("coi_rates", gap_key="missing_coi_table", default="missing")
-    compliance_requirements.append(
-        {
-            "id": "coi_table",
-            "name": "COI rate table",
-            "category": "charges",
-            "filedRequirement": "Cost of Insurance charges are determined using the filed COI rate tables.",
-            "currentImplementation": "Current implementation uses a flat 0.40% of face as a placeholder instead of filed COI tables.",
-            "status": status_coi,
-            "impact": _impact_for_id("coi_rates"),
-            "evidence": [ev_coi] if ev_coi else [],
-            "notes": "Placeholder COI rates mean projected charges may not align with filed CSO-based rate tables.",
-        }
-    )
-
-    # 5) Surrender charge schedule.
-    ev_surr = evidence_by_id.get("surrender_schedule") or {}
-    status_surr = _req_status_for_evidence("surrender_schedule", gap_key="surrender_schedule_placeholder", default="missing")
-    compliance_requirements.append(
-        {
-            "id": "surrender_schedule",
-            "name": "Surrender charge schedule",
-            "category": "charges",
-            "filedRequirement": "Surrender charges follow the filed charge schedule by duration.",
-            "currentImplementation": "Current implementation uses a simplified declining schedule over the surrender period.",
-            "status": status_surr,
-            "impact": _impact_for_id("surrender_schedule"),
-            "evidence": [ev_surr] if ev_surr else [],
-            "notes": "Placeholder surrender schedule can materially affect early-year surrender values.",
-        }
-    )
-
-    # 6) Policy / admin fees.
-    ev_fees = evidence_by_id.get("policy_admin_fee") or {}
-    # For fees we treat placeholder/zero as missing until a non-zero,
-    # evidenced value is present.
-    status_fees = "missing"
-    if isinstance(ev_fees, dict):
-        s_fee = str(ev_fees.get("status") or "").lower()
-        v_fee = ev_fees.get("value")
-        has_value = bool(v_fee not in (None, 0, 0.0, "0", "0.0"))
-        if s_fee in {"extracted", "inferred"} and has_value:
-            status_fees = "implemented"
-        elif s_fee == "placeholder" and has_value:
-            status_fees = "partial"
+        # Special-case policy/admin fees to preserve existing
+        # placeholder/zero handling.
+        if req_def.requirement_id == "policy_admin_fees":
+            status_val = "missing"
+            if isinstance(ev, dict):
+                s_fee = str(ev.get("status") or "").lower()
+                v_fee = ev.get("value")
+                has_value = bool(v_fee not in (None, 0, 0.0, "0", "0.0"))
+                if s_fee in {"extracted", "inferred"} and has_value:
+                    status_val = "implemented"
+                elif s_fee == "placeholder" and has_value:
+                    status_val = "partial"
+                else:
+                    status_val = "missing"
         else:
-            status_fees = "missing"
-    compliance_requirements.append(
-        {
-            "id": "policy_admin_fees",
-            "name": "Policy / admin fees",
-            "category": "charges",
-            "filedRequirement": "Filed policy and admin fee schedule applies to the policy value.",
-            "currentImplementation": "No fee schedule is currently loaded; projections assume no policy/admin fees.",
-            "status": status_fees,
-            "impact": _impact_for_id("policy_admin_fee"),
-            "evidence": [ev_fees] if ev_fees else [],
-            "notes": "Missing fee schedules mean projected account values may be overstated relative to filed illustrations.",
-        }
-    )
+            gap_key = gap_key_by_req_id.get(req_def.requirement_id)
+            status_val = _req_status_for_evidence(req_def.field_evidence_id, gap_key=gap_key, default="missing")
+
+        # For now we keep the currentImplementation and notes texts
+        # Promise-UL-specific; in future these can be catalog-driven.
+        if req_def.requirement_id == "guaranteed_credited_rate":
+            current_impl = (
+                "Guaranteed credited rate is loaded into UL runtime assumptions "
+                "from assumption discovery or DSL."
+            )
+            notes = (
+                "If this requirement is not implemented, projected account values "
+                "may be inconsistent with filed minimum-crediting guarantees."
+            )
+        elif req_def.requirement_id == "death_benefit_option":
+            current_impl = "Current mechanics model a level death benefit equal to the face amount."
+            notes = "Misalignment here would change the basic product promise (amount paid on death)."
+        elif req_def.requirement_id == "cash_surrender_value":
+            current_impl = "Workspace CSV mechanics reflect CSV = Policy Value − Surrender Charge."
+            notes = (
+                "Ensures surrender benefits match filed definitions for policy value "
+                "and surrender charges."
+            )
+        elif req_def.requirement_id == "coi_table":
+            current_impl = (
+                "Current implementation uses a flat 0.40% of face as a placeholder "
+                "instead of filed COI tables."
+            )
+            notes = (
+                "Placeholder COI rates mean projected charges may not align with filed "
+                "CSO-based rate tables."
+            )
+        elif req_def.requirement_id == "surrender_schedule":
+            current_impl = (
+                "Current implementation uses a simplified declining schedule over the "
+                "surrender period."
+            )
+            notes = (
+                "Placeholder surrender schedule can materially affect early-year "
+                "surrender values."
+            )
+        elif req_def.requirement_id == "policy_admin_fees":
+            current_impl = "No fee schedule is currently loaded; projections assume no policy/admin fees."
+            notes = (
+                "Missing fee schedules mean projected account values may be overstated "
+                "relative to filed illustrations."
+            )
+        else:
+            current_impl = ""
+            notes = ""
+
+        compliance_requirements.append(
+            {
+                "id": req_def.requirement_id,
+                "name": req_def.name,
+                "category": req_def.category,
+                "filedRequirement": req_def.filed_requirement,
+                "currentImplementation": current_impl,
+                "status": status_val,
+                "impact": _impact_for_id(req_def.field_evidence_id),
+                "evidence": [ev] if ev else [],
+                "notes": notes,
+            }
+        )
 
     # --- Canonical requirement classification layer -------------------------
 
