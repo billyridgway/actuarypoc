@@ -239,6 +239,140 @@ def _build_document_inventory(
     return inventory
 
 
+def _build_ul_projection_view(
+    product_code: str,
+    *_: Any,
+) -> Tuple[
+    Optional[Dict[str, Any]],
+    Optional[Dict[str, Any]],
+    List[str],
+    List[str],
+    List[Dict[str, Any]],
+]:
+    """Build the UL projection snapshot and gap view for a product.
+
+    For now this is a thin wrapper around the existing illustration
+    provider for the product. It is structured as a separate helper so
+    that future UL-specific projection engines can be wired in without
+    changing the workspace entrypoint.
+    """
+
+    illustration: Optional[Dict[str, Any]] = None
+    provider = _get_illustration_provider(product_code)
+    if provider is not None:
+        try:
+            illustration = provider(product_code, {})
+        except Exception:
+            illustration = None
+
+    projection_snapshot: Optional[Dict[str, Any]] = None
+    mechanics_explanation: Optional[Dict[str, Any]] = None
+    gap_warnings: List[str] = []
+    gap_notes: List[str] = []
+    gap_items: List[Dict[str, Any]] = []
+
+    if isinstance(illustration, dict):
+        projection = illustration.get("projection") or {}
+        rows = list(projection.get("rows") or [])
+        metrics = projection.get("metrics") or {}
+
+        sample_rows: List[Dict[str, Any]] = []
+        if rows:
+            first = rows[0]
+            last = rows[-1]
+            mid = rows[len(rows) // 2] if len(rows) > 2 else None
+            sample_rows.append(first)
+            if mid is not None and mid is not first and mid is not last:
+                sample_rows.append(mid)
+            if last is not first:
+                sample_rows.append(last)
+
+        projection_snapshot = {
+            "request": illustration.get("request") or {},
+            "metrics": metrics,
+            "sampleRows": sample_rows,
+        }
+
+        me = illustration.get("mechanicsExplanation")
+        if isinstance(me, dict):
+            mechanics_explanation = me
+
+        gap_warnings = list(illustration.get("warnings") or [])
+        gap_notes = list(illustration.get("notes") or [])
+
+        def _has_warning(substr: str) -> bool:
+            needle = (substr or "").lower()
+            for w in gap_warnings:
+                if isinstance(w, str) and needle in w.lower():
+                    return True
+            return False
+
+        if _has_warning("COI rates are placeholder"):
+            gap_items.append(
+                {
+                    "id": "missing_coi_table",
+                    "title": "COI table missing",
+                    "severity": "high",
+                    "status": "placeholder",
+                    "whyItMatters": (
+                        "COI charges currently use a flat placeholder rate, so projected "
+                        "account values and policy charges may not reflect filed rates."
+                    ),
+                    "suggestedUploads": [
+                        "COI rate table",
+                        "pricing workbook",
+                        "actuarial memorandum",
+                        "rate manual",
+                    ],
+                    "source": "Projection warning",
+                }
+            )
+
+        if _has_warning("Surrender charges use a simple declining schedule"):
+            gap_items.append(
+                {
+                    "id": "surrender_schedule_placeholder",
+                    "title": "Surrender schedule placeholder",
+                    "severity": "medium",
+                    "status": "placeholder",
+                    "whyItMatters": (
+                        "Surrender values are based on a simplified declining schedule, "
+                        "not the filed surrender charge pattern, so early duration values "
+                        "may be materially different from production illustrations."
+                    ),
+                    "suggestedUploads": [
+                        "surrender charge schedule",
+                        "policy form",
+                        "actuarial memorandum",
+                    ],
+                    "source": "Projection warning",
+                }
+            )
+
+        if _has_warning("No policy or admin fees are applied"):
+            gap_items.append(
+                {
+                    "id": "policy_admin_fee_missing",
+                    "title": "Policy/admin fee missing",
+                    "severity": "medium",
+                    "status": "missing",
+                    "whyItMatters": (
+                        "Projected policy values do not include policy or admin fees, "
+                        "so they may be higher than filed or production values."
+                    ),
+                    "suggestedUploads": [
+                        "fee schedule",
+                        "expense assumption sheet",
+                        "pricing workbook",
+                        "policy specification",
+                    ],
+                    "source": "Projection warning",
+                }
+            )
+
+    return projection_snapshot, mechanics_explanation, gap_warnings, gap_notes, gap_items
+
+
 def _build_extracted_facts(snapshot: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Summarise key product facts from an existing workspace snapshot.
 
@@ -5511,129 +5645,13 @@ def build_product_workspace_snapshot(product_code: str) -> Dict[str, Any]:
         )
 
     # --- Illustration snapshot (UL draft projection) -------------------------
-    illustration: Optional[Dict[str, Any]] = None
-    provider = _get_illustration_provider(canonical_code)
-    if provider is not None:
-        try:
-            # Use the same provider and default request normalisation as the
-            # existing /api/illustrations path. An empty request lets the
-            # provider apply its current defaults without changing behaviour.
-            illustration = provider(canonical_code, {})
-        except Exception:
-            illustration = None
-
-    projection_snapshot: Optional[Dict[str, Any]] = None
-    mechanics_explanation: Optional[Dict[str, Any]] = None
-    gap_warnings: List[str] = []
-    gap_notes: List[str] = []
-    gap_items: List[Dict[str, Any]] = []
-
-    if isinstance(illustration, dict):
-        projection = illustration.get("projection") or {}
-        rows = list(projection.get("rows") or [])
-        metrics = projection.get("metrics") or {}
-
-        sample_rows: List[Dict[str, Any]] = []
-        if rows:
-            first = rows[0]
-            last = rows[-1]
-            mid = rows[len(rows) // 2] if len(rows) > 2 else None
-            sample_rows.append(first)
-            if mid is not None and mid is not first and mid is not last:
-                sample_rows.append(mid)
-            if last is not first:
-                sample_rows.append(last)
-
-        projection_snapshot = {
-            "request": illustration.get("request") or {},
-            "metrics": metrics,
-            "sampleRows": sample_rows,
-        }
-
-        me = illustration.get("mechanicsExplanation")
-        if isinstance(me, dict):
-            mechanics_explanation = me
-
-        gap_warnings = list(illustration.get("warnings") or [])
-        gap_notes = list(illustration.get("notes") or [])
-
-        # Normalised gap items for the UL workspace. These reuse
-        # existing projection warnings rather than introducing new
-        # heuristics, so behaviour is driven entirely by the current UL
-        # illustration config.
-
-        def _has_warning(substr: str) -> bool:
-            needle = (substr or "").lower()
-            for w in gap_warnings:
-                if isinstance(w, str) and needle in w.lower():
-                    return True
-            return False
-
-        # COI table missing / placeholder.
-        if _has_warning("COI rates are placeholder"):
-            gap_items.append(
-                {
-                    "id": "missing_coi_table",
-                    "title": "COI table missing",
-                    "severity": "high",
-                    "status": "placeholder",
-                    "whyItMatters": (
-                        "COI charges currently use a flat placeholder rate, so projected "
-                        "account values and policy charges may not reflect filed rates."
-                    ),
-                    "suggestedUploads": [
-                        "COI rate table",
-                        "pricing workbook",
-                        "actuarial memorandum",
-                        "rate manual",
-                    ],
-                    "source": "Projection warning",
-                }
-            )
-
-        # Surrender schedule placeholder.
-        if _has_warning("Surrender charges use a simple declining schedule"):
-            gap_items.append(
-                {
-                    "id": "surrender_schedule_placeholder",
-                    "title": "Surrender schedule placeholder",
-                    "severity": "medium",
-                    "status": "placeholder",
-                    "whyItMatters": (
-                        "Surrender values are based on a simplified declining schedule, "
-                        "not the filed surrender charge pattern, so early duration values "
-                        "may be materially different from production illustrations."
-                    ),
-                    "suggestedUploads": [
-                        "surrender charge schedule",
-                        "policy form",
-                        "actuarial memorandum",
-                    ],
-                    "source": "Projection warning",
-                }
-            )
-
-        # Policy/admin fee missing.
-        if _has_warning("No policy or admin fees are applied"):
-            gap_items.append(
-                {
-                    "id": "policy_admin_fee_missing",
-                    "title": "Policy/admin fee missing",
-                    "severity": "medium",
-                    "status": "missing",
-                    "whyItMatters": (
-                        "Projected policy values do not include policy or admin fees, "
-                        "so they may be higher than filed or production values."
-                    ),
-                    "suggestedUploads": [
-                        "fee schedule",
-                        "expense assumption sheet",
-                        "pricing workbook",
-                        "policy specification",
-                    ],
-                    "source": "Projection warning",
-                }
-            )
+    (
+        projection_snapshot,
+        mechanics_explanation,
+        gap_warnings,
+        gap_notes,
+        gap_items,
+    ) = _build_ul_projection_view(canonical_code, ul_model, requirement_classifications)
 
     # --- Evidence layer: mechanics and assumptions traceability ---------------
     evidence_items: List[Dict[str, Any]] = []
