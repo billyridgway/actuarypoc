@@ -1276,25 +1276,21 @@ async def api_workspace_upload_document(
 
 @app.post("/api/workspaces/{workspace_id}/analyze")
 def api_workspace_analyze(workspace_id: str) -> Dict[str, Any]:
-    """Run an understanding analysis for a workspace (MVP).
-
-    For the initial slice this is Promise‑UL‑compatible: we reuse the
-    existing Promise UL product workspace snapshot builder and treat the
-    result as the workspace snapshot. Future slices will route based on
-    inferred product type.
-    """
+    """Analyze exactly the documents currently associated with a workspace."""
 
     ws = get_workspace(workspace_id)
     if ws is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
 
-    if int(ws.get("document_count") or 0) <= 0:
+    # This association query is the sole input boundary for workspace
+    # analysis.  Do not use the denormalized document_count to select inputs,
+    # and do not supplement this set from product-level document registries.
+    workspace_documents = list_workspace_documents(workspace_id)
+    if not workspace_documents:
         raise HTTPException(status_code=400, detail="At least one document is required before analysis")
 
-    # For MVP we ignore workspace‑specific document content and reuse the
-    # existing Promise UL understanding pipeline.
     try:
-        snapshot = build_product_workspace_snapshot("ICC18 P18PR UL")
+        snapshot = analyze_workspace_documents(workspace_id, workspace_documents)
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -1306,7 +1302,42 @@ def api_workspace_analyze(workspace_id: str) -> Dict[str, Any]:
         )
         raise HTTPException(status_code=500, detail=f"Analysis failed: {exc}")
 
-    product_block = snapshot.get("product") or {}
+    if not isinstance(snapshot, dict):
+        raise HTTPException(status_code=500, detail="Workspace analyzer returned an invalid result")
+
+    # Canonical provenance is endpoint-owned, not analyzer-owned.  This
+    # prevents an analyzer from accidentally reporting stale or cross-workspace
+    # inputs and makes membership changes visible on the very next run.
+    document_ids = [d.get("id") for d in workspace_documents]
+    snapshot["analyzedWorkspaceId"] = workspace_id
+    snapshot["analyzedDocumentIds"] = document_ids
+    snapshot["documentInventory"] = _build_document_inventory(workspace_documents)
+
+    is_available = snapshot.get("analysisStatus") == "analyzed"
+    analysis_status = "analyzed" if is_available else "analysis_unavailable"
+    if not is_available:
+        # Retain only status/reason/readiness from an unavailable adapter.
+        # Product identity, evidence, and modeled facts are not trustworthy
+        # when no analysis occurred.
+        unavailable_readiness = snapshot.get("readinessDashboard") or {}
+        if not isinstance(unavailable_readiness, dict):
+            unavailable_readiness = {}
+        unavailable_readiness = {
+            **unavailable_readiness,
+            "overallStatus": "analysis_unavailable",
+            "projectionTrustLevel": "unavailable",
+        }
+        snapshot = {
+            "analysisStatus": analysis_status,
+            "analysisUnavailableReason": snapshot.get("analysisUnavailableReason"),
+            "readinessDashboard": unavailable_readiness,
+            "analyzedWorkspaceId": workspace_id,
+            "analyzedDocumentIds": document_ids,
+            "documentInventory": _build_document_inventory(workspace_documents),
+            "extractedFacts": [],
+            "requirementsCandidates": [],
+        }
+    product_block = (snapshot.get("product") or {}) if is_available else {}
     compliance = (snapshot.get("complianceMatrix") or {}).get("summary") or {}
     readiness = snapshot.get("readinessDashboard") or {}
 
@@ -1314,19 +1345,21 @@ def api_workspace_analyze(workspace_id: str) -> Dict[str, Any]:
     # can surface document inventory, extracted facts, and candidate
     # requirements and capability assessment without requiring additional
     # API calls.
-    try:
-        docs_for_inventory = list_workspace_documents(workspace_id)
-    except Exception:
-        docs_for_inventory = []
-    snapshot["documentInventory"] = _build_document_inventory(docs_for_inventory)
-    snapshot["extractedFacts"] = _build_extracted_facts(snapshot)
-    snapshot["requirementsCandidates"] = _build_requirements_candidates(snapshot)
-    snapshot["productUnderstanding"] = _build_product_understanding(snapshot)
-    snapshot["capabilityAssessment"] = _build_capability_assessment(snapshot)
+    if is_available:
+        snapshot["extractedFacts"] = _build_extracted_facts(snapshot)
+        snapshot["requirementsCandidates"] = _build_requirements_candidates(snapshot)
+        snapshot["productUnderstanding"] = _build_product_understanding(snapshot)
+        snapshot["capabilityAssessment"] = _build_capability_assessment(snapshot)
+    else:
+        # An unavailable analyzer has not extracted, inferred, or reviewed
+        # anything.  Do not manufacture unresolved fact rows or derived
+        # understanding from empty product fields.
+        snapshot["extractedFacts"] = []
+        snapshot["requirementsCandidates"] = []
 
     updated = update_workspace_analysis(
         workspace_id,
-        status="analyzed",
+        status=analysis_status,
         snapshot=snapshot,
         inferred_product_name=product_block.get("name"),
         inferred_product_code=product_block.get("code"),
@@ -1348,6 +1381,35 @@ def api_workspace_analyze(workspace_id: str) -> Dict[str, Any]:
     return {
         "workspace": _workspace_to_api(updated),
         "snapshot": snapshot,
+    }
+
+
+def analyze_workspace_documents(
+    workspace_id: str,
+    documents: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Analyze an explicit, workspace-scoped document set.
+
+    The current UL snapshot builder reads product-level registries and runtime
+    configuration; it does not extract the supplied documents.  Routing a
+    workspace through it would fabricate product identity and provenance, so
+    the honest result is unavailable until a document-consuming analyzer is
+    implemented.  The explicit signature is the extension boundary for that
+    analyzer.
+    """
+
+    del workspace_id, documents
+    return {
+        "analysisStatus": "analysis_unavailable",
+        "analysisUnavailableReason": (
+            "No installed analyzer can analyze this workspace's explicit document set."
+        ),
+        "readinessDashboard": {
+            "overallStatus": "analysis_unavailable",
+            "projectionTrustLevel": "unavailable",
+        },
+        "extractedFacts": [],
+        "requirementsCandidates": [],
     }
 
 
