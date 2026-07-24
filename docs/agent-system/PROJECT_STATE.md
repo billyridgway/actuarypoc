@@ -45,6 +45,15 @@ These facts must be reverified and supplemented with exact repository paths, nam
 
 ## 4. Architecture Implementation State
 
+- **VERIFIED-REPO (2026-07-23):** The Product Workspace analysis endpoint selects
+  its inputs exclusively from the workspace-document membership query and records
+  the workspace ID and exact analyzed document IDs in its persisted snapshot.
+- **VERIFIED-REPO (2026-07-23):** A bounded, deterministic UL document analyzer
+  supports identities and core requirement evidence parsed from the supplied
+  workspace blobs. Distinct UL identities remain distinct; unsupported or
+  unresolved product types return `analysis_unavailable`. This is not a general
+  product engine or a replacement for richer document extraction.
+
 The prior architecture document reported:
 
 - **REPORTED:** A generic requirement classifier exists in `src/actuarypoc/domain/requirements_classification.py`.

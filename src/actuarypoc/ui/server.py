@@ -65,6 +65,7 @@ from actuarypoc.extract.assumptions_for_product import (
 )
 from actuarypoc.extract.mechanics_for_product import generate_mechanics_for_product
 from actuarypoc.extract.mechanic_assumptions_extractor import extract_mechanic_assumptions
+from actuarypoc.extract.workspace_ul_analyzer import analyze_ul_workspace
 from actuarypoc.agents.pmr_ai import summarise_pmr, propose_decision
 from actuarypoc.agents.scenario_ai import generate_scenarios_for_product
 from actuarypoc.storage.postgres_client import (
@@ -1388,29 +1389,9 @@ def analyze_workspace_documents(
     workspace_id: str,
     documents: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """Analyze an explicit, workspace-scoped document set.
+    """Run the existing UL analysis semantics over the exact supplied objects."""
 
-    The current UL snapshot builder reads product-level registries and runtime
-    configuration; it does not extract the supplied documents.  Routing a
-    workspace through it would fabricate product identity and provenance, so
-    the honest result is unavailable until a document-consuming analyzer is
-    implemented.  The explicit signature is the extension boundary for that
-    analyzer.
-    """
-
-    del workspace_id, documents
-    return {
-        "analysisStatus": "analysis_unavailable",
-        "analysisUnavailableReason": (
-            "No installed analyzer can analyze this workspace's explicit document set."
-        ),
-        "readinessDashboard": {
-            "overallStatus": "analysis_unavailable",
-            "projectionTrustLevel": "unavailable",
-        },
-        "extractedFacts": [],
-        "requirementsCandidates": [],
-    }
+    return analyze_ul_workspace(workspace_id, documents)
 
 
 FEATURE_REQUEST_STATUSES = {
