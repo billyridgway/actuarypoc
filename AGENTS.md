@@ -140,6 +140,8 @@ Review responsibilities are intentionally split:
 - The intentionally read-only Auditor performs static correctness, trust, and
   coverage review. The Auditor must not reject work solely because read-only
   access prevents independent Git operations or test execution.
+- Routine per-step validation and acceptance gatekeeping belongs to Architect review.
+- Auditor/reviewer involvement is optional for targeted high-risk concerns or final pre-merge review, not for routine hash, evidence, or test confirmation.
 
 ---
 
