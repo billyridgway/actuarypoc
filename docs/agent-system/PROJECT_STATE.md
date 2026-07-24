@@ -45,29 +45,33 @@ These facts must be reverified and supplemented with exact repository paths, nam
 
 ## 4. Architecture Implementation State
 
-- **VERIFIED-REPO (Product Workspace v1 Step 1 approved with follow-up at
-  `0db8a8686e2ca9eeda5e48f66a5087ff1cd24451`):** The
+- **VERIFIED-REPO (Product Workspace v1 Step 1 APPROVED WITH FOLLOW-UP at
+  `0db8a8686e2ca9eeda5e48f66a5087ff1cd24451`; closure recorded by
+  `55d27367d8d8ca9a4343368c79d0bbed5a2173a2`):** The
   Product Workspace analysis endpoint selects its inputs from the
   workspace-document membership query, validates the complete membership set,
   and records the workspace ID and exact analyzed document IDs in its persisted
   snapshot. Focused tests pass.
-- **VERIFIED-REPO (Product Workspace v1 Step 1 approved with follow-up at
-  `0db8a8686e2ca9eeda5e48f66a5087ff1cd24451`):** A
+- **VERIFIED-REPO (Product Workspace v1 Step 1 APPROVED WITH FOLLOW-UP at
+  `0db8a8686e2ca9eeda5e48f66a5087ff1cd24451`; closure recorded by
+  `55d27367d8d8ca9a4343368c79d0bbed5a2173a2`):** A
   bounded, deterministic UL document analyzer supports identities and core
   requirement evidence parsed from supplied workspace blobs. Distinct tested UL
   identities remain distinct; unsupported or unresolved product types return
   `analysis_unavailable`. This is not a general product engine, a replacement
   for richer extraction.
-- **VERIFIED-REPO (Product Workspace v1 Step 2 implemented and locally tested,
-  pending independent Auditor review):** The bounded UL workspace analyzer now
+- **VERIFIED-REPO (Product Workspace v1 Step 2 implementation
+  `9720b37f7eeb9340425223399b03a8fdfd40291b`, Builder-tested; Auditor
+  REJECTED pending correction/re-review):** The bounded UL workspace analyzer now
   emits canonical requirement ID, materiality, applicability, implementation,
   input, and deterministic blocking fields. Applicability is resolved before
   missingness, while missing inputs and capability gaps are derived as
   independent (potentially overlapping) views. Canonical provenance separates
   product documents, deterministic rules, engine configuration, and unsafe
   placeholder/default/fallback inputs. Practical legacy response keys remain.
-- **VERIFIED-REPO (Product Workspace v1 Step 2 implemented and locally tested,
-  pending independent Auditor review):** The existing UL engine declarations
+- **VERIFIED-REPO (Product Workspace v1 Step 2 implementation
+  `9720b37f7eeb9340425223399b03a8fdfd40291b`, Builder-tested; Auditor
+  REJECTED pending correction/re-review):** The existing UL engine declarations
   are intentionally narrow: level policy/admin fee support is explicit; the
   flat COI placeholder and surrender approximation are explicitly unsupported
   for filed tables/schedules; absent declarations remain unresolved and never
@@ -222,22 +226,27 @@ Required outputs:
 ### Product Workspace v1 Step 1 — approved with follow-up
 
 - **VERIFIED-REPO (2026-07-23):** Product Workspace v1 Step 1 is **APPROVED WITH
-  FOLLOW-UP** at `0db8a8686e2ca9eeda5e48f66a5087ff1cd24451`. Tests were
+  FOLLOW-UP** at `0db8a8686e2ca9eeda5e48f66a5087ff1cd24451`; closure was
+  recorded by `55d27367d8d8ca9a4343368c79d0bbed5a2173a2`. Tests were
   executed by the Builder rather than independently by the intentionally
   read-only Auditor. The broader suite has a separate, pre-existing Python 3.9
   `str | None` collection compatibility issue. Neither follow-up blocks Step 1
   closure. See
   [Product Workspace v1 Step 1 Correction 1 review evidence](PRODUCT_WORKSPACE_V1_STEP1_CORRECTION1_REVIEW_EVIDENCE.md).
-### Product Workspace v1 Step 2 — implemented locally, review pending
+### Product Workspace v1 Step 2 — implemented and Builder-tested; Auditor rejected
 
-- **VERIFIED-REPO (2026-07-23):** Step 2 implementation and focused local tests
-  are recorded in
+- **VERIFIED-REPO (2026-07-23):** Step 2 implementation commit
+  `9720b37f7eeb9340425223399b03a8fdfd40291b` and focused Builder tests are
+  recorded in
   `PRODUCT_WORKSPACE_V1_STEP2_REVIEW_EVIDENCE.md`. Analyzer, exact-document
   boundary, endpoint persistence, and existing capability tests pass. The
   pre-existing Python 3.9 `str | None` test-collection issue remains a known
   nonblocking limitation and was not broadened into this task.
-- **PLANNED:** Independent Auditor review is required. No merge or deployment
-  may occur without explicit product-owner approval.
+- **REPORTED (2026-07-23):** The Auditor **REJECTED** Step 2 pending correction
+  of the review bundle and durable-state evidence and exact-revision re-review;
+  this does not claim an application defect or Step 2 approval.
+- **PLANNED:** This docs/evidence correction commit is pending Auditor review.
+  No Step 3 work, merge, push, or deployment is authorized.
 
 Still required:
 

@@ -194,11 +194,14 @@ Required disposition: `APPROVED`, `APPROVED WITH FOLLOW-UP`, or `REJECTED`.
 ## 13. Final Closeout
 
 - **Implementation status:** implemented locally; focused tests passed
-- **Review disposition:** pending independent Auditor review
+- **Review disposition:** Auditor `REJECTED` implementation commit
+  `9720b37f7eeb9340425223399b03a8fdfd40291b` pending review-bundle/state
+  correction and exact-revision re-review
 - **Behavior-validation status:** 19 focused/regression tests passed; known
   Python 3.9 classifier-test collection limitation recorded in review evidence
 - **Deployment status:** not permitted
 - **Acceptance criteria met:** Builder evidence recorded; Auditor confirmation pending
 - **Open follow-ups:** preserve Step 1 follow-ups; independent review required
-- **Project state updated:** yes; implemented/tested, review pending
+- **Project state updated:** yes; implemented and Builder-tested, Auditor
+  rejected pending correction/re-review
 - **Product-owner decision:** pending review; no merge/deployment authority
