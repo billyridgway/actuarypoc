@@ -14,6 +14,16 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from PyPDF2 import PdfReader
 
+from actuarypoc.domain.requirements_classification import (
+    Applicability,
+    Evidence,
+    EvidenceKind,
+    Impact,
+    InputState,
+    ReviewerDecision,
+    ReviewerDecisionKind,
+    classify_requirement,
+)
 from actuarypoc.domain.ul_requirements import get_ul_requirement_definitions
 from actuarypoc.storage.minio_client import get_bucket_name, get_minio_client
 
@@ -27,8 +37,6 @@ _IDENTITY_KEYS = {
     "carrier": "carrier",
     "policy_form": "form",
 }
-_UNSAFE_KINDS = {"fallback", "placeholder", "default"}
-
 # This is deliberately a narrow statement about the existing UL projection
 # implementation, not a document claim and not a generic capability registry.
 # The existing engine applies a level per-policy fee.  Its COI implementation
@@ -36,10 +44,31 @@ _UNSAFE_KINDS = {"fallback", "placeholder", "default"}
 # neither is verified support for a filed requirement.
 _VERIFIED_UL_ENGINE_CAPABILITIES = {
     "policy_admin_fees": {
+        "status": "supported",
         "source": "actuarypoc.ui.server:_run_ul_projection.policy_fee_annual",
         "scope": "level per-policy/admin fee only",
-    }
+    },
+    "coi_table": {
+        "status": "unsupported",
+        "source": "actuarypoc.ui.server:_run_ul_projection.config.coi_rate_flat",
+        "scope": "flat placeholder is not support for a filed COI rate table",
+    },
+    "surrender_schedule": {
+        "status": "unsupported",
+        "source": "actuarypoc.ui.server:_run_ul_projection.config.surrender_period_years/max_surrender_pct",
+        "scope": "runtime approximation is not support for a filed surrender schedule",
+    },
 }
+
+
+def _input_status(value: str) -> str:
+    """Label explicit unsafe values without presenting them as source truth."""
+
+    lowered = value.strip().lower()
+    for kind in ("placeholder", "fallback", "default"):
+        if re.search(rf"\b{kind}\b", lowered):
+            return kind
+    return "extracted"
 
 
 def _analysis_failure(workspace_id: str, errors: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -188,12 +217,13 @@ def analyze_ul_workspace(
             "requirementsCandidates": [],
         }
 
-    def provenance(item: Dict[str, Any], *, kind: str = "document_extracted") -> Dict[str, Any]:
+    def provenance(item: Dict[str, Any], *, kind: str = "product_document") -> Dict[str, Any]:
         return {
             "kind": kind,
             "documentId": item.get("documentId"),
             "snippet": item.get("snippet"),
             "method": "deterministic_key_value_parser",
+            "legacyKind": "document_extracted" if kind == "product_document" else None,
         }
 
     product: Dict[str, Any] = {}
@@ -219,78 +249,138 @@ def analyze_ul_workspace(
         applicability_item = unique(f"applicability_{rid}")
         applicability_value = str(applicability_item["value"]).lower() if applicability_item else ""
 
+        capability = _VERIFIED_UL_ENGINE_CAPABILITIES.get(rid)
+        capability_status = capability.get("status") if capability else "unknown"
+        implementation_evidence: List[Evidence] = []
+        if capability_status == "supported":
+            implementation_evidence.append(
+                Evidence(EvidenceKind.ENGINE_INTROSPECTION, status="extracted", origin="engine_configuration")
+            )
+        elif capability_status == "unsupported" and rid == "surrender_schedule":
+            implementation_evidence.append(
+                Evidence(EvidenceKind.ENGINE_INTROSPECTION, status="placeholder", origin="placeholder")
+            )
+
+        reviewer_decisions: List[ReviewerDecision] = []
+        applicability_evidence: List[Evidence] = []
+        if applicability_value in {"not applicable", "not_applicable", "no"}:
+            reviewer_decisions.append(ReviewerDecision(ReviewerDecisionKind.MARK_NOT_APPLICABLE))
+        elif applicability_item or value_item:
+            applicability_evidence.append(Evidence(EvidenceKind.PRODUCT_DOCUMENT, status="extracted"))
+
+        input_status = _input_status(str(value_item["value"])) if value_item else "missing"
+        input_evidence: List[Evidence] = []
+        if value_item is not None:
+            if input_status == "extracted":
+                input_evidence.append(Evidence(EvidenceKind.PRODUCT_DOCUMENT, status="extracted"))
+            else:
+                input_evidence.append(
+                    Evidence(EvidenceKind.ENGINE_INTROSPECTION, status="placeholder", origin=input_status)
+                )
+
+        classification = classify_requirement(
+            requirement_id=rid,
+            impact=Impact(definition.impact),
+            applicability_evidence=applicability_evidence,
+            implementation_evidence=implementation_evidence,
+            input_evidence=input_evidence,
+            reviewer_decisions=reviewer_decisions,
+        )
         base = {
             "id": rid,
+            "requirementId": rid,
             "name": definition.name,
             "impact": definition.impact,
+            "materiality": definition.impact,
+            "applicability": classification.applicability.value,
+            "legacyApplicability": {
+                Applicability.CONFIRMED_APPLICABLE: "applicable",
+                Applicability.NEEDS_REVIEW: "unresolved",
+                Applicability.CONFIRMED_NOT_APPLICABLE: "not_applicable",
+            }[classification.applicability],
+            "implementationState": classification.implementation_state.value,
+            "inputState": classification.input_state.value,
+            "isBlockingGap": classification.is_blocking_gap,
             "reason": "",
             "provenance": {
-                "kind": "configuration_rule_derived",
+                "kind": "deterministic_rule",
                 "method": "applicability_partition_rule",
                 "source": "ul_requirement_catalogue_and_partition_rules",
+                "legacyKind": "configuration_rule_derived",
             },
         }
-        if applicability_value in {"not applicable", "not_applicable", "no"}:
-            base.update(applicability="not_applicable", reason="Document explicitly marks requirement not applicable.")
-            bucket = "notApplicable"
-        elif not applicability_item and not value_item:
-            base.update(applicability="unresolved", reason="Supplied documents do not resolve applicability.")
-            bucket = "unresolvedApplicability"
+        if capability is None:
+            base["capabilityStatus"] = "unresolved"
+            base["capabilityProvenance"] = {
+                "kind": "engine_configuration",
+                "source": "no_scoped_capability_declaration",
+                "scope": rid,
+            }
         else:
-            base["applicability"] = "applicable"
-            capability = _VERIFIED_UL_ENGINE_CAPABILITIES.get(rid)
-            if capability is None:
-                base.update(reason="Existing UL engine support is not explicitly verified for this requirement.")
-                base["capabilityStatus"] = "unresolved"
-                base["capabilityProvenance"] = {
-                    "kind": "engine_configuration",
-                    "source": "no_scoped_capability_declaration",
-                    "scope": rid,
-                }
-                bucket = "unresolvedCapabilities"
-            elif value_item is None:
-                base.update(reason="Applicable requirement has no supplied document value.")
-                bucket = "missingInformation"
+            base["capabilityStatus"] = capability_status
+            base["capabilityProvenance"] = {
+                "kind": "engine_configuration",
+                **{key: value for key, value in capability.items() if key != "status"},
+            }
+
+        if value_item is not None:
+            value_kind = "product_document" if input_status == "extracted" else input_status
+            base.update(value=value_item["value"], valueProvenance=provenance(value_item, kind=value_kind))
+
+        if classification.applicability is Applicability.CONFIRMED_NOT_APPLICABLE:
+            base["reason"] = "Document explicitly marks requirement not applicable."
+            primary_bucket = "notApplicable"
+            partitions["notApplicable"].append(base)
+        elif classification.applicability is Applicability.NEEDS_REVIEW:
+            base["reason"] = "Supplied documents do not resolve applicability."
+            primary_bucket = "unresolvedApplicability"
+            partitions["unresolvedApplicability"].append(base)
+        else:
+            if classification.input_state is not InputState.READY:
+                partitions["missingInformation"].append(base)
+            if capability_status == "unsupported":
+                partitions["unsupportedCapabilities"].append(base)
+            elif capability_status == "unknown":
+                partitions["unresolvedCapabilities"].append(base)
+
+            if classification.input_state is not InputState.READY:
+                base["reason"] = "Applicable requirement input is absent or not ready."
+                primary_bucket = "missingInformation"
+            elif capability_status == "unsupported":
+                base["reason"] = "Existing UL engine explicitly does not support this filed requirement."
+                primary_bucket = "unsupportedCapabilities"
+            elif capability_status == "unknown":
+                base["reason"] = "Existing UL engine support is not explicitly declared for this requirement."
+                primary_bucket = "unresolvedCapabilities"
             else:
-                base.update(
-                    reason="Applicable requirement has document evidence and supported behavior.",
-                    value=value_item["value"],
-                    valueProvenance=provenance(value_item),
-                    capabilityStatus="supported",
-                    capabilityProvenance={"kind": "engine_configuration", **capability},
-                )
-                bucket = "satisfied"
-        base["category"] = bucket
-        partitions[bucket].append(base)
+                base["reason"] = "Applicable requirement has ready document input and supported behavior."
+                primary_bucket = "satisfied"
+                partitions["satisfied"].append(base)
+
+        # Compatibility alias: legacy consumers use one presentation category
+        # even though canonical gap partitions are intentionally non-exclusive.
+        base["category"] = primary_bucket
         all_requirements.append(base)
 
     material_inputs = [item for item in all_requirements if "valueProvenance" in item]
-    unsafe_inputs = [
-        item for item in material_inputs if item["valueProvenance"].get("kind") in _UNSAFE_KINDS
-    ]
-    blockers = (
-        partitions["missingInformation"]
-        + partitions["unsupportedCapabilities"]
-        + partitions["unresolvedCapabilities"]
-        + partitions["unresolvedApplicability"]
-        + unsafe_inputs
-    )
+    blockers = [item for item in all_requirements if item["isBlockingGap"]]
     eligible = not blockers
     readiness = {
         **partitions,
         "projectionEligible": eligible,
         "projectionBlockers": [
-            {"requirementId": item["id"], "category": item["category"], "reason": item["reason"]}
+            {"requirementId": item["requirementId"], "category": item["category"], "reason": item["reason"]}
             for item in blockers
         ],
         "materialInputProvenance": [
-            {"requirementId": item["id"], **item["valueProvenance"]} for item in material_inputs
+            {"requirementId": item["requirementId"], **item["valueProvenance"]} for item in material_inputs
         ],
         "overallStatus": "ready" if eligible else "not_ready",
         "projectionTrustLevel": "document_bound" if eligible else "insufficient",
     }
     return {
         "analysisStatus": "analyzed",
+        "readinessContractVersion": "1.0",
         "analyzedWorkspaceId": workspace_id,
         "analyzedDocumentIds": document_ids,
         "product": product,

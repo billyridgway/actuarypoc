@@ -98,7 +98,128 @@ def test_explicit_scoped_engine_capability_has_non_document_provenance() -> None
         "source": "actuarypoc.ui.server:_run_ul_projection.policy_fee_annual",
         "scope": "level per-policy/admin fee only",
     }
-    assert fee["provenance"]["kind"] == "configuration_rule_derived"
+    assert fee["provenance"]["kind"] == "deterministic_rule"
+    assert fee["provenance"]["legacyKind"] == "configuration_rule_derived"
+
+
+def test_canonical_classification_shape_and_legacy_aliases() -> None:
+    result = analyze_ul_workspace(
+        "canonical",
+        [_document("33", "canonical")],
+        content_loader=lambda _: _ul_text(name="Canonical UL", code="CAN-UL", carrier="C", form="F"),
+    )
+
+    assert result["readinessContractVersion"] == "1.0"
+    assert result["readiness"] is result["readinessDashboard"]
+    assert result["requirements"] is result["requirementsClassification"]["all"]
+    for item in result["requirementsClassification"]["all"]:
+        assert item["requirementId"] == item["id"]
+        assert item["materiality"] == item["impact"]
+        assert item["applicability"] == "confirmed_applicable"
+        assert item["legacyApplicability"] == "applicable"
+        assert item["implementationState"] in {
+            "implemented", "partial", "not_implemented", "unknown"
+        }
+        assert item["inputState"] == "ready"
+        assert isinstance(item["isBlockingGap"], bool)
+        assert item["provenance"]["kind"] == "deterministic_rule"
+        assert item["valueProvenance"]["kind"] == "product_document"
+        assert item["valueProvenance"]["legacyKind"] == "document_extracted"
+
+
+def test_missing_input_and_capability_gaps_are_independent() -> None:
+    payload = b"\n".join(
+        [
+            b"Product type: Universal Life",
+            b"Product name: Gap UL",
+            b"Product code: GAP-UL",
+            b"Carrier: Gap Life",
+            b"Policy form: GAP-F",
+            b"Applicability guaranteed_credited_rate: applicable",
+            b"Applicability coi_table: applicable",
+        ]
+    )
+    result = analyze_ul_workspace(
+        "gaps", [_document("34", "gaps")], content_loader=lambda _: payload
+    )
+
+    missing_ids = {item["requirementId"] for item in result["readiness"]["missingInformation"]}
+    unsupported_ids = {
+        item["requirementId"] for item in result["readiness"]["unsupportedCapabilities"]
+    }
+    unresolved_ids = {
+        item["requirementId"] for item in result["readiness"]["unresolvedCapabilities"]
+    }
+    assert {"guaranteed_credited_rate", "coi_table"} <= missing_ids
+    assert "coi_table" in unsupported_ids
+    assert "guaranteed_credited_rate" in unresolved_ids
+    unknown = next(
+        item for item in result["requirements"] if item["requirementId"] == "guaranteed_credited_rate"
+    )
+    assert unknown["capabilityStatus"] == "unresolved"
+    assert unknown["implementationState"] == "not_implemented"
+    assert unknown["inputState"] == "missing"
+    assert unknown["isBlockingGap"] is True
+
+
+def test_applicability_precedes_missingness_and_document_requests() -> None:
+    payload = b"\n".join(
+        [
+            b"Product type: Universal Life",
+            b"Product name: Applicability UL",
+            b"Product code: APP-UL",
+            b"Carrier: App Life",
+            b"Policy form: APP-F",
+            b"Applicability policy_admin_fees: not applicable",
+        ]
+    )
+    result = analyze_ul_workspace(
+        "applicability", [_document("35", "applicability")], content_loader=lambda _: payload
+    )
+
+    fee = next(item for item in result["requirements"] if item["requirementId"] == "policy_admin_fees")
+    assert fee["applicability"] == "confirmed_not_applicable"
+    assert fee["inputState"] == "not_required"
+    assert fee["isBlockingGap"] is False
+    assert fee in result["readiness"]["notApplicable"]
+    assert fee not in result["readiness"]["missingInformation"]
+    assert all(
+        blocker["requirementId"] != "policy_admin_fees"
+        for blocker in result["readiness"]["projectionBlockers"]
+    )
+
+    unresolved = next(
+        item for item in result["requirements"] if item["requirementId"] == "death_benefit_option"
+    )
+    assert unresolved["applicability"] == "needs_review"
+    assert unresolved["inputState"] == "missing"
+    assert unresolved["isBlockingGap"] is False
+    assert unresolved in result["readiness"]["unresolvedApplicability"]
+    assert unresolved not in result["readiness"]["missingInformation"]
+
+
+def test_placeholder_default_or_fallback_input_is_not_ready_or_document_extracted() -> None:
+    for marker in ("placeholder", "default", "fallback"):
+        payload = b"\n".join(
+            [
+                b"Product type: Universal Life",
+                b"Product name: Unsafe Input UL",
+                b"Product code: UNSAFE-UL",
+                b"Carrier: Unsafe Life",
+                b"Policy form: UNSAFE-F",
+                b"Applicability policy_admin_fees: applicable",
+                f"policy_admin_fees: {marker} annual fee".encode(),
+            ]
+        )
+        result = analyze_ul_workspace(
+            marker, [_document(f"unsafe-{marker}", marker)], content_loader=lambda _: payload
+        )
+        fee = next(item for item in result["requirements"] if item["requirementId"] == "policy_admin_fees")
+        assert fee["inputState"] == "placeholder"
+        assert fee["isBlockingGap"] is True
+        assert fee["valueProvenance"]["kind"] == marker
+        assert fee["valueProvenance"]["kind"] not in {"product_document", "ai_extraction"}
+        assert fee in result["readiness"]["missingInformation"]
 
 
 def test_second_ul_identity_does_not_share_promise_or_term_fallback() -> None:

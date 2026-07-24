@@ -58,6 +58,20 @@ These facts must be reverified and supplemented with exact repository paths, nam
   identities remain distinct; unsupported or unresolved product types return
   `analysis_unavailable`. This is not a general product engine, a replacement
   for richer extraction.
+- **VERIFIED-REPO (Product Workspace v1 Step 2 implemented and locally tested,
+  pending independent Auditor review):** The bounded UL workspace analyzer now
+  emits canonical requirement ID, materiality, applicability, implementation,
+  input, and deterministic blocking fields. Applicability is resolved before
+  missingness, while missing inputs and capability gaps are derived as
+  independent (potentially overlapping) views. Canonical provenance separates
+  product documents, deterministic rules, engine configuration, and unsafe
+  placeholder/default/fallback inputs. Practical legacy response keys remain.
+- **VERIFIED-REPO (Product Workspace v1 Step 2 implemented and locally tested,
+  pending independent Auditor review):** The existing UL engine declarations
+  are intentionally narrow: level policy/admin fee support is explicit; the
+  flat COI placeholder and surrender approximation are explicitly unsupported
+  for filed tables/schedules; absent declarations remain unresolved and never
+  default to supported. This is not a general capability registry.
 
 The prior architecture document reported:
 
@@ -214,8 +228,16 @@ Required outputs:
   `str | None` collection compatibility issue. Neither follow-up blocks Step 1
   closure. See
   [Product Workspace v1 Step 1 Correction 1 review evidence](PRODUCT_WORKSPACE_V1_STEP1_CORRECTION1_REVIEW_EVIDENCE.md).
-- **PLANNED:** Step 2 has not begun. No merge or deployment may occur without
-  explicit product-owner approval.
+### Product Workspace v1 Step 2 — implemented locally, review pending
+
+- **VERIFIED-REPO (2026-07-23):** Step 2 implementation and focused local tests
+  are recorded in
+  `PRODUCT_WORKSPACE_V1_STEP2_REVIEW_EVIDENCE.md`. Analyzer, exact-document
+  boundary, endpoint persistence, and existing capability tests pass. The
+  pre-existing Python 3.9 `str | None` test-collection issue remains a known
+  nonblocking limitation and was not broadened into this task.
+- **PLANNED:** Independent Auditor review is required. No merge or deployment
+  may occur without explicit product-owner approval.
 
 Still required:
 

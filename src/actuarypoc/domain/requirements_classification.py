@@ -246,6 +246,10 @@ def classify_requirement(
     )
 
     input_state = classify_input_state(input_evidence=list(input_evidence))
+    if applicability is Applicability.CONFIRMED_NOT_APPLICABLE:
+        # Applicability is resolved before missingness.  A non-applicable
+        # requirement has no required input even when no input evidence exists.
+        input_state = InputState.NOT_REQUIRED
 
     is_blocking = False
     if applicability is Applicability.CONFIRMED_APPLICABLE:

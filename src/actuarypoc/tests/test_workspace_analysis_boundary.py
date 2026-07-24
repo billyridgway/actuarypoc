@@ -83,6 +83,45 @@ def test_workspace_analysis_uses_current_membership_on_each_run(monkeypatch: Any
     assert response["snapshot"]["analyzedDocumentIds"] == ["12", "13"]
 
 
+def test_endpoint_persists_canonical_readiness_shape(monkeypatch: Any) -> None:
+    from actuarypoc.extract.workspace_ul_analyzer import analyze_ul_workspace
+
+    workspace_id = "canonical-endpoint"
+    documents = [{**_doc("22", workspace_id), "object_path": f"workspaces/{workspace_id}/22.txt"}]
+    persisted = _install_storage_fakes(monkeypatch, {workspace_id: documents})
+    payload = b"\n".join(
+        [
+            b"Product type: Universal Life",
+            b"Product name: Endpoint UL",
+            b"Product code: ENDPOINT-UL",
+            b"Carrier: Endpoint Life",
+            b"Policy form: ENDPOINT-F",
+            b"Applicability policy_admin_fees: applicable",
+            b"policy_admin_fees: filed annual fee",
+        ]
+    )
+    monkeypatch.setattr(
+        server,
+        "analyze_workspace_documents",
+        lambda wid, docs: analyze_ul_workspace(wid, docs, content_loader=lambda _: payload),
+    )
+
+    response = server.api_workspace_analyze(workspace_id)
+    snapshot = response["snapshot"]
+    fee = next(
+        item
+        for item in snapshot["requirementsClassification"]["all"]
+        if item["requirementId"] == "policy_admin_fees"
+    )
+
+    assert snapshot["readinessContractVersion"] == "1.0"
+    assert fee["applicability"] == "confirmed_applicable"
+    assert fee["implementationState"] == "implemented"
+    assert fee["inputState"] == "ready"
+    assert fee["isBlockingGap"] is False
+    assert persisted[0]["snapshot"]["requirementsClassification"] == snapshot["requirementsClassification"]
+
+
 def test_unsupported_documents_persist_honest_analysis_unavailable(monkeypatch: Any) -> None:
     docs = [_doc("31", "unsupported")]
     persisted = _install_storage_fakes(monkeypatch, {"unsupported": docs})

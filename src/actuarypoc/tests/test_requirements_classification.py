@@ -99,6 +99,7 @@ def test_reviewer_mark_not_applicable_wins() -> None:
     assert cls.applicability is Applicability.CONFIRMED_NOT_APPLICABLE
     # Not eligible as a gap regardless of implementation / inputs.
     assert cls.is_blocking_gap is False
+    assert cls.input_state is InputState.NOT_REQUIRED
 
 
 # 5. Engine capability alone cannot create confirmed requirement
