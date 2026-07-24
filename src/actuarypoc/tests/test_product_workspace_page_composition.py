@@ -20,3 +20,6 @@ def test_product_workspace_page_keeps_normal_flow_on_one_primary_surface() -> No
     assert "Draft illustration (product understanding only)" in text[advanced_gate:]
     assert "Mechanics explanation / order of operations" in text[advanced_gate:]
     assert "Uploaded documents" in text[advanced_gate:]
+    assert "Projection vs blockers" in text
+    assert "Server returned deterministic projection" in text
+    assert "Server denied projection" in text

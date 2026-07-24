@@ -254,6 +254,12 @@ Required outputs:
   and pytest execution were blocked by missing toolchain dependencies in this
   workspace, so live rendered validation remains pending.
 
+- **VERIFIED-REPO (2026-07-23):** Step 4 builder work in the actuary-implementer
+  checkout adds a server-authoritative projection decision envelope for Product
+  Workspace snapshots and renders the mutually exclusive projection-or-blockers
+  outcome in the normal UI flow. Focused backend/regression tests and the web
+  build passed locally.
+
 Still required:
 
 - **PLANNED:** Restrict reviewer tools and workspace access to read-only.

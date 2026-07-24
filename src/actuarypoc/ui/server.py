@@ -374,6 +374,37 @@ def _build_ul_projection_view(
     return projection_snapshot, mechanics_explanation, gap_warnings, gap_notes, gap_items
 
 
+def _build_projection_decision(readiness: Dict[str, Any], illustration: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Return the server-authoritative projection decision envelope.
+
+    The caller provides canonical readiness and any existing deterministic
+    illustration snapshot. The result is intentionally mutually exclusive:
+    either `projection` is populated for eligible workspaces or `blockers`
+    is populated for blocked workspaces.
+    """
+
+    blockers = list(readiness.get("projectionBlockers") or [])
+    eligible = bool(readiness.get("projectionEligible")) and not blockers
+    trust = str(readiness.get("projectionTrustLevel") or "unavailable")
+
+    if not eligible:
+        return {
+            "status": "blocked",
+            "eligible": False,
+            "trustLevel": "unavailable" if trust == "unavailable" else trust,
+            "blockers": blockers,
+            "projection": None,
+        }
+
+    return {
+        "status": "projected",
+        "eligible": True,
+        "trustLevel": trust,
+        "blockers": [],
+        "projection": illustration,
+    }
+
+
 def _build_extracted_facts(snapshot: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Summarise key product facts from an existing workspace snapshot.
 
@@ -6461,6 +6492,7 @@ def build_product_workspace_snapshot(product_code: str) -> Dict[str, Any]:
         "criticalIssues": critical_issues,
         "recommendedNextAction": recommended_next_action,
     }
+    projection_decision = _build_projection_decision(readiness_dashboard, projection_snapshot)
 
     # --- PMR / readiness summary (when available) ------------------------------
     readiness_status = "no_review"
@@ -6554,6 +6586,7 @@ def build_product_workspace_snapshot(product_code: str) -> Dict[str, Any]:
             "notes": gap_notes,
         },
         "illustration": projection_snapshot,
+        "projectionDecision": projection_decision,
         "mechanicsExplanation": mechanics_explanation,
         "pmrReadiness": pmr_readiness,
     }

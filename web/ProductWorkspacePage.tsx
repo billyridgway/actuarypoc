@@ -153,6 +153,17 @@ interface WorkspacePayload {
     status?: string;
     messages?: string[];
   };
+  projectionDecision?: {
+    status?: "projected" | "blocked";
+    eligible?: boolean;
+    trustLevel?: string | null;
+    blockers?: Array<{
+      requirementId?: string;
+      category?: string;
+      reason?: string;
+    }>;
+    projection?: any | null;
+  };
   documentInventory?: Array<{
     id?: number | string;
     description?: string | null;
@@ -441,6 +452,7 @@ export const ProductWorkspacePage: React.FC<{
   const illustration = data?.illustration;
   const mechanicsExplanation = data?.mechanicsExplanation;
   const pmr = data?.pmrReadiness;
+  const projectionDecision = data?.projectionDecision;
   const documentInventory = data?.documentInventory;
   const extractedFacts = data?.extractedFacts ?? [];
   const requirementsCandidates = data?.requirementsCandidates ?? [];
@@ -468,6 +480,7 @@ export const ProductWorkspacePage: React.FC<{
   const capabilityHasUnsupportedItems =
     capabilityItems && capabilityItems.length > 0 &&
     capabilityItems.some((item) => (item.status || "unsupported").toLowerCase() !== "supported");
+  const blockerCount = projectionDecision?.blockers?.length ?? 0;
 
   const featureRequestForCapability = (capabilityId: string): FeatureRequest | undefined => {
     if (!featureRequests || !Array.isArray(featureRequests)) return undefined;
@@ -664,9 +677,19 @@ export const ProductWorkspacePage: React.FC<{
             <tr>
               <th>Projection readiness</th>
               <td>
-                {hasMaterialProjectionGaps
-                  ? "Diagnostic only – key inputs are missing or provisional"
-                  : formatProjectionTrustLevel(readiness?.projectionTrustLevel || "unknown")}
+                {projectionDecision?.status === "blocked"
+                  ? `Blocked by ${blockerCount} canonical requirement${blockerCount === 1 ? "" : "s"}`
+                  : formatProjectionTrustLevel(projectionDecision?.trustLevel || readiness?.projectionTrustLevel || "unknown")}
+              </td>
+            </tr>
+            <tr>
+              <th>Projection decision</th>
+              <td>
+                {projectionDecision?.status === "blocked"
+                  ? "Server denied projection"
+                  : projectionDecision?.status === "projected"
+                    ? "Server returned deterministic projection"
+                    : "Not yet evaluated"}
               </td>
             </tr>
             <tr>
@@ -1270,6 +1293,51 @@ export const ProductWorkspacePage: React.FC<{
         ) : null}
       </section>
       )}
+
+      <section className="card home-card">
+        <h2>Projection vs blockers</h2>
+        <p className="muted">
+          The server decides whether the workspace is eligible for projection. The UI renders only the server result
+          and cannot bypass canonical readiness or trust rules.
+        </p>
+        {projectionDecision?.status === "projected" && projectionDecision.projection ? (
+          <table className="kv-table">
+            <tbody>
+              <tr>
+                <th>Outcome</th>
+                <td>Projection returned</td>
+              </tr>
+              <tr>
+                <th>Trust level</th>
+                <td>
+                  {formatProjectionTrustLevel(
+                    projectionDecision.trustLevel || readiness?.projectionTrustLevel || "unknown",
+                  )}
+                </td>
+              </tr>
+              <tr>
+                <th>Basis</th>
+                <td>Canonical server-approved readiness, provenance, and deterministic projection inputs</td>
+              </tr>
+            </tbody>
+          </table>
+        ) : projectionDecision?.status === "blocked" ? (
+          <div className="compliance-list">
+            {projectionDecision.blockers && projectionDecision.blockers.length > 0 ? (
+              projectionDecision.blockers.map((blocker) => (
+                <div key={blocker.requirementId || blocker.category || blocker.reason} className="compliance-item">
+                  <h3>{blocker.requirementId || blocker.category || "Blocker"}</h3>
+                  <p className="muted">{blocker.reason || "Projection is blocked by server-side eligibility rules."}</p>
+                </div>
+              ))
+            ) : (
+              <p className="muted">No blocker details returned by the server.</p>
+            )}
+          </div>
+        ) : (
+          <p className="muted">Projection decision not available in the current workspace snapshot.</p>
+        )}
+      </section>
 
       <section className="card home-card">
         <h2>Readiness, Gaps, and Required Actions</h2>
