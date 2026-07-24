@@ -600,8 +600,8 @@ export const ProductWorkspacePage: React.FC<{
       <header className="card">
         <h1>Product Understanding Workspace</h1>
         <p className="muted">
-          Guided review surface for the current product understanding. Start at the top, work through each section,
-          and use Expert / Debug mode when you need full control over each pipeline stage.
+          Single-page guided review surface for the current product understanding. Start at the top, inspect the
+          evidence and gaps, and use Expert / Debug mode only when you need legacy pipeline controls.
         </p>
         <p>
           <a href="/web?view=expert" className="button">
@@ -622,10 +622,10 @@ export const ProductWorkspacePage: React.FC<{
       </header>
 
       <section className="card home-card">
-        <h2>Executive Review Summary</h2>
+        <h2>Primary Workspace Summary</h2>
         <p className="muted">
-          Quick view of what product this appears to be, how trustworthy the current analysis is, and what you should
-          do next.
+          The normal workflow is concentrated here: product identity, readiness, evidence, gaps, and the next action
+          to take.
         </p>
         <table className="kv-table">
           <tbody>
@@ -683,14 +683,13 @@ export const ProductWorkspacePage: React.FC<{
       </section>
 
       <section className="card home-card">
-        <h2>Product Understanding (AI-generated draft)</h2>
+        <h2>Evidence and Provenance</h2>
         <p>
-          <span className="tag">AI-generated draft</span>{" "}
-          <span className="tag">Needs actuarial review</span>
+          <span className="tag">Evidence-backed</span> <span className="tag">Truthful states only</span>
         </p>
         <p className="muted">
-          High-level summary of what the system currently believes about this product based on existing structured
-          data. This does not change projection behaviour.
+          The workspace keeps extracted, inferred, configured, placeholder, missing, unresolved, and not-applicable
+          values distinct so a reviewer can see what came from documents and what did not.
         </p>
         {productUnderstanding ? (
           <table className="kv-table">
@@ -1273,11 +1272,10 @@ export const ProductWorkspacePage: React.FC<{
       )}
 
       <section className="card home-card">
-        <h2>Missing information / gaps</h2>
+        <h2>Readiness, Gaps, and Required Actions</h2>
         <p className="muted">
-          Uploading additional support documents improves evidence for mechanics and assumptions, but does not
-          automatically make this draft projection filed-rate compliant. Use Expert / Debug mode to rerun and review
-          the full pipeline.
+          Missing information is shown only after applicability is known. Placeholders, fallbacks, and unsupported
+          items remain explicit so the reviewer can tell what is blocking projection and what is only advisory.
         </p>
         {uploadMessage && <p className="muted">{uploadMessage}</p>}
             {gaps && gaps.items && gaps.items.length > 0 ? (
@@ -1440,6 +1438,7 @@ export const ProductWorkspacePage: React.FC<{
         )}
       </section>
 
+      {showAdvancedDebug && (
       <section className="card home-card">
         <h2>Draft illustration (product understanding only)</h2>
         {illustration ? (
@@ -1536,115 +1535,214 @@ export const ProductWorkspacePage: React.FC<{
         )}
       </section>
 
-      <section className="card home-card">
-        <h2>Mechanics explanation / order of operations</h2>
-        {mechanicsExplanation && mechanicsExplanation.steps && mechanicsExplanation.steps.length > 0 ? (
-          <>
-            <p className="muted">Year 1 order-of-operations trace for the current Promise UL projection.</p>
-            <ol>
-              {mechanicsExplanation.steps.map((step) => (
-                <li key={step.id ?? step.order}>
-                  <strong>{step.title || "Step"}</strong>
-                  {step.formulaText && <p className="muted">{step.formulaText}</p>}
-                </li>
-              ))}
-            </ol>
-          </>
-        ) : (
-          <p className="muted">
-            {loading
-              ? "Loading mechanics explanation…"
-              : "No UL mechanics explanation is available yet for Promise UL."}
-          </p>
-        )}
-      </section>
-
-      <section className="card home-card">
-        <h2>PMR / readiness recommendation</h2>
-        {pmr ? (
-          <>
-            <table className="kv-table">
-              <tbody>
-                <tr>
-                  <th>Status</th>
-                  <td>{formatStatusLabel(pmr.status || "unknown")}</td>
-                </tr>
-                {compliance && compliance.summary && (
-                  <tr>
-                    <th>Compliance summary</th>
-                    <td>
-                      Implemented: {compliance.summary.implemented ?? 0}, Partial: {compliance.summary.partial ?? 0},
-                      Missing: {compliance.summary.missing ?? 0} (Overall {formatStatusLabel(
-                        compliance.summary.overallStatus || "unknown",
-                      )})
-                    </td>
-                  </tr>
+      {showAdvancedDebug && (
+        <>
+          <section className="card home-card">
+            <h2>Draft illustration (product understanding only)</h2>
+            {illustration ? (
+              <>
+                <p className="muted">
+                  {hasMaterialProjectionGaps
+                    ? "Diagnostic projection only. Not suitable for product validation, filed-rate review, or customer illustration. Key inputs are missing or provisional."
+                    : "Draft projection for product understanding. This is not a filed-rate compliant carrier illustration."}
+                </p>
+                {hasMaterialProjectionGaps && (
+                  <div className="projection-summary">
+                    <p className="muted">
+                      <strong>Why diagnostic only?</strong>
+                    </p>
+                    <ul className="muted">
+                      {gapItems.some((g) => (g.id || "") === "missing_coi_table") && (
+                        <li>
+                          COI rates are placeholder. Actual cost of insurance tables may materially change policy
+                          charges and cash values.
+                        </li>
+                      )}
+                      {gapItems.some((g) => (g.id || "") === "surrender_schedule_placeholder") && (
+                        <li>
+                          Surrender charges use a simplified schedule. Filed surrender patterns may change early
+                          duration surrender values.
+                        </li>
+                      )}
+                      {gapItems.some((g) => (g.id || "") === "policy_admin_fee_missing") && (
+                        <li>
+                          Policy/admin fees are missing. Actual fee schedules will reduce projected account and
+                          surrender values.
+                        </li>
+                      )}
+                    </ul>
+                  </div>
                 )}
-              </tbody>
-            </table>
-            {pmr.messages && pmr.messages.length > 0 && (
-              <ul className="muted">
-                {pmr.messages.map((m, idx) => (
-                  <li key={idx}>{m}</li>
-                ))}
-              </ul>
+                {illustration.metrics && (
+                  <div className="projection-summary">
+                    {typeof illustration.metrics.maximumYear === "number" && (
+                      <p>
+                        <strong>Projection Horizon:</strong> {illustration.metrics.maximumYear} years
+                      </p>
+                    )}
+                    {typeof illustration.metrics.breakEvenYearCash === "number" && (
+                      <p>
+                        <strong>Break-even Cash Value:</strong> Year {illustration.metrics.breakEvenYearCash}
+                      </p>
+                    )}
+                    {typeof illustration.metrics.breakEvenYearSurrender === "number" && (
+                      <p>
+                        <strong>Break-even Surrender Value:</strong> Year {illustration.metrics.breakEvenYearSurrender}
+                      </p>
+                    )}
+                  </div>
+                )}
+                {illustration.sampleRows && illustration.sampleRows.length > 0 && (
+                  <>
+                    <h3>Sample projection rows</h3>
+                    <table className="kv-table">
+                      <thead>
+                        <tr>
+                          <th>Year</th>
+                          <th>Attained age</th>
+                          <th>Premium mode</th>
+                          <th>Annual premium</th>
+                          <th>Cash value</th>
+                          <th>Surrender value</th>
+                          <th>Death benefit</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {illustration.sampleRows.map((row, idx) => (
+                          <tr key={idx}>
+                            <td>{row.year}</td>
+                            <td>{row.attainedAge ?? ""}</td>
+                            <td>{row.premiumMode ?? ""}</td>
+                            <td>{formatCurrency(row.annualPremium ?? row.modalPremium)}</td>
+                            <td>{formatCurrency(row.cashValue ?? row.policyValue)}</td>
+                            <td>{formatCurrency(row.surrenderValue)}</td>
+                            <td>{formatCurrency(row.deathBenefit)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </>
+                )}
+              </>
+            ) : (
+              <p className="muted">
+                {loading
+                  ? "Loading draft illustration…"
+                  : "No draft UL illustration is available yet for Promise UL."}
+              </p>
             )}
-          </>
-        ) : (
-          <p className="muted">
-            {loading
-              ? "Loading readiness…"
-              : "No Product Model Review readiness snapshot is available for Promise UL yet."}
-          </p>
-        )}
-      </section>
+          </section>
 
-      <section className="card home-card">
-        <h2>Uploaded documents</h2>
-        <p>
-          <button
-            type="button"
-            className="button button-ghost"
-            onClick={() => setShowDocuments((v) => !v)}
-          >
-            {showDocuments ? "Hide documents" : "Show documents"}
-          </button>
-        </p>
-        {showDocuments ? (
-          data?.documents && data.documents.length > 0 ? (
-            <table className="kv-table">
-              <thead>
-                <tr>
-                  <th>ID</th>
-                  <th>Kind</th>
-                  <th>Description</th>
-                  <th>Object path</th>
-                  <th>Filing</th>
-                  <th>Uploaded at</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.documents.map((d) => (
-                  <tr key={d.id ?? d.objectPath ?? String(d.createdAt)}>
-                    <td>{d.id}</td>
-                    <td>{d.kind || "filing"}</td>
-                    <td>{d.description || "(none)"}</td>
-                    <td>{d.objectPath}</td>
-                    <td>{d.filingId || product?.filingId || "(n/a)"}</td>
-                    <td>{d.createdAt || ""}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          ) : (
-            <p className="muted">
-              {loading
-                ? "Loading documents…"
-                : "No filings or support documents are registered for Promise UL yet."}
+          <section className="card home-card">
+            <h2>Mechanics explanation / order of operations</h2>
+            {mechanicsExplanation && mechanicsExplanation.steps && mechanicsExplanation.steps.length > 0 ? (
+              <>
+                <p className="muted">Year 1 order-of-operations trace for the current Promise UL projection.</p>
+                <ol>
+                  {mechanicsExplanation.steps.map((step) => (
+                    <li key={step.id ?? step.order}>
+                      <strong>{step.title || "Step"}</strong>
+                      {step.formulaText && <p className="muted">{step.formulaText}</p>}
+                    </li>
+                  ))}
+                </ol>
+              </>
+            ) : (
+              <p className="muted">
+                {loading
+                  ? "Loading mechanics explanation…"
+                  : "No UL mechanics explanation is available yet for Promise UL."}
+              </p>
+            )}
+          </section>
+
+          <section className="card home-card">
+            <h2>PMR / readiness recommendation</h2>
+            {pmr ? (
+              <>
+                <table className="kv-table">
+                  <tbody>
+                    <tr>
+                      <th>Status</th>
+                      <td>{formatStatusLabel(pmr.status || "unknown")}</td>
+                    </tr>
+                    {compliance && compliance.summary && (
+                      <tr>
+                        <th>Compliance summary</th>
+                        <td>
+                          Implemented: {compliance.summary.implemented ?? 0}, Partial:{" "}
+                          {compliance.summary.partial ?? 0}, Missing: {compliance.summary.missing ?? 0} (Overall{" "}
+                          {formatStatusLabel(compliance.summary.overallStatus || "unknown")})
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+                {pmr.messages && pmr.messages.length > 0 && (
+                  <ul className="muted">
+                    {pmr.messages.map((m, idx) => (
+                      <li key={idx}>{m}</li>
+                    ))}
+                  </ul>
+                )}
+              </>
+            ) : (
+              <p className="muted">
+                {loading
+                  ? "Loading readiness…"
+                  : "No Product Model Review readiness snapshot is available for Promise UL yet."}
+              </p>
+            )}
+          </section>
+
+          <section className="card home-card">
+            <h2>Uploaded documents</h2>
+            <p>
+              <button
+                type="button"
+                className="button button-ghost"
+                onClick={() => setShowDocuments((v) => !v)}
+              >
+                {showDocuments ? "Hide documents" : "Show documents"}
+              </button>
             </p>
-          )
-        ) : null}
-      </section>
+            {showDocuments ? (
+              data?.documents && data.documents.length > 0 ? (
+                <table className="kv-table">
+                  <thead>
+                    <tr>
+                      <th>ID</th>
+                      <th>Kind</th>
+                      <th>Description</th>
+                      <th>Object path</th>
+                      <th>Filing</th>
+                      <th>Uploaded at</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.documents.map((d) => (
+                      <tr key={d.id ?? d.objectPath ?? String(d.createdAt)}>
+                        <td>{d.id}</td>
+                        <td>{d.kind || "filing"}</td>
+                        <td>{d.description || "(none)"}</td>
+                        <td>{d.objectPath}</td>
+                        <td>{d.filingId || product?.filingId || "(n/a)"}</td>
+                        <td>{d.createdAt || ""}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : (
+                <p className="muted">
+                  {loading
+                    ? "Loading documents…"
+                    : "No filings or support documents are registered for Promise UL yet."}
+                </p>
+              )
+            ) : null}
+          </section>
+        </>
+      )}
     </div>
   );
 };

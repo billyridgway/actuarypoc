@@ -247,6 +247,12 @@ Required outputs:
   this does not claim an application defect or Step 2 approval.
 - **PLANNED:** This docs/evidence correction commit is pending Auditor review.
   No Step 3 work, merge, push, or deployment is authorized.
+- **VERIFIED-REPO (2026-07-23):** Step 3 builder work in the actuary-implementer
+  checkout is simplifying the normal Product Workspace into a single guided
+  page and moving legacy panels behind explicit advanced/debug access. A
+  source-level composition regression guard has been added. Local frontend build
+  and pytest execution were blocked by missing toolchain dependencies in this
+  workspace, so live rendered validation remains pending.
 
 Still required:
 
