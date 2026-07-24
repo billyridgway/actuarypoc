@@ -1311,11 +1311,14 @@ def api_workspace_analyze(workspace_id: str) -> Dict[str, Any]:
     # inputs and makes membership changes visible on the very next run.
     document_ids = [d.get("id") for d in workspace_documents]
     snapshot["analyzedWorkspaceId"] = workspace_id
-    snapshot["analyzedDocumentIds"] = document_ids
+    analyzer_status = snapshot.get("analysisStatus")
+    snapshot["analyzedDocumentIds"] = [] if analyzer_status == "analysis_failed" else document_ids
     snapshot["documentInventory"] = _build_document_inventory(workspace_documents)
 
-    is_available = snapshot.get("analysisStatus") == "analyzed"
-    analysis_status = "analyzed" if is_available else "analysis_unavailable"
+    is_available = analyzer_status == "analyzed"
+    analysis_status = (
+        "analyzed" if is_available else "analysis_failed" if analyzer_status == "analysis_failed" else "analysis_unavailable"
+    )
     if not is_available:
         # Retain only status/reason/readiness from an unavailable adapter.
         # Product identity, evidence, and modeled facts are not trustworthy
@@ -1325,15 +1328,18 @@ def api_workspace_analyze(workspace_id: str) -> Dict[str, Any]:
             unavailable_readiness = {}
         unavailable_readiness = {
             **unavailable_readiness,
-            "overallStatus": "analysis_unavailable",
+            "overallStatus": analysis_status,
             "projectionTrustLevel": "unavailable",
+            "projectionEligible": False,
         }
         snapshot = {
             "analysisStatus": analysis_status,
             "analysisUnavailableReason": snapshot.get("analysisUnavailableReason"),
+            "analysisFailureReason": snapshot.get("analysisFailureReason"),
+            "analysisErrors": snapshot.get("analysisErrors", []),
             "readinessDashboard": unavailable_readiness,
             "analyzedWorkspaceId": workspace_id,
-            "analyzedDocumentIds": document_ids,
+            "analyzedDocumentIds": [] if analysis_status == "analysis_failed" else document_ids,
             "documentInventory": _build_document_inventory(workspace_documents),
             "extractedFacts": [],
             "requirementsCandidates": [],

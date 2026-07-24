@@ -6,7 +6,7 @@ from actuarypoc.domain.ul_requirements import get_ul_requirement_definitions
 from actuarypoc.extract.workspace_ul_analyzer import analyze_ul_workspace
 
 
-def _document(document_id: int, workspace_id: str) -> Dict[str, Any]:
+def _document(document_id: str, workspace_id: str) -> Dict[str, Any]:
     return {
         "id": document_id,
         "object_path": f"workspaces/{workspace_id}/{document_id}.txt",
@@ -32,11 +32,11 @@ def _ul_text(*, name: str, code: str, carrier: str, form: str) -> bytes:
 
 
 def test_analyzer_reads_only_exact_supplied_document_records() -> None:
-    docs = [_document(11, "A"), _document(12, "A")]
+    docs = [_document("11", "A"), _document("12", "A")]
     blobs = {
-        11: _ul_text(name="Alpha UL", code="ALPHA-UL", carrier="Alpha Life", form="UL-A"),
-        12: b"Supplement: workspace A only",
-        21: _ul_text(name="Foreign UL", code="FOREIGN-UL", carrier="Other", form="UL-X"),
+        "11": _ul_text(name="Alpha UL", code="ALPHA-UL", carrier="Alpha Life", form="UL-A"),
+        "12": b"Supplement: workspace A only",
+        "21": _ul_text(name="Foreign UL", code="FOREIGN-UL", carrier="Other", form="UL-X"),
     }
     loaded: List[int] = []
 
@@ -46,15 +46,15 @@ def test_analyzer_reads_only_exact_supplied_document_records() -> None:
 
     result = analyze_ul_workspace("A", docs, content_loader=load)
 
-    assert loaded == [11, 12]
+    assert loaded == ["11", "12"]
     assert result["analyzedWorkspaceId"] == "A"
-    assert result["analyzedDocumentIds"] == [11, 12]
+    assert result["analyzedDocumentIds"] == ["11", "12"]
     assert result["product"]["code"] == "ALPHA-UL"
     assert "FOREIGN-UL" not in repr(result)
 
 
-def test_supported_ul_is_document_bound_and_ready() -> None:
-    doc = _document(31, "promise")
+def test_missing_capability_declarations_block_readiness() -> None:
+    doc = _document("31", "promise")
     payload = _ul_text(
         name="Promise Universal Life",
         code="PROMISE-UL",
@@ -62,6 +62,7 @@ def test_supported_ul_is_document_bound_and_ready() -> None:
         form="ICC18 P18PR",
     )
 
+    payload += b"\nCapability guaranteed_credited_rate: supported"
     result = analyze_ul_workspace("promise", [doc], content_loader=lambda _: payload)
 
     assert result["analysisStatus"] == "analyzed"
@@ -73,13 +74,35 @@ def test_supported_ul_is_document_bound_and_ready() -> None:
         "form": "ICC18 P18PR",
         "provenance": result["product"]["provenance"],
     }
-    assert result["readinessDashboard"]["overallStatus"] == "ready"
-    assert result["readinessDashboard"]["projectionEligible"] is True
-    assert {item["documentId"] for item in result["product"]["provenance"].values()} == {31}
+    assert result["readinessDashboard"]["overallStatus"] == "not_ready"
+    assert result["readinessDashboard"]["projectionEligible"] is False
+    unresolved = result["readinessDashboard"]["unresolvedCapabilities"]
+    assert unresolved
+    assert all(item["capabilityStatus"] == "unresolved" for item in unresolved)
+    guaranteed = next(item for item in unresolved if item["id"] == "guaranteed_credited_rate")
+    assert guaranteed["capabilityProvenance"]["source"] == "no_scoped_capability_declaration"
+    assert {item["documentId"] for item in result["product"]["provenance"].values()} == {"31"}
+
+
+def test_explicit_scoped_engine_capability_has_non_document_provenance() -> None:
+    result = analyze_ul_workspace(
+        "scoped",
+        [_document("32", "scoped")],
+        content_loader=lambda _: _ul_text(name="Scoped UL", code="SCOPED", carrier="C", form="F"),
+    )
+
+    fee = next(item for item in result["requirements"] if item["id"] == "policy_admin_fees")
+    assert fee["capabilityStatus"] == "supported"
+    assert fee["capabilityProvenance"] == {
+        "kind": "engine_configuration",
+        "source": "actuarypoc.ui.server:_run_ul_projection.policy_fee_annual",
+        "scope": "level per-policy/admin fee only",
+    }
+    assert fee["provenance"]["kind"] == "configuration_rule_derived"
 
 
 def test_second_ul_identity_does_not_share_promise_or_term_fallback() -> None:
-    doc = _document(41, "distinct")
+    doc = _document("41", "distinct")
     payload = _ul_text(
         name="Harbor Flexible UL",
         code="HARBOR-FUL-7",
@@ -95,11 +118,13 @@ def test_second_ul_identity_does_not_share_promise_or_term_fallback() -> None:
     assert result["product"]["carrier"] == "Harbor Mutual"
     assert "Promise" not in repr(result)
     assert "P12TRF" not in repr(result)
+    assert "ICC18 P18PR" not in repr(result)
+    assert all("Promise" not in item.get("reason", "") for item in result["requirements"])
 
 
 def test_unsupported_or_unresolved_product_type_is_analysis_unavailable() -> None:
-    unsupported = _document(51, "term")
-    unresolved = _document(52, "unknown")
+    unsupported = _document("51", "term")
+    unresolved = _document("52", "unknown")
 
     term_result = analyze_ul_workspace(
         "term",
@@ -113,8 +138,8 @@ def test_unsupported_or_unresolved_product_type_is_analysis_unavailable() -> Non
     )
 
     for result, workspace_id, document_id in (
-        (term_result, "term", 51),
-        (unknown_result, "unknown", 52),
+        (term_result, "term", "51"),
+        (unknown_result, "unknown", "52"),
     ):
         assert result["analysisStatus"] == "analysis_unavailable"
         assert result["analyzedWorkspaceId"] == workspace_id
@@ -123,3 +148,43 @@ def test_unsupported_or_unresolved_product_type_is_analysis_unavailable() -> Non
         assert result["readinessDashboard"]["projectionTrustLevel"] == "unavailable"
         assert result["readinessDashboard"]["projectionEligible"] is False
         assert "product" not in result
+
+
+def test_invalid_membership_sets_fail_before_loading_any_blob() -> None:
+    cases = [
+        ([{"id": None, "object_path": "workspaces/w/a.txt"}], "invalid_document_id"),
+        ([{"id": " ", "object_path": "workspaces/w/a.txt"}], "invalid_document_id"),
+        ([{"id": 7, "object_path": "workspaces/w/a.txt"}], "invalid_document_id"),
+        (
+            [
+                {"id": "same", "object_path": "workspaces/w/a.txt"},
+                {"id": "same", "object_path": "workspaces/w/a.txt"},
+            ],
+            "duplicate_document_id",
+        ),
+        (
+            [
+                {"id": "same", "object_path": "workspaces/w/a.txt"},
+                {"id": "same", "object_path": "workspaces/w/b.txt"},
+            ],
+            "duplicate_document_id",
+        ),
+        ([{"id": "missing"}], "invalid_object_path"),
+        ([{"id": "blank", "object_path": "  "}], "invalid_object_path"),
+        ([{"id": "malformed", "object_path": "workspaces/../other.txt"}], "invalid_object_path"),
+    ]
+
+    for documents, expected_code in cases:
+        loaded: List[str] = []
+        result = analyze_ul_workspace(
+            "w", documents, content_loader=lambda document: loaded.append(document["id"]) or b"ignored"
+        )
+        assert loaded == []
+        assert result["analysisStatus"] == "analysis_failed"
+        assert result["analyzedDocumentIds"] == []
+        assert result["extractedFacts"] == []
+        assert expected_code in {error["code"] for error in result["analysisErrors"]}
+
+    conflicting = analyze_ul_workspace("w", cases[4][0], content_loader=lambda _: b"ignored")
+    duplicate = next(error for error in conflicting["analysisErrors"] if error["code"] == "duplicate_document_id")
+    assert duplicate["conflictingObjectPath"] is True

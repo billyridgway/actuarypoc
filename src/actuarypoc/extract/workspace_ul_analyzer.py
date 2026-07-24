@@ -29,6 +29,81 @@ _IDENTITY_KEYS = {
 }
 _UNSAFE_KINDS = {"fallback", "placeholder", "default"}
 
+# This is deliberately a narrow statement about the existing UL projection
+# implementation, not a document claim and not a generic capability registry.
+# The existing engine applies a level per-policy fee.  Its COI implementation
+# is a flat placeholder and its surrender pattern is only an approximation, so
+# neither is verified support for a filed requirement.
+_VERIFIED_UL_ENGINE_CAPABILITIES = {
+    "policy_admin_fees": {
+        "source": "actuarypoc.ui.server:_run_ul_projection.policy_fee_annual",
+        "scope": "level per-policy/admin fee only",
+    }
+}
+
+
+def _analysis_failure(workspace_id: str, errors: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Return a stable non-fabricating failure contract for invalid membership."""
+
+    return {
+        "analysisStatus": "analysis_failed",
+        "analysisFailureReason": "Workspace document membership is invalid.",
+        "analysisErrors": errors,
+        "analyzedWorkspaceId": workspace_id,
+        "analyzedDocumentIds": [],
+        "readinessDashboard": {
+            "overallStatus": "analysis_failed",
+            "projectionTrustLevel": "unavailable",
+            "projectionEligible": False,
+        },
+        "extractedFacts": [],
+        "requirementsCandidates": [],
+    }
+
+
+def _validate_documents(workspace_id: str, documents: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Validate the complete membership set before any object is loaded."""
+
+    errors: List[Dict[str, Any]] = []
+    seen: Dict[str, Tuple[int, Any]] = {}
+    for index, document in enumerate(documents):
+        document_id = document.get("id") if isinstance(document, dict) else None
+        path = None
+        if isinstance(document, dict):
+            path = document.get("object_path")
+            if path is None:
+                path = document.get("objectPath")
+        if not isinstance(document_id, str) or not document_id.strip():
+            errors.append({"code": "invalid_document_id", "index": index})
+        else:
+            document_id = document_id.strip()
+            if document_id in seen:
+                first_index, first_path = seen[document_id]
+                errors.append(
+                    {
+                        "code": "duplicate_document_id",
+                        "documentId": document_id,
+                        "firstIndex": first_index,
+                        "index": index,
+                        "conflictingObjectPath": path != first_path,
+                    }
+                )
+            else:
+                seen[document_id] = (index, path)
+        malformed_path = (
+            not isinstance(path, str)
+            or not path.strip()
+            or path != path.strip()
+            or path.startswith("/")
+            or any(part in {".", ".."} for part in path.split("/"))
+        )
+        if malformed_path:
+            error: Dict[str, Any] = {"code": "invalid_object_path", "index": index}
+            if isinstance(document_id, str) and document_id.strip():
+                error["documentId"] = document_id.strip()
+            errors.append(error)
+    return _analysis_failure(workspace_id, errors) if errors else None
+
 
 def _load_object(document: Dict[str, Any]) -> bytes:
     """Read only the object named by the supplied document record."""
@@ -71,6 +146,10 @@ def analyze_ul_workspace(
     content_loader: Optional[ContentLoader] = None,
 ) -> Dict[str, Any]:
     """Analyze exactly ``documents`` and return canonical UL readiness."""
+
+    validation_failure = _validate_documents(workspace_id, documents)
+    if validation_failure is not None:
+        return validation_failure
 
     loader = content_loader or _load_object
     combined: Dict[str, List[Dict[str, Any]]] = {}
@@ -129,6 +208,7 @@ def analyze_ul_workspace(
         "satisfied": [],
         "missingInformation": [],
         "unsupportedCapabilities": [],
+        "unresolvedCapabilities": [],
         "unresolvedApplicability": [],
         "notApplicable": [],
     }
@@ -137,7 +217,6 @@ def analyze_ul_workspace(
         rid = definition.requirement_id
         value_item = unique(rid)
         applicability_item = unique(f"applicability_{rid}")
-        capability_item = unique(f"capability_{rid}")
         applicability_value = str(applicability_item["value"]).lower() if applicability_item else ""
 
         base = {
@@ -145,9 +224,10 @@ def analyze_ul_workspace(
             "name": definition.name,
             "impact": definition.impact,
             "reason": "",
-            "provenance": provenance(applicability_item) if applicability_item else {
-                "kind": "rule_derived",
+            "provenance": {
+                "kind": "configuration_rule_derived",
                 "method": "applicability_partition_rule",
+                "source": "ul_requirement_catalogue_and_partition_rules",
             },
         }
         if applicability_value in {"not applicable", "not_applicable", "no"}:
@@ -158,12 +238,16 @@ def analyze_ul_workspace(
             bucket = "unresolvedApplicability"
         else:
             base["applicability"] = "applicable"
-            capability = str(capability_item["value"]).lower() if capability_item else "supported"
-            if capability in {"unsupported", "not supported"}:
-                base.update(reason="Required behavior is not supported by the existing UL engine.")
-                if capability_item:
-                    base["provenance"] = provenance(capability_item)
-                bucket = "unsupportedCapabilities"
+            capability = _VERIFIED_UL_ENGINE_CAPABILITIES.get(rid)
+            if capability is None:
+                base.update(reason="Existing UL engine support is not explicitly verified for this requirement.")
+                base["capabilityStatus"] = "unresolved"
+                base["capabilityProvenance"] = {
+                    "kind": "engine_configuration",
+                    "source": "no_scoped_capability_declaration",
+                    "scope": rid,
+                }
+                bucket = "unresolvedCapabilities"
             elif value_item is None:
                 base.update(reason="Applicable requirement has no supplied document value.")
                 bucket = "missingInformation"
@@ -172,6 +256,8 @@ def analyze_ul_workspace(
                     reason="Applicable requirement has document evidence and supported behavior.",
                     value=value_item["value"],
                     valueProvenance=provenance(value_item),
+                    capabilityStatus="supported",
+                    capabilityProvenance={"kind": "engine_configuration", **capability},
                 )
                 bucket = "satisfied"
         base["category"] = bucket
@@ -185,6 +271,7 @@ def analyze_ul_workspace(
     blockers = (
         partitions["missingInformation"]
         + partitions["unsupportedCapabilities"]
+        + partitions["unresolvedCapabilities"]
         + partitions["unresolvedApplicability"]
         + unsafe_inputs
     )

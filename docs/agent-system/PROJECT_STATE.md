@@ -187,6 +187,24 @@ Required outputs:
 - **VERIFIED-LIVE:** Spawn depth is limited to one.
 - **VERIFIED-LIVE:** OpenClaw configuration validates and Gateway health reports OK.
 
+### Delivery and review controls
+
+- Master owns rejected-review correction loops and translates findings into
+  bounded Builder work until an exact-commit re-review occurs.
+- Builder modifies and tests code only in its own checkout.
+- Auditor independently reviews exact committed Builder revisions.
+- Sandboxed linked worktrees may require a minimal manual local Git stage and
+  commit because Git metadata, including `index.lock`, is outside the writable
+  sandbox.
+- No merge or deployment occurs without Billy's explicit approval.
+
+### Product Workspace v1 Step 1 correction attempt 1
+
+- **REPORTED (2026-07-23):** The bounded correction is implemented locally and
+  its focused tests passed, but it is **PENDING COMMIT AND AUDITOR RE-REVIEW**.
+  It is not approved and is not verified final product state. See
+  [Product Workspace v1 Step 1 Correction 1 review evidence](PRODUCT_WORKSPACE_V1_STEP1_CORRECTION1_REVIEW_EVIDENCE.md).
+
 Still required:
 
 - **PLANNED:** Restrict reviewer tools and workspace access to read-only.
