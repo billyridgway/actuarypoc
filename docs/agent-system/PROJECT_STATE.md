@@ -45,14 +45,19 @@ These facts must be reverified and supplemented with exact repository paths, nam
 
 ## 4. Architecture Implementation State
 
-- **VERIFIED-REPO (2026-07-23):** The Product Workspace analysis endpoint selects
-  its inputs exclusively from the workspace-document membership query and records
-  the workspace ID and exact analyzed document IDs in its persisted snapshot.
-- **VERIFIED-REPO (2026-07-23):** A bounded, deterministic UL document analyzer
-  supports identities and core requirement evidence parsed from the supplied
-  workspace blobs. Distinct UL identities remain distinct; unsupported or
-  unresolved product types return `analysis_unavailable`. This is not a general
-  product engine or a replacement for richer document extraction.
+- **REPORTED (implemented at `e250e738522eb60ec3de84ed5d03cbdc19014057`,
+  Auditor REJECTED pending evidence/state correction and re-review):** The
+  Product Workspace analysis endpoint selects its inputs from the
+  workspace-document membership query, validates the complete membership set,
+  and records the workspace ID and exact analyzed document IDs in its persisted
+  snapshot. Focused tests pass, but this is not an approved Step 1 milestone.
+- **REPORTED (implemented at `e250e738522eb60ec3de84ed5d03cbdc19014057`,
+  Auditor REJECTED pending evidence/state correction and re-review):** A
+  bounded, deterministic UL document analyzer supports identities and core
+  requirement evidence parsed from supplied workspace blobs. Distinct tested UL
+  identities remain distinct; unsupported or unresolved product types return
+  `analysis_unavailable`. This is not a general product engine, a replacement
+  for richer extraction, or an approved Step 1 milestone.
 
 The prior architecture document reported:
 
@@ -198,11 +203,15 @@ Required outputs:
   sandbox.
 - No merge or deployment occurs without Billy's explicit approval.
 
-### Product Workspace v1 Step 1 correction attempt 1
+### Product Workspace v1 Step 1 — correction attempt 2 status
 
-- **REPORTED (2026-07-23):** The bounded correction is implemented locally and
-  its focused tests passed, but it is **PENDING COMMIT AND AUDITOR RE-REVIEW**.
-  It is not approved and is not verified final product state. See
+- **REPORTED (2026-07-23):** The bounded behavior correction for PW1-001 and
+  PW1-002 is committed at `e250e738522eb60ec3de84ed5d03cbdc19014057` and its
+  focused tests pass. The Auditor **REJECTED** Step 1 on evidence/state findings
+  PW1-R01 and PW1-R02. This documentation-only correction addresses those
+  findings; Step 1 remains unapproved pending its own commit and exact-commit
+  Auditor re-review. The static behavior resolution does not confer
+  `VERIFIED-REPO`, approval, completion, or final milestone status. See
   [Product Workspace v1 Step 1 Correction 1 review evidence](PRODUCT_WORKSPACE_V1_STEP1_CORRECTION1_REVIEW_EVIDENCE.md).
 
 Still required:

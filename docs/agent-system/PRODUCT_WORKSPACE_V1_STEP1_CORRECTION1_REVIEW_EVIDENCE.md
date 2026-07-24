@@ -2,68 +2,92 @@
 
 Date: 2026-07-23
 
-## Repository identity
+## Repository identity and status
 
 - Base/rejected commit: `6c6040799e5bf56d00be520c763867c4ce4deeee`
-- Corrected commit: resolve after the local correction commit with `git rev-parse HEAD`
-- Branch: `agent/actuary-pilot-20260722-222609`
+- Implementation/correction commit under test: `e250e738522eb60ec3de84ed5d03cbdc19014057`
+- Branch at verification: `agent/actuary-pilot-20260722-222609`
+- Runtime: Python 3.9.6, pytest 8.4.2, pluggy 1.6.0, anyio 4.12.1.
 
-## Diff summary
+Commit `e250e738522eb60ec3de84ed5d03cbdc19014057` contains the Step 1
+implementation correction and its original evidence file. This separate
+documentation-only correction commit, whose parent is `e250e738`, refreshes
+that evidence and reconciles project state after the Auditor rejected the
+implementation commit on findings PW1-R01 and PW1-R02. It does not claim that
+`e250e738` contains this later evidence refresh. Step 1 remains unapproved
+pending a new exact-commit Auditor review.
 
-Run after commit for the authoritative summary:
+## Authoritative implementation range
+
+Command:
 
 ```text
-git diff --stat 6c6040799e5bf56d00be520c763867c4ce4deeee HEAD
+git diff --stat 6c6040799e5bf56d00be520c763867c4ce4deeee..e250e738522eb60ec3de84ed5d03cbdc19014057
 ```
 
-Pre-commit working-tree summary (including this evidence file):
+Output:
 
 ```text
-5 files changed, 312 insertions(+), 44 deletions(-)
+ ...RKSPACE_V1_STEP1_CORRECTION1_REVIEW_EVIDENCE.md |  69 ++++++++++++++
+ docs/agent-system/PROJECT_STATE.md                 |  18 ++++
+ src/actuarypoc/extract/workspace_ul_analyzer.py    | 105 +++++++++++++++++++--
+ .../tests/test_workspace_analysis_boundary.py      |  67 ++++++++++---
+ src/actuarypoc/tests/test_workspace_ul_analyzer.py |  99 +++++++++++++++----
+ src/actuarypoc/ui/server.py                        |  16 +++-
+ 6 files changed, 330 insertions(+), 44 deletions(-)
 ```
 
-## Finding-to-correction map
+The corresponding name/status output is one added documentation file and five
+modified files: `PRODUCT_WORKSPACE_V1_STEP1_CORRECTION1_REVIEW_EVIDENCE.md`,
+`PROJECT_STATE.md`, the analyzer, its two focused test files, and `server.py`.
 
-- PW1-001: absent or document-claimed capability support is now unresolved and
+## Implementation finding map (statically resolved, not approved)
+
+- PW1-001: absent or document-claimed capability support is unresolved and
   blocking. Only the existing UL engine's narrowly scoped level policy fee is
   supported, with `engine_configuration` provenance. Catalogue/rule metadata is
-  `configuration_rule_derived`. A second UL identity test proves no Promise UL,
-  ICC18 P18PR, or P12TRF identity/mechanics appear.
+  `configuration_rule_derived`. A second UL identity test checks that Promise
+  UL, ICC18 P18PR, and P12TRF identity/mechanics do not contaminate it.
 - PW1-002: the complete membership set is validated before content loading.
   Null, blank, and non-string IDs; duplicate IDs (including conflicting paths);
   and missing/malformed paths return stable `analysis_failed` output with no
-  analyzed IDs or fabricated facts. Direct and endpoint tests prove zero loads.
+  analyzed IDs or fabricated facts. Direct and endpoint tests check zero loads.
 - PW1-003: focused analyzer and endpoint tests cover capability trust,
-  provenance, cross-product identity isolation, all requested membership
-  failures, zero blob reads, and persistence of the honest failure contract.
+  provenance, cross-product identity isolation, the requested membership
+  failures, zero blob reads, and persistence of the failure contract.
 
-## Commands and results
+These statements describe the behavior present in `e250e738`; they are not an
+Auditor approval, `VERIFIED-REPO` milestone designation, or final Step 1 state.
 
-1. `python -m pytest src/actuarypoc/tests/test_workspace_ul_analyzer.py`
-   — not run: `python` command is unavailable.
-2. `python3 -m pytest src/actuarypoc/tests/test_workspace_ul_analyzer.py src/actuarypoc/tests/test_workspace_analysis_boundary.py`
-   — not run: system Python has no `pytest` module.
-3. `python3 -m venv /tmp/actuarypoc-pw1-venv && /tmp/actuarypoc-pw1-venv/bin/pip install -r requirements.txt`
-   — failed: restricted network could not resolve/download `minio==7.2.7`.
-4. `PYTHONPATH=src /Users/advisor/.openclaw/workspace/actuarypoc/.venv/bin/python -m pytest src/actuarypoc/tests/test_workspace_ul_analyzer.py`
-   — **6 passed**, 2 warnings, 0 failed in 0.12s.
-5. `PYTHONPATH=src /Users/advisor/.openclaw/workspace/actuarypoc/.venv/bin/python -m pytest src/actuarypoc/tests/test_workspace_analysis_boundary.py`
-   — **4 passed**, 3 warnings, 0 failed in 0.74s.
-6. `PYTHONPATH=src /Users/advisor/.openclaw/workspace/actuarypoc/.venv/bin/python -m pytest src/actuarypoc/tests`
-   — collection failed before tests ran: 48 items discovered, 1 collection
-   error in pre-existing `test_requirements_classification.py` because Python
-   3.9 cannot evaluate `str | None`; 3 warnings. This is outside the bounded
-   correction and the focused files pass under the same interpreter.
-7. `PYTHONPYCACHEPREFIX=/tmp/actuarypoc-pycache /Users/advisor/.openclaw/workspace/actuarypoc/.venv/bin/python -m compileall -q src/actuarypoc/extract/workspace_ul_analyzer.py src/actuarypoc/ui/server.py src/actuarypoc/tests/test_workspace_ul_analyzer.py src/actuarypoc/tests/test_workspace_analysis_boundary.py`
+## Verification rerun
+
+All commands below were run from the repository root at exact HEAD
+`e250e738522eb60ec3de84ed5d03cbdc19014057`, before this documentation-only
+working-tree edit unless the command inherently checks the edited tree.
+
+1. `PYTHONPATH=src /Users/advisor/.openclaw/workspace/actuarypoc/.venv/bin/python -m pytest src/actuarypoc/tests/test_workspace_ul_analyzer.py`
+   — collected 6; **6 passed**, 2 warnings, 0 failed in 0.14s.
+2. `PYTHONPATH=src /Users/advisor/.openclaw/workspace/actuarypoc/.venv/bin/python -m pytest src/actuarypoc/tests/test_workspace_analysis_boundary.py`
+   — collected 4; **4 passed**, 3 warnings, 0 failed in 0.77s.
+3. `PYTHONPATH=src /Users/advisor/.openclaw/workspace/actuarypoc/.venv/bin/python -m pytest src/actuarypoc/tests/test_workspace_ul_analyzer.py src/actuarypoc/tests/test_workspace_analysis_boundary.py`
+   — collected 10; **10 passed**, 3 warnings, 0 failed in 0.72s.
+4. `PYTHONPATH=src /Users/advisor/.openclaw/workspace/actuarypoc/.venv/bin/python -m pytest src/actuarypoc/tests/test_run_detail_api.py src/actuarypoc/tests/test_run_detail_missing_audit.py`
+   — adjacent `server.py` regressions collected 2; **2 passed**, 3 warnings, 0
+   failed in 0.71s.
+5. `PYTHONPATH=src /Users/advisor/.openclaw/workspace/actuarypoc/.venv/bin/python -m pytest src/actuarypoc/tests`
+   — broader suite did not run: collection stopped with 48 items discovered and
+   1 error in 0.81s. `test_requirements_classification.py:15` evaluates
+   `str | None`, which raises `TypeError` under Python 3.9.6. Three warnings were
+   emitted. This pre-existing runtime incompatibility is outside this bounded
+   documentation correction; the 10 focused tests and 2 adjacent server tests
+   pass under the same interpreter, so the evidence is intentionally bounded.
+6. `PYTHONPYCACHEPREFIX=/tmp/actuarypoc-pycache /Users/advisor/.openclaw/workspace/actuarypoc/.venv/bin/python -m compileall -q src/actuarypoc/extract/workspace_ul_analyzer.py src/actuarypoc/ui/server.py src/actuarypoc/tests/test_workspace_ul_analyzer.py src/actuarypoc/tests/test_workspace_analysis_boundary.py`
    — passed with no output.
-8. `git diff --check` — passed with no output.
-9. `git add src/actuarypoc/extract/workspace_ul_analyzer.py src/actuarypoc/ui/server.py src/actuarypoc/tests/test_workspace_ul_analyzer.py src/actuarypoc/tests/test_workspace_analysis_boundary.py docs/agent-system/PRODUCT_WORKSPACE_V1_STEP1_CORRECTION1_REVIEW_EVIDENCE.md`
-   — blocked by the managed sandbox: Git could not create the linked-worktree
-   `index.lock` under the protected main checkout. No correction commit could
-   be created; all tested changes remain intact for the requester to stage and
-   commit manually.
+7. `git diff --check`
+   — passed with no output on the documentation-only working tree.
 
-Warnings observed: PyPDF2 deprecation; urllib3 LibreSSL/OpenSSL compatibility;
-Starlette `python_multipart` pending deprecation. No UI tests were run because
-no UI files changed. No live, deployment, MinIO, push, merge, or Step 2 work was
-performed because the correction contract explicitly excludes it.
+Warnings observed were PyPDF2 deprecation, urllib3 LibreSSL/OpenSSL
+compatibility, and Starlette `python_multipart` pending deprecation. No UI tests
+were run because no UI files changed. No live, deployment, MinIO, push, merge,
+or Step 2 work was performed. This follow-up documentation commit is separate
+from `e250e738` and must be supplied for exact-commit Auditor re-review.
