@@ -1,7 +1,7 @@
 # Actuary AI Project State
 
 > **Status:** Living, evidence-based project record  
-> **Last updated:** 2026-07-22  
+> **Last updated:** 2026-07-23
 > **Owner:** Actuary Architect, with product-owner review  
 > **Rule:** Repository and live-system evidence outrank chat summaries and file timestamps
 
@@ -45,19 +45,19 @@ These facts must be reverified and supplemented with exact repository paths, nam
 
 ## 4. Architecture Implementation State
 
-- **REPORTED (implemented at `e250e738522eb60ec3de84ed5d03cbdc19014057`,
-  Auditor REJECTED pending evidence/state correction and re-review):** The
+- **VERIFIED-REPO (Product Workspace v1 Step 1 approved with follow-up at
+  `0db8a8686e2ca9eeda5e48f66a5087ff1cd24451`):** The
   Product Workspace analysis endpoint selects its inputs from the
   workspace-document membership query, validates the complete membership set,
   and records the workspace ID and exact analyzed document IDs in its persisted
-  snapshot. Focused tests pass, but this is not an approved Step 1 milestone.
-- **REPORTED (implemented at `e250e738522eb60ec3de84ed5d03cbdc19014057`,
-  Auditor REJECTED pending evidence/state correction and re-review):** A
+  snapshot. Focused tests pass.
+- **VERIFIED-REPO (Product Workspace v1 Step 1 approved with follow-up at
+  `0db8a8686e2ca9eeda5e48f66a5087ff1cd24451`):** A
   bounded, deterministic UL document analyzer supports identities and core
   requirement evidence parsed from supplied workspace blobs. Distinct tested UL
   identities remain distinct; unsupported or unresolved product types return
   `analysis_unavailable`. This is not a general product engine, a replacement
-  for richer extraction, or an approved Step 1 milestone.
+  for richer extraction.
 
 The prior architecture document reported:
 
@@ -196,23 +196,26 @@ Required outputs:
 
 - Master owns rejected-review correction loops and translates findings into
   bounded Builder work until an exact-commit re-review occurs.
-- Builder modifies and tests code only in its own checkout.
-- Auditor independently reviews exact committed Builder revisions.
-- Sandboxed linked worktrees may require a minimal manual local Git stage and
-  commit because Git metadata, including `index.lock`, is outside the writable
-  sandbox.
+- Architect verifies exact commits, checkouts, and scope and supplies
+  orchestration facts.
+- Builder implements and tests only in its own checkout, records evidence, and
+  commits the bounded changes.
+- The intentionally read-only Auditor reviews exact committed Builder revisions
+  for static correctness, trust, and coverage. It must not reject solely because
+  its access prevents independent Git operations or test execution.
 - No merge or deployment occurs without Billy's explicit approval.
 
-### Product Workspace v1 Step 1 — correction attempt 2 status
+### Product Workspace v1 Step 1 — approved with follow-up
 
-- **REPORTED (2026-07-23):** The bounded behavior correction for PW1-001 and
-  PW1-002 is committed at `e250e738522eb60ec3de84ed5d03cbdc19014057` and its
-  focused tests pass. The Auditor **REJECTED** Step 1 on evidence/state findings
-  PW1-R01 and PW1-R02. This documentation-only correction addresses those
-  findings; Step 1 remains unapproved pending its own commit and exact-commit
-  Auditor re-review. The static behavior resolution does not confer
-  `VERIFIED-REPO`, approval, completion, or final milestone status. See
+- **VERIFIED-REPO (2026-07-23):** Product Workspace v1 Step 1 is **APPROVED WITH
+  FOLLOW-UP** at `0db8a8686e2ca9eeda5e48f66a5087ff1cd24451`. Tests were
+  executed by the Builder rather than independently by the intentionally
+  read-only Auditor. The broader suite has a separate, pre-existing Python 3.9
+  `str | None` collection compatibility issue. Neither follow-up blocks Step 1
+  closure. See
   [Product Workspace v1 Step 1 Correction 1 review evidence](PRODUCT_WORKSPACE_V1_STEP1_CORRECTION1_REVIEW_EVIDENCE.md).
+- **PLANNED:** Step 2 has not begun. No merge or deployment may occur without
+  explicit product-owner approval.
 
 Still required:
 

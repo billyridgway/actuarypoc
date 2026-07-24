@@ -131,6 +131,16 @@ When working in this repo, the agent should:
 - When in doubt, ask: “Can this projection be explained and reproduced?” and
   adjust code/docs accordingly.
 
+Review responsibilities are intentionally split:
+
+- The Architect verifies the exact commit, checkout, and task scope and supplies
+  orchestration facts.
+- The Builder implements, executes tests, records evidence, and commits changes
+  in the Builder checkout.
+- The intentionally read-only Auditor performs static correctness, trust, and
+  coverage review. The Auditor must not reject work solely because read-only
+  access prevents independent Git operations or test execution.
+
 ---
 
 ## 6. Product‑management support
