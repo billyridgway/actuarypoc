@@ -12407,6 +12407,9 @@ async def ui_view(key: str, view: str = Query("actuarial", description="View mod
 _PUBLIC_ROUTE_PREFIXES = ("/api/workspaces", "/web", "/assets")
 _PUBLIC_EXACT_ROUTES = {
     "/health",
+    "/ui/dev",
+    "/api/dev/objects",
+    "/api/dev/object",
     "/docs",
     "/docs/oauth2-redirect",
     "/openapi.json",

@@ -35,6 +35,9 @@ The public API is limited to:
   feature request.
 - `PATCH /api/workspaces/{workspace_id}/feature-requests/{id}` — update its
   status.
+- `GET /ui/dev` — browse MinIO objects for operational diagnostics.
+- `GET /api/dev/objects` and `GET /api/dev/object` — support the diagnostic
+  object browser.
 - `GET /health` — service health.
 
 ## Local development
