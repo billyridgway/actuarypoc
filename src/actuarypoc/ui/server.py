@@ -84,10 +84,12 @@ from actuarypoc.storage.postgres_client import (
     upsert_product_review_draft,
     register_product_catalog,
     list_registered_products,
+)
+from actuarypoc.storage.workspace_store import (
     create_workspace,
     list_workspaces,
     get_workspace,
-    record_workspace_document,
+    create_workspace_document,
     list_workspace_documents,
     update_workspace_analysis,
     delete_workspace_and_documents,
@@ -198,7 +200,7 @@ def api_create_workspace() -> Dict[str, Any]:
 
     ws = create_workspace()
     if ws is None:
-        raise HTTPException(status_code=503, detail="Workspace storage is not available (Postgres DSN not configured)")
+        raise HTTPException(status_code=503, detail="Workspace storage is not available in MinIO")
     return {"workspace": _workspace_to_api(ws)}
 
 
@@ -1192,7 +1194,7 @@ def api_delete_workspace(workspace_id: str) -> Dict[str, Any]:
 
     result = delete_workspace_and_documents(workspace_id, owned_document_ids=owned_document_ids)
     if result is None:
-        raise HTTPException(status_code=503, detail="Workspace storage is not available (Postgres DSN not configured)")
+        raise HTTPException(status_code=503, detail="Workspace storage is not available in MinIO")
 
     return {
         "workspaceId": workspace_id,
@@ -1209,11 +1211,8 @@ async def api_workspace_upload_document(
 ) -> Dict[str, Any]:
     """Upload a document into a workspace.
 
-    The file is stored in MinIO under a workspace‑scoped prefix and
-    recorded in the shared ``documents`` table with product_id set to
-    the workspace id. A separate association row links it to the
-    workspace so the understanding pipeline can treat workspaces and
-    product‑scoped documents consistently.
+    Both the file and its JSON manifest are stored in MinIO under the
+    workspace-scoped prefix.
     """
 
     ws = get_workspace(workspace_id)
@@ -1245,11 +1244,9 @@ async def api_workspace_upload_document(
         content_type=file.content_type or "application/octet-stream",
     )
 
-    # Record in the shared documents table, using workspace id as product_id
-    # so that the artefact is still discoverable via existing tooling when
-    # needed.
-    doc = record_document_upload(
-        product_id=workspace_id,
+    # Persist a small manifest next to the durable document object.
+    doc = create_workspace_document(
+        workspace_id=workspace_id,
         kind="workspace",
         description=safe_name,
         object_path=object_name,
@@ -1257,9 +1254,7 @@ async def api_workspace_upload_document(
         filing_id=None,
     )
     if doc is None:
-        raise HTTPException(status_code=503, detail="Failed to record uploaded document in Postgres")
-
-    record_workspace_document(workspace_id, int(doc["id"]))
+        raise HTTPException(status_code=503, detail="Failed to record uploaded document in MinIO")
 
     return {
         "workspaceId": workspace_id,
@@ -1410,8 +1405,7 @@ def api_list_feature_requests(workspace_id: str) -> Dict[str, Any]:
     contacted.
     """
 
-    # Do not fail the workspace UI when Postgres is unavailable; return
-    # an empty list instead.
+    # A workspace without feature request objects has an empty request list.
     rows = list_feature_requests(workspace_id) or []
     return {"featureRequests": [_feature_request_to_api(r) for r in rows]}
 
@@ -1479,7 +1473,7 @@ def api_create_feature_request(workspace_id: str, payload: FeatureRequestCreateR
         source_reference=payload.sourceReference,
     )
     if row is None:
-        raise HTTPException(status_code=503, detail="Feature request storage is not available (Postgres DSN not configured)")
+        raise HTTPException(status_code=503, detail="Feature request storage is not available in MinIO")
 
     return {"featureRequest": _feature_request_to_api(row)}
 

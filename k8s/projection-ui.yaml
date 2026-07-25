@@ -35,11 +35,6 @@ spec:
               value: "illuminet"
             - name: MINIO_SECURE
               value: "false"
-            - name: POSTGRES_DSN
-              valueFrom:
-                secretKeyRef:
-                  name: postgres-secret
-                  key: POSTGRES_DSN
             - name: OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:
