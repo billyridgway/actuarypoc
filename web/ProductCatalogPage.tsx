@@ -194,8 +194,8 @@ export const ProductCatalogPage: React.FC = () => {
       <section className="card home-card">
         <h2>Workspace Catalog</h2>
         <p className="muted">
-          Start a new product review by uploading one or more filing documents. The system will create a workspace for
-          you and attach those documents automatically. Use Expert / Debug mode for detailed pipeline control.
+          Create a workspace by uploading one or more filing documents. The documents are attached automatically and
+          can then be analyzed from the workspace.
         </p>
         <p>
           <button
@@ -305,14 +305,6 @@ export const ProductCatalogPage: React.FC = () => {
         )}
       </section>
 
-      <section className="card home-card">
-        <h2>Add Workspace (coming soon)</h2>
-        <p className="muted">
-          This is a placeholder for future workspace templates and cloning. For now, use Create Workspace above and
-          upload filing documents directly.
-        </p>
-        <div className="add-product-form" />
-      </section>
     </div>
   );
 };

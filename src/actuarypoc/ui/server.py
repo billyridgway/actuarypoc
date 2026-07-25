@@ -12398,3 +12398,28 @@ async def ui_view(key: str, view: str = Query("actuarial", description="View mod
     </html>
     """
     return HTMLResponse(content=html)
+
+
+# The workspace is now the only public application flow. The legacy product,
+# projection, review, and debug implementations remain private helpers where
+# workspace analysis still uses them, but their HTTP routes are deliberately
+# removed from the application surface.
+_PUBLIC_ROUTE_PREFIXES = ("/api/workspaces", "/web", "/assets")
+_PUBLIC_EXACT_ROUTES = {
+    "/health",
+    "/docs",
+    "/docs/oauth2-redirect",
+    "/openapi.json",
+    "/redoc",
+}
+app.router.routes[:] = [
+    route
+    for route in app.router.routes
+    if getattr(route, "path", "") in _PUBLIC_EXACT_ROUTES
+    or getattr(route, "path", "").startswith(_PUBLIC_ROUTE_PREFIXES)
+]
+
+
+@app.get("/", include_in_schema=False)
+async def workspace_root() -> RedirectResponse:
+    return RedirectResponse(url="/web")
