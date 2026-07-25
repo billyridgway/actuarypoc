@@ -5,15 +5,26 @@ from actuarypoc.ui.server import app
 
 
 def test_only_workspace_application_routes_are_public() -> None:
+    supported_diagnostic_paths = {"/ui/dev", "/api/dev/objects", "/api/dev/object"}
     application_paths = {
         route.path
         for route in app.routes
         if isinstance(route, APIRoute)
-        and route.path not in {"/", "/health", "/docs", "/docs/oauth2-redirect", "/openapi.json", "/redoc"}
+        and route.path
+        not in {
+            "/",
+            "/health",
+            "/docs",
+            "/docs/oauth2-redirect",
+            "/openapi.json",
+            "/redoc",
+            *supported_diagnostic_paths,
+        }
     }
 
     assert application_paths
     assert all(path.startswith("/api/workspaces") for path in application_paths)
+    assert supported_diagnostic_paths.issubset({route.path for route in app.routes})
     assert "/api/products" not in application_paths
     assert "/api/run-detail" not in application_paths
 
