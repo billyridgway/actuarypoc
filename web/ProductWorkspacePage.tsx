@@ -298,10 +298,9 @@ const FEATURE_REQUEST_STATUSES = [
 ] as const;
 
 export const ProductWorkspacePage: React.FC<{
-  productCode?: string;
   snapshot?: WorkspacePayload | null;
   workspaceId?: string;
-}> = ({ productCode, snapshot, workspaceId }) => {
+}> = ({ snapshot, workspaceId }) => {
   const [data, setData] = React.useState<WorkspacePayload | null>(snapshot ?? null);
   const [loading, setLoading] = React.useState<boolean>(!snapshot);
   const [error, setError] = React.useState<string | null>(null);
@@ -330,64 +329,9 @@ export const ProductWorkspacePage: React.FC<{
       return;
     }
 
-    if (!productCode) {
-      setError("Product code is required for this view.");
-      setLoading(false);
-      return;
-    }
-
-    let cancelled = false;
-
-    const load = async () => {
-      try {
-        setLoading(true);
-        setError(null);
-        const code = encodeURIComponent(productCode || "");
-        const resp = await fetch(`/api/product-workspace/${code}`);
-        if (!resp.ok) {
-          let message = `Failed to load workspace (HTTP ${resp.status})`;
-          try {
-            const contentType = resp.headers.get("content-type") || "";
-            if (contentType.includes("application/json")) {
-              const body = await resp.json();
-              if (body && typeof body.detail === "string" && body.detail.trim()) {
-                message = body.detail.trim();
-              }
-            } else {
-              const text = await resp.text();
-              if (text) message = text;
-            }
-          } catch {
-            // Ignore parse errors and keep the default message.
-          }
-
-          if (resp.status === 501) {
-            message =
-              "Product Understanding Workspace is not yet implemented for this product type. Use Expert / Debug mode or the Trust Surface for detailed PMR status.";
-          }
-
-          throw new Error(message);
-        }
-        const payload: WorkspacePayload = await resp.json();
-        if (!cancelled) {
-          setData(payload);
-        }
-      } catch (err: any) {
-        if (!cancelled) {
-          setError(err?.message || "Failed to load workspace snapshot.");
-        }
-      } finally {
-        if (!cancelled) {
-          setLoading(false);
-        }
-      }
-    };
-
-    void load();
-    return () => {
-      cancelled = true;
-    };
-  }, [productCode, snapshot]);
+    setError("Workspace analysis is not available.");
+    setLoading(false);
+  }, [snapshot]);
 
   // Load existing feature requests when viewing a workspace-backed snapshot.
   React.useEffect(() => {
@@ -509,7 +453,7 @@ export const ProductWorkspacePage: React.FC<{
         sourceRequirementText: item.sourceRequirementText || undefined,
         sourceDocument: item.sourceDocument || undefined,
         sourceReference: item.sourceReference || undefined,
-        productCode: item.productCode || product?.code || productCode || undefined,
+        productCode: item.productCode || product?.code || undefined,
         priority: undefined,
       };
 
@@ -601,11 +545,11 @@ export const ProductWorkspacePage: React.FC<{
         <h1>Product Understanding Workspace</h1>
         <p className="muted">
           Guided review surface for the current product understanding. Start at the top, work through each section,
-          and use Expert / Debug mode when you need full control over each pipeline stage.
+          and record workspace actions for any unsupported capabilities.
         </p>
         <p>
-          <a href="/web?view=expert" className="button">
-            Open Expert / Debug Mode
+          <a href="/web" className="button">
+            Back to Workspaces
           </a>
         </p>
         {loading && <p className="muted">Loading product workspace…</p>}
@@ -1276,15 +1220,14 @@ export const ProductWorkspacePage: React.FC<{
         <h2>Missing information / gaps</h2>
         <p className="muted">
           Uploading additional support documents improves evidence for mechanics and assumptions, but does not
-          automatically make this draft projection filed-rate compliant. Use Expert / Debug mode to rerun and review
-          the full pipeline.
+          automatically make this draft projection filed-rate compliant. Rerun the workspace analysis after adding
+          evidence.
         </p>
         {uploadMessage && <p className="muted">{uploadMessage}</p>}
             {gaps && gaps.items && gaps.items.length > 0 ? (
           <>
             {gaps.items.map((item) => {
               const isUploading = uploadingId === item.id;
-              const gapProductCode = product?.code || productCode || "";
 
                 const handleFileChange: React.ChangeEventHandler<HTMLInputElement> = async (event) => {
                   const file = event.target.files && event.target.files[0];
@@ -1295,8 +1238,11 @@ export const ProductWorkspacePage: React.FC<{
                     const form = new FormData();
                     form.append("file", file);
                     form.append("gap_id", item.id);
+                    if (!workspaceId) {
+                      throw new Error("Workspace context is required.");
+                    }
                     const resp = await fetch(
-                      `/api/product-assumptions/${encodeURIComponent(gapProductCode)}/support`,
+                      `/api/workspaces/${encodeURIComponent(workspaceId)}/documents`,
                       {
                       method: "POST",
                       body: form,
@@ -1307,7 +1253,7 @@ export const ProductWorkspacePage: React.FC<{
                     throw new Error(text || `Upload failed with status ${resp.status}`);
                   }
                   setUploadMessage(
-                    `Uploaded '${file.name}' as additional assumption support for ${gapProductCode}. Rerun understanding via Expert / Debug mode to incorporate new evidence.`,
+                    `Uploaded '${file.name}' to this workspace. Rerun analysis to incorporate the new evidence.`,
                   );
                 } catch (e: any) {
                   setUploadMessage(e?.message || "Upload failed.");
@@ -1334,19 +1280,9 @@ export const ProductWorkspacePage: React.FC<{
                           const snap = body.snapshot as WorkspacePayload;
                           setData(snap);
                           setUploadMessage("Workspace understanding updated from latest evidence.");
-                        } else if (productCode) {
-                          const code = encodeURIComponent(productCode || "");
-                          const resp = await fetch(`/api/product-workspace/${code}`);
-                          if (!resp.ok) {
-                            const text = await resp.text();
-                            throw new Error(text || `Failed to reload workspace (HTTP ${resp.status})`);
-                          }
-                          const snap = (await resp.json()) as WorkspacePayload;
-                          setData(snap);
-                          setUploadMessage("Product workspace reloaded from latest evidence.");
                         } else {
                           setUploadMessage(
-                            "Unable to rerun understanding: no workspace or product context is available in this view.",
+                            "Unable to rerun understanding: no workspace context is available in this view.",
                           );
                         }
                       } catch (err: any) {
