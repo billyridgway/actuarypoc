@@ -14,6 +14,8 @@ application now has one flow:
 Legacy product catalog, product review, projection viewer, illustration, and
 debug surfaces are no longer exposed. Some projection and product-understanding
 modules remain as internal implementation details of workspace analysis.
+Workspace metadata, document manifests, analysis snapshots, and feature
+requests are stored as JSON objects in MinIO alongside uploaded documents.
 
 ## Application surface
 
@@ -42,7 +44,7 @@ The public API is limited to:
 
 ## Local development
 
-Requirements: Python 3.11+, Node.js/npm, Postgres, and MinIO.
+Requirements: Python 3.11+, Node.js/npm, and MinIO.
 
 ```bash
 python3 -m venv .venv
@@ -50,7 +52,6 @@ source .venv/bin/activate
 pip install -r requirements.txt
 pip install -e .
 
-export POSTGRES_DSN=postgresql://user:password@localhost:5432/actuarypoc
 export MINIO_ENDPOINT=localhost:9000
 export MINIO_ACCESS_KEY=minioadmin
 export MINIO_SECRET_KEY=minioadmin
@@ -58,6 +59,20 @@ export MINIO_BUCKET=actuarypoc
 
 uvicorn actuarypoc.ui.server:app --reload --port 8080
 ```
+
+Workspace objects use the following durable layout:
+
+```text
+workspaces/{workspace_id}/workspace.json
+workspaces/{workspace_id}/documents/{document_id}.json
+workspaces/{workspace_id}/feature-requests/{request_id}.json
+workspaces/{workspace_id}/{timestamp}_{uploaded_filename}
+```
+
+Enable bucket versioning and replicate or back up the bucket outside the
+cluster for disaster recovery. Postgres remains an optional dependency of
+legacy internal product-analysis helpers, but it is not required by the public
+workspace flow.
 
 In another terminal:
 
