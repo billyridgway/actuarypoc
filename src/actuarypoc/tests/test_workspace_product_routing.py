@@ -23,3 +23,14 @@ def test_unknown_product_without_review_is_not_assumed_to_be_ul(monkeypatch) -> 
 
     assert server._get_product_type("UNKNOWN") == ""
     assert not server._is_ul_product_type(server._get_product_type("UNKNOWN"))
+
+
+def test_promise_ul_workspace_snapshot_builds_without_review_storage(monkeypatch) -> None:
+    monkeypatch.setattr(server, "get_product_review", lambda product_code: None)
+    monkeypatch.setattr(server, "list_product_documents", lambda product_code, filing_id=None: [])
+
+    snapshot = server.build_product_workspace_snapshot("ICC18 P18PR UL")
+
+    assert snapshot["product"]["code"] == "ICC18 P18PR UL"
+    assert snapshot["productModel"]["type"] == "ul"
+    assert snapshot["illustration"] is not None
