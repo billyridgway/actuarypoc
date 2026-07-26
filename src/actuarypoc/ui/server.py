@@ -429,7 +429,12 @@ def _apply_workspace_document_evidence(
                         label
                         for label in risk_labels
                         if re.search(
-                            rf"\b{re.escape(label)}\b"
+                            (
+                                r"(?<!Non-)"
+                                if label in {"Tobacco", "Nicotine"}
+                                else ""
+                            )
+                            + rf"\b{re.escape(label)}\b"
                             + (r"(?!\s+Plus)" if label in {"Preferred", "Standard"} else ""),
                             risk_context.group(1),
                             re.IGNORECASE,

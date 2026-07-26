@@ -519,6 +519,10 @@ export const ProductWorkspacePage: React.FC<{
   const readiness = data?.readinessDashboard;
   const gaps = data?.gaps;
   const illustration = scenarioIllustration ?? data?.illustration;
+  const keyProjectionYears = new Set([1, 2, 3, 4, 5, 10, 15, 20, 25, 30]);
+  const keyProjectionRows = (illustration?.rows ?? []).filter((row) =>
+    keyProjectionYears.has(Number(row.year)),
+  );
   const mechanicsExplanation = scenarioMechanics ?? data?.mechanicsExplanation;
   const pmr = data?.pmrReadiness;
   const documentInventory = data?.documentInventory;
@@ -1226,14 +1230,14 @@ export const ProductWorkspacePage: React.FC<{
       <section className="card home-card">
         <h2>Platform Capability Alignment</h2>
         <p className="muted">
-          One consistent view of supported, partial, and unsupported mechanics based on workspace requirements,
-          evidence, and the current projection implementation.
+          This section tracks only mechanics that need implementation attention. It is not a summary of every
+          supported product requirement.
         </p>
         {capabilityHasItems ? (
           <>
             {capabilityAssessment?.summary && (
               <p className="muted">
-                Summary: Unsupported {capabilityAssessment.summary?.unsupported ?? 0}, Partial{" "}
+                Tracked capability gaps: Unsupported {capabilityAssessment.summary?.unsupported ?? 0}, Partial{" "}
                 {capabilityAssessment.summary?.partial ?? 0}, Supported {" "}
                 {capabilityAssessment.summary?.supported ?? 0}
               </p>
@@ -1724,7 +1728,7 @@ export const ProductWorkspacePage: React.FC<{
             {illustration.inputs && illustration.inputs.length > 0 && (
               <>
                 <h3>Projection inputs and provenance</h3>
-                <div className="table-scroll">
+                <div className="table-scroll projection-inputs--desktop">
                   <table className="kv-table">
                     <thead>
                       <tr>
@@ -1745,6 +1749,16 @@ export const ProductWorkspacePage: React.FC<{
                       ))}
                     </tbody>
                   </table>
+                </div>
+                <div className="projection-input-cards">
+                  {illustration.inputs.map((input) => (
+                    <article className="projection-input-card" key={input.id ?? input.label}>
+                      <h4>{input.label}</h4>
+                      <p>{formatProjectionInputValue(input.value, input.unit)}</p>
+                      <p><span className="tag">{formatStatusLabel(input.status)}</span></p>
+                      <small>{input.source || "(source not recorded)"}</small>
+                    </article>
+                  ))}
                 </div>
               </>
             )}
@@ -1776,7 +1790,21 @@ export const ProductWorkspacePage: React.FC<{
                     Download full ledger CSV
                   </button>
                 </p>
-                <details open>
+                <h4>Key policy durations</h4>
+                <div className="projection-key-durations">
+                  {keyProjectionRows.map((row, idx) => (
+                    <article className="projection-key-duration" key={row.year ?? idx}>
+                      <h4>Year {row.year} · Age {row.attainedAge ?? "—"}</h4>
+                      <dl>
+                        <div><dt>Cumulative premium</dt><dd>{formatCurrency(row.cumulativePremium)}</dd></div>
+                        <div><dt>Ending value</dt><dd>{formatCurrency(row.endingPolicyValue ?? row.policyValue)}</dd></div>
+                        <div><dt>Cash surrender value</dt><dd>{formatCurrency(row.surrenderValue)}</dd></div>
+                        <div><dt>Death benefit</dt><dd>{formatCurrency(row.deathBenefit)}</dd></div>
+                      </dl>
+                    </article>
+                  ))}
+                </div>
+                <details>
                   <summary>{illustration.rows.length}-year annual projection ledger</summary>
                   <div className="table-scroll projection-ledger projection-ledger--desktop">
                     <table className="kv-table">
