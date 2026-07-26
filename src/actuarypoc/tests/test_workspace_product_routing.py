@@ -34,3 +34,52 @@ def test_promise_ul_workspace_snapshot_builds_without_review_storage(monkeypatch
     assert snapshot["product"]["code"] == "ICC18 P18PR UL"
     assert snapshot["productModel"]["type"] == "ul"
     assert snapshot["illustration"] is not None
+
+
+def test_workspace_evidence_replaces_generic_citation(monkeypatch) -> None:
+    snapshot = server.build_product_workspace_snapshot("ICC18 P18PR UL")
+    documents = [{"description": "Promise UL Actuarial Memo.pdf", "object_path": "workspace/memo.pdf"}]
+    corpus = [
+        {
+            "filename": "Promise UL Actuarial Memo.pdf",
+            "objectPath": "workspace/memo.pdf",
+            "pages": [
+                "The annual credited rate will not be less than the Guaranteed Minimum "
+                "Annual Interest Rate shown in the Policy Specification which is currently "
+                "set at 2%. Policy credits interest at least at the guaranteed minimum rate."
+            ],
+        }
+    ]
+    monkeypatch.setattr(server, "_extract_workspace_documents", lambda docs: (documents, corpus))
+
+    result = server._apply_workspace_document_evidence(snapshot, documents)
+
+    facts = {fact["label"]: fact for fact in result["extractedFacts"]}
+    assert facts["Product name"]["provenanceKind"] == "workspace_document"
+    credited = result["complianceMatrix"]["requirements"][0]
+    source = credited["evidence"][0]["sources"][0]
+    assert source["document"] == "Promise UL Actuarial Memo.pdf"
+    assert source["page"] == "1"
+
+
+def test_workspace_readiness_counts_missing_requirements() -> None:
+    snapshot = {
+        "complianceMatrix": {
+            "requirements": [
+                {"status": "implemented", "impact": "high"},
+                {"status": "partial", "impact": "high"},
+                {"status": "missing", "impact": "medium"},
+            ]
+        },
+        "readinessDashboard": {},
+    }
+
+    server._reconcile_workspace_readiness(snapshot)
+
+    assert snapshot["complianceMatrix"]["summary"] == {
+        "implemented": 1,
+        "partial": 1,
+        "missing": 1,
+        "overallStatus": "yellow",
+    }
+    assert snapshot["readinessDashboard"]["projectionTrustLevel"] == "exploration_only"
