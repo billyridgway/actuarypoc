@@ -5650,7 +5650,7 @@ def build_product_workspace_snapshot(product_code: str) -> Dict[str, Any]:
         gap_warnings,
         gap_notes,
         gap_items,
-    ) = _build_ul_projection_view(canonical_code, ul_model, requirement_classifications)
+    ) = _build_ul_projection_view(canonical_code)
 
     # --- Evidence layer: mechanics and assumptions traceability ---------------
     evidence_items: List[Dict[str, Any]] = []
