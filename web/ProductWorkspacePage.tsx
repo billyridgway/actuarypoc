@@ -160,6 +160,8 @@ interface WorkspacePayload {
     objectPath?: string | null;
     createdAt?: string | null;
     processingStatus?: string | null;
+    pageCount?: number | null;
+    textLength?: number | null;
   }>;
   extractedFacts?: Array<{
     label: string;
@@ -685,32 +687,36 @@ export const ProductWorkspacePage: React.FC<{
       <section className="card home-card">
         <h2>Document Inventory</h2>
         <p className="muted">
-          Workspace documents that the system has recorded for this analysis. This is a read-only, AI-assisted view and
-          does not change projection behaviour.
+          Uploaded filing documents and whether their text was available to this analysis.
         </p>
         {documentInventory && documentInventory.length > 0 ? (
-          <table className="kv-table">
-            <thead>
-              <tr>
-                <th>Description</th>
-                <th>Kind</th>
-                <th>Object path</th>
-                <th>Uploaded at</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {documentInventory.map((d, idx) => (
-                <tr key={d.id ?? d.objectPath ?? String(d.createdAt) ?? idx}>
-                  <td>{d.description || "(no description)"}</td>
-                  <td>{d.kind || "(unknown)"}</td>
-                  <td>{d.objectPath || "(not set)"}</td>
-                  <td>{d.createdAt || ""}</td>
-                  <td>{formatStatusLabel(d.processingStatus || "uploaded")}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <details>
+            <summary>
+              {documentInventory.length} document{documentInventory.length === 1 ? "" : "s"} analyzed
+            </summary>
+            <div className="table-scroll">
+              <table className="kv-table">
+                <thead>
+                  <tr>
+                    <th>Document</th>
+                    <th>Pages</th>
+                    <th>Status</th>
+                    {showAdvancedDebug && <th>Object path</th>}
+                  </tr>
+                </thead>
+                <tbody>
+                  {documentInventory.map((d, idx) => (
+                    <tr key={d.id ?? d.objectPath ?? String(d.createdAt) ?? idx}>
+                      <td>{d.description || "(no description)"}</td>
+                      <td>{d.pageCount ?? "—"}</td>
+                      <td>{formatStatusLabel(d.processingStatus || "uploaded")}</td>
+                      {showAdvancedDebug && <td className="technical-path">{d.objectPath || "(not set)"}</td>}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </details>
         ) : (
           <p className="muted">
             {loading
@@ -1535,7 +1541,7 @@ export const ProductWorkspacePage: React.FC<{
         )}
       </section>
 
-      <section className="card home-card">
+      {showAdvancedDebug && <section className="card home-card">
         <h2>Uploaded documents</h2>
         <p>
           <button
@@ -1580,7 +1586,7 @@ export const ProductWorkspacePage: React.FC<{
             </p>
           )
         ) : null}
-      </section>
+      </section>}
     </div>
   );
 };

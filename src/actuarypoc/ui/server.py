@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from fastapi import FastAPI, HTTPException, Query, UploadFile, File, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
+from PyPDF2 import PdfReader
 
 from actuarypoc.connectors.base import CSVConnector
 from actuarypoc.domain.product_definition_v1 import ProductDefinitionLineage, ProductDefinitionV1
@@ -232,13 +233,199 @@ def _build_document_inventory(
                 "kind": d.get("kind"),
                 "objectPath": d.get("object_path"),
                 "createdAt": d.get("created_at"),
-                # For this slice we only assert that the document is
-                # present in the workspace; deeper processing state is
-                # intentionally left for future iterations.
-                "processingStatus": "uploaded",
+                "processingStatus": d.get("processing_status") or "uploaded",
+                "pageCount": d.get("page_count"),
+                "textLength": d.get("text_length"),
             }
         )
     return inventory
+
+
+def _extract_workspace_documents(
+    workspace_documents: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Extract searchable text from the workspace's durable PDF objects.
+
+    Text is used only while building the snapshot; the persisted snapshot
+    contains compact provenance and processing metadata, not full filing text.
+    """
+
+    client = get_minio_client()
+    ensure_bucket(client)
+    bucket = get_bucket_name()
+    processed: List[Dict[str, Any]] = []
+    corpus: List[Dict[str, Any]] = []
+
+    for original in workspace_documents:
+        document = dict(original)
+        object_path = str(document.get("object_path") or "")
+        filename = str(document.get("description") or Path(object_path).name)
+        response = None
+        try:
+            response = client.get_object(bucket, object_path)
+            content = response.read()
+            reader = PdfReader(io.BytesIO(content))
+            pages = [str(page.extract_text() or "") for page in reader.pages]
+            text_length = sum(len(page) for page in pages)
+            document.update(
+                {
+                    "processing_status": "processed" if text_length else "no_extractable_text",
+                    "page_count": len(pages),
+                    "text_length": text_length,
+                }
+            )
+            corpus.append({"filename": filename, "objectPath": object_path, "pages": pages})
+        except Exception as exc:  # noqa: BLE001
+            logging.warning("[workspace-analysis] Could not extract %s: %s", object_path, exc)
+            document.update({"processing_status": "extraction_failed", "page_count": None, "text_length": 0})
+        finally:
+            if response is not None:
+                response.close()
+                response.release_conn()
+        processed.append(document)
+
+    return processed, corpus
+
+
+def _normalise_evidence_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip().lower()
+
+
+def _find_workspace_evidence(
+    corpus: List[Dict[str, Any]], snippet: Any
+) -> Optional[Dict[str, Any]]:
+    """Locate a filing snippet in an uploaded document with page provenance."""
+
+    needle = _normalise_evidence_text(snippet)
+    if len(needle) < 24:
+        return None
+    needle_tokens = set(re.findall(r"[a-z0-9]+", needle))
+    best: Optional[Tuple[float, Dict[str, Any]]] = None
+    for document in corpus:
+        for page_number, page_text in enumerate(document.get("pages") or [], start=1):
+            haystack = _normalise_evidence_text(page_text)
+            if needle in haystack:
+                score = 1.0
+            else:
+                haystack_tokens = set(re.findall(r"[a-z0-9]+", haystack))
+                score = len(needle_tokens & haystack_tokens) / max(len(needle_tokens), 1)
+            if score >= 0.75 and (best is None or score > best[0]):
+                best = (
+                    score,
+                    {
+                        "document": document["filename"],
+                        "page": str(page_number),
+                        "snippet": str(snippet),
+                        "confidence": round(score, 2),
+                    },
+                )
+    return best[1] if best else None
+
+
+def _apply_workspace_document_evidence(
+    snapshot: Dict[str, Any],
+    workspace_documents: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Overlay facts and citations derived from this workspace's PDFs."""
+
+    processed_documents, corpus = _extract_workspace_documents(workspace_documents)
+    snapshot["documentInventory"] = _build_document_inventory(processed_documents)
+
+    searchable_parts: List[str] = []
+    for doc in corpus:
+        searchable_parts.append(str(doc.get("filename") or ""))
+        searchable_parts.extend(str(page) for page in doc.get("pages") or [])
+    searchable = "\n".join(searchable_parts)
+    searchable_upper = searchable.upper()
+    form_numbers = sorted(
+        {
+            re.sub(r"\s+", " ", match).strip()
+            for match in re.findall(r"\bICC\d{2}\s+[A-Z]\d{2}[A-Z0-9]+\b", searchable_upper)
+        }
+    )
+    identity_document = next(
+        (
+            str(doc.get("filename"))
+            for doc in corpus
+            if "P18PRUL" in str(doc.get("filename") or "").upper()
+            or "PROMISE UL" in str(doc.get("filename") or "").upper()
+            or "PROMISE UL" in " ".join(doc.get("pages") or []).upper()
+        ),
+        None,
+    )
+
+    facts = _build_extracted_facts(snapshot)
+
+    def _replace_fact(label: str, value: Any, source: Optional[str], confidence: float) -> None:
+        for fact in facts:
+            if fact.get("label") == label:
+                fact.update(
+                    {
+                        "value": value,
+                        "source": source,
+                        "confidence": confidence,
+                        "status": "extracted",
+                        "provenanceKind": "workspace_document",
+                    }
+                )
+                return
+
+    if identity_document:
+        _replace_fact("Product name", "Promise UL", identity_document, 0.95)
+        _replace_fact("Product code", "ICC18 P18PR UL", identity_document, 0.95)
+        _replace_fact("Product type", "UL", identity_document, 0.95)
+    if form_numbers:
+        _replace_fact("Form numbers", form_numbers, "Uploaded filing filenames and text", 0.9)
+    snapshot["extractedFacts"] = facts
+
+    requirements = (snapshot.get("complianceMatrix") or {}).get("requirements") or []
+    for requirement in requirements:
+        if not isinstance(requirement, dict):
+            continue
+        for evidence in requirement.get("evidence") or []:
+            if not isinstance(evidence, dict):
+                continue
+            sources = evidence.get("sources") or []
+            snippet = None
+            if sources and isinstance(sources[0], dict):
+                snippet = sources[0].get("snippet")
+            if not snippet:
+                snippet = requirement.get("filedRequirement")
+            matched = _find_workspace_evidence(corpus, snippet)
+            evidence["sources"] = [matched] if matched else []
+            if not matched and requirement.get("status") == "implemented":
+                requirement["status"] = "partial"
+
+    return snapshot
+
+
+def _reconcile_workspace_readiness(snapshot: Dict[str, Any]) -> None:
+    """Use requirement statuses as the single source for all summary counts."""
+
+    requirements = (snapshot.get("complianceMatrix") or {}).get("requirements") or []
+    counts = {"implemented": 0, "partial": 0, "missing": 0}
+    for requirement in requirements:
+        if not isinstance(requirement, dict):
+            continue
+        status = str(requirement.get("status") or "missing").lower()
+        counts[status if status in counts else "missing"] += 1
+
+    high_missing = any(
+        str(r.get("status") or "").lower() == "missing"
+        and str(r.get("impact") or "").lower() == "high"
+        for r in requirements
+        if isinstance(r, dict)
+    )
+    overall = "red" if high_missing else ("yellow" if counts["partial"] or counts["missing"] else "green")
+    summary = {**counts, "overallStatus": overall}
+    snapshot.setdefault("complianceMatrix", {})["summary"] = summary
+    readiness = snapshot.setdefault("readinessDashboard", {})
+    readiness["overallStatus"] = overall
+    readiness["complianceSummary"] = summary
+    readiness["projectionTrustLevel"] = (
+        "exploration_only" if high_missing or counts["missing"] else
+        "draft_illustration" if counts["partial"] else "filed_rate_ready"
+    )
 
 
 def _build_ul_projection_view(
@@ -945,6 +1132,29 @@ def _build_ul_capability_assessment(snapshot: Dict[str, Any]) -> Optional[Dict[s
                 "recommendedAction": None,
             }
         )
+    else:
+        req = cm_by_id.get("policy_admin_fees")
+        doc, ref = _first_source(req)
+        items.append(
+            {
+                "capabilityId": "UL_CAP_LEVEL_POLICY_FEE",
+                "name": "Policy / admin fees",
+                "status": "partial",
+                "impact": "medium",
+                "reason": (
+                    "The engine supports a level policy fee, but no evidenced fee schedule "
+                    "is loaded; the current projection applies a $0 fee."
+                ),
+                "productCode": product_code,
+                "sourceRequirementId": "policy_admin_fees",
+                "sourceRequirementText": (
+                    req.get("filedRequirement") if isinstance(req, dict) else None
+                ),
+                "sourceDocument": doc,
+                "sourceReference": ref,
+                "recommendedAction": "Upload and map the filed fee schedule",
+            }
+        )
 
     supported = sum(1 for it in items if (it.get("status") or "").lower() == "supported")
     partial = sum(1 for it in items if (it.get("status") or "").lower() == "partial")
@@ -1286,8 +1496,8 @@ def api_workspace_analyze(workspace_id: str) -> Dict[str, Any]:
     if int(ws.get("document_count") or 0) <= 0:
         raise HTTPException(status_code=400, detail="At least one document is required before analysis")
 
-    # For MVP we ignore workspace‑specific document content and reuse the
-    # existing Promise UL understanding pipeline.
+    # Build the product-line baseline, then replace its evidence and identity
+    # facts with findings from this workspace's durable uploaded documents.
     try:
         snapshot = build_product_workspace_snapshot("ICC18 P18PR UL")
     except HTTPException:
@@ -1313,11 +1523,15 @@ def api_workspace_analyze(workspace_id: str) -> Dict[str, Any]:
         docs_for_inventory = list_workspace_documents(workspace_id)
     except Exception:
         docs_for_inventory = []
-    snapshot["documentInventory"] = _build_document_inventory(docs_for_inventory)
-    snapshot["extractedFacts"] = _build_extracted_facts(snapshot)
+    snapshot = _apply_workspace_document_evidence(snapshot, docs_for_inventory)
+    _reconcile_workspace_readiness(snapshot)
     snapshot["requirementsCandidates"] = _build_requirements_candidates(snapshot)
     snapshot["productUnderstanding"] = _build_product_understanding(snapshot)
     snapshot["capabilityAssessment"] = _build_capability_assessment(snapshot)
+
+    product_block = snapshot.get("product") or {}
+    compliance = (snapshot.get("complianceMatrix") or {}).get("summary") or {}
+    readiness = snapshot.get("readinessDashboard") or {}
 
     updated = update_workspace_analysis(
         workspace_id,
@@ -8394,7 +8608,10 @@ def build_ul_projection_explanation(
             "id": "policy_admin_fee_deducted",
             "order": 4,
             "title": "Policy/admin fee deducted",
-            "formulaText": "Annual policy/admin fee applied after COI for this draft UL projection.",
+            "formulaText": (
+                "Configured annual policy/admin fee applied after COI. When no evidenced "
+                "fee schedule is loaded, the current configured amount is $0."
+            ),
             "inputs": [
                 _explained_value(
                     label="Policy fee (annual)",

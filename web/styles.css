@@ -108,6 +108,33 @@ body {
   border-bottom: none;
 }
 
+.table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.technical-path {
+  max-width: 28rem;
+  overflow-wrap: anywhere;
+  color: var(--text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+}
+
+details > summary {
+  cursor: pointer;
+  font-weight: 600;
+  padding: 0.35rem 0;
+}
+
+@media (max-width: 640px) {
+  .kv-table th,
+  .kv-table td {
+    padding: 6px 5px;
+    vertical-align: top;
+  }
+}
+
 /* Policy input */
 
 .policy-input__row {
