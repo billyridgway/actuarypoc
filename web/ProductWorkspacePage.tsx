@@ -439,6 +439,9 @@ export const ProductWorkspacePage: React.FC<{
     faceAmount: 100000,
     premiumMode: "ANNUAL",
     modalPremium: 3000,
+    sex: "",
+    riskClass: "",
+    tobaccoStatus: "",
   });
 
   React.useEffect(() => {
@@ -519,6 +522,10 @@ export const ProductWorkspacePage: React.FC<{
   const readiness = data?.readinessDashboard;
   const gaps = data?.gaps;
   const illustration = scenarioIllustration ?? data?.illustration;
+  const keyProjectionYears = new Set([1, 2, 3, 4, 5, 10, 15, 20, 25, 30]);
+  const keyProjectionRows = (illustration?.rows ?? []).filter((row) =>
+    keyProjectionYears.has(Number(row.year)),
+  );
   const mechanicsExplanation = scenarioMechanics ?? data?.mechanicsExplanation;
   const pmr = data?.pmrReadiness;
   const documentInventory = data?.documentInventory;
@@ -701,6 +708,57 @@ export const ProductWorkspacePage: React.FC<{
       setProjectionError(err?.message || "Projection failed.");
     } finally {
       setProjectionRunning(false);
+    }
+  };
+
+  const uploadWorkspaceDocument: React.ChangeEventHandler<HTMLInputElement> = async (event) => {
+    const files = Array.from(event.target.files ?? []);
+    if (files.length === 0) return;
+    setDashboardUploading(true);
+    setDashboardUploadMessage(null);
+    try {
+      if (!workspaceId) throw new Error("Workspace context is required.");
+      for (const file of files) {
+        const form = new FormData();
+        form.append("file", file);
+        const response = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/documents`, {
+          method: "POST",
+          body: form,
+        });
+        if (!response.ok) {
+          throw new Error(
+            `${file.name}: ${(await response.text()) || `upload failed (HTTP ${response.status})`}`,
+          );
+        }
+      }
+      setDashboardUploadMessage(
+        `Uploaded ${files.length} document${files.length === 1 ? "" : "s"}. Rerun analysis to incorporate ${
+          files.length === 1 ? "it" : "them"
+        } into product understanding.`,
+      );
+    } catch (err: any) {
+      setDashboardUploadMessage(err?.message || "Upload failed.");
+    } finally {
+      setDashboardUploading(false);
+      event.target.value = "";
+    }
+  };
+
+  const rerunWorkspaceUnderstanding = async () => {
+    setDashboardUploadMessage("Rerunning analysis with all workspace documents…");
+    try {
+      if (!workspaceId) throw new Error("Workspace context is required.");
+      const response = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/analyze`, {
+        method: "POST",
+      });
+      if (!response.ok) {
+        throw new Error((await response.text()) || `Analysis failed (HTTP ${response.status})`);
+      }
+      const body = await response.json();
+      setData(body.snapshot as WorkspacePayload);
+      setDashboardUploadMessage("Product understanding updated from all workspace documents.");
+    } catch (err: any) {
+      setDashboardUploadMessage(err?.message || "Failed to rerun analysis.");
     }
   };
 
@@ -904,6 +962,34 @@ export const ProductWorkspacePage: React.FC<{
         <p className="muted">
           Uploaded filing documents and whether their text was available to this analysis.
         </p>
+        <div className="workspace-document-actions">
+          <h3>Add documents and rerun analysis</h3>
+          <p className="muted">
+            Upload any additional filing, rate table, schedule, memorandum, or supporting document. Then rerun
+            analysis to rebuild product understanding from the complete workspace document set.
+          </p>
+          <div className="gap-actions">
+            <label className="button button-secondary">
+              {dashboardUploading ? "Uploading…" : "Add documents"}
+              <input
+                type="file"
+                multiple
+                style={{ display: "none" }}
+                disabled={dashboardUploading || !workspaceId}
+                onChange={uploadWorkspaceDocument}
+              />
+            </label>
+            <button
+              type="button"
+              className="button button-ghost"
+              disabled={dashboardUploading || !workspaceId}
+              onClick={() => void rerunWorkspaceUnderstanding()}
+            >
+              Rerun analysis
+            </button>
+          </div>
+          {dashboardUploadMessage && <p className="muted" role="status">{dashboardUploadMessage}</p>}
+        </div>
         {documentInventory && documentInventory.length > 0 ? (
           <details>
             <summary>
@@ -1226,14 +1312,14 @@ export const ProductWorkspacePage: React.FC<{
       <section className="card home-card">
         <h2>Platform Capability Alignment</h2>
         <p className="muted">
-          One consistent view of supported, partial, and unsupported mechanics based on workspace requirements,
-          evidence, and the current projection implementation.
+          This section tracks only mechanics that need implementation attention. It is not a summary of every
+          supported product requirement.
         </p>
         {capabilityHasItems ? (
           <>
             {capabilityAssessment?.summary && (
               <p className="muted">
-                Summary: Unsupported {capabilityAssessment.summary?.unsupported ?? 0}, Partial{" "}
+                Tracked capability gaps: Unsupported {capabilityAssessment.summary?.unsupported ?? 0}, Partial{" "}
                 {capabilityAssessment.summary?.partial ?? 0}, Supported {" "}
                 {capabilityAssessment.summary?.supported ?? 0}
               </p>
@@ -1686,6 +1772,42 @@ export const ProductWorkspacePage: React.FC<{
                     }}
                   />
                 </label>
+                <label>
+                  Sex (as filed)
+                  <input
+                    type="text"
+                    value={projectionForm.sex}
+                    placeholder="e.g. F"
+                    onChange={(event) => {
+                      setScenarioDirty(true);
+                      setProjectionForm((current) => ({ ...current, sex: event.target.value }));
+                    }}
+                  />
+                </label>
+                <label>
+                  Underwriting / risk class
+                  <input
+                    type="text"
+                    value={projectionForm.riskClass}
+                    placeholder="e.g. Standard"
+                    onChange={(event) => {
+                      setScenarioDirty(true);
+                      setProjectionForm((current) => ({ ...current, riskClass: event.target.value }));
+                    }}
+                  />
+                </label>
+                <label>
+                  Tobacco / nicotine status
+                  <input
+                    type="text"
+                    value={projectionForm.tobaccoStatus}
+                    placeholder="e.g. Non-Tobacco"
+                    onChange={(event) => {
+                      setScenarioDirty(true);
+                      setProjectionForm((current) => ({ ...current, tobaccoStatus: event.target.value }));
+                    }}
+                  />
+                </label>
               </div>
               <p>
                 <button type="submit" className="button button-secondary" disabled={projectionRunning}>
@@ -1724,7 +1846,7 @@ export const ProductWorkspacePage: React.FC<{
             {illustration.inputs && illustration.inputs.length > 0 && (
               <>
                 <h3>Projection inputs and provenance</h3>
-                <div className="table-scroll">
+                <div className="table-scroll projection-inputs--desktop">
                   <table className="kv-table">
                     <thead>
                       <tr>
@@ -1745,6 +1867,16 @@ export const ProductWorkspacePage: React.FC<{
                       ))}
                     </tbody>
                   </table>
+                </div>
+                <div className="projection-input-cards">
+                  {illustration.inputs.map((input) => (
+                    <article className="projection-input-card" key={input.id ?? input.label}>
+                      <h4>{input.label}</h4>
+                      <p>{formatProjectionInputValue(input.value, input.unit)}</p>
+                      <p><span className="tag">{formatStatusLabel(input.status)}</span></p>
+                      <small>{input.source || "(source not recorded)"}</small>
+                    </article>
+                  ))}
                 </div>
               </>
             )}
@@ -1776,7 +1908,21 @@ export const ProductWorkspacePage: React.FC<{
                     Download full ledger CSV
                   </button>
                 </p>
-                <details open>
+                <h4>Key policy durations</h4>
+                <div className="projection-key-durations">
+                  {keyProjectionRows.map((row, idx) => (
+                    <article className="projection-key-duration" key={row.year ?? idx}>
+                      <h4>Year {row.year} · Age {row.attainedAge ?? "—"}</h4>
+                      <dl>
+                        <div><dt>Cumulative premium</dt><dd>{formatCurrency(row.cumulativePremium)}</dd></div>
+                        <div><dt>Ending value</dt><dd>{formatCurrency(row.endingPolicyValue ?? row.policyValue)}</dd></div>
+                        <div><dt>Cash surrender value</dt><dd>{formatCurrency(row.surrenderValue)}</dd></div>
+                        <div><dt>Death benefit</dt><dd>{formatCurrency(row.deathBenefit)}</dd></div>
+                      </dl>
+                    </article>
+                  ))}
+                </div>
+                <details>
                   <summary>{illustration.rows.length}-year annual projection ledger</summary>
                   <div className="table-scroll projection-ledger projection-ledger--desktop">
                     <table className="kv-table">

@@ -126,3 +126,13 @@ def test_feature_requests_are_workspace_scoped(store: FakeMinio) -> None:
         workspace_id=second["id"],
         status="rejected",
     ) is None
+
+
+def test_executable_mechanics_are_persisted_under_workspace_prefix(store: FakeMinio) -> None:
+    workspace = workspace_store.create_workspace()
+    value = {"version": 1, "usable": {"fees": [{"amount": 60.0}]}}
+
+    key = workspace_store.store_workspace_executable_mechanics(workspace["id"], value)
+
+    assert key == f"workspaces/{workspace['id']}/analysis/executable-ul-mechanics.json"
+    assert workspace_store.load_workspace_executable_mechanics(workspace["id"]) == value

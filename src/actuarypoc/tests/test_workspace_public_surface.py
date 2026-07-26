@@ -29,6 +29,18 @@ def test_only_workspace_application_routes_are_public() -> None:
     assert "/api/run-detail" not in application_paths
 
 
+def test_workspace_supports_additional_documents_and_analysis_reruns() -> None:
+    route_methods = {
+        (route.path, method)
+        for route in app.routes
+        if isinstance(route, APIRoute)
+        for method in route.methods
+    }
+
+    assert ("/api/workspaces/{workspace_id}/documents", "POST") in route_methods
+    assert ("/api/workspaces/{workspace_id}/analyze", "POST") in route_methods
+
+
 def test_root_redirects_to_workspace_ui() -> None:
     response = TestClient(app).get("/", follow_redirects=False)
 

@@ -121,6 +121,26 @@ def test_workspace_evidence_ignores_narrative_risk_class_mention(monkeypatch) ->
     assert facts["Risk classes"]["provenanceKind"] == "unresolved"
 
 
+def test_workspace_evidence_preserves_non_nicotine_and_non_tobacco_labels(monkeypatch) -> None:
+    snapshot = server.build_product_workspace_snapshot("ICC18 P18PR UL")
+    documents = [{"description": "Supplement.pdf", "object_path": "workspace/supplement.pdf"}]
+    corpus = [
+        {
+            "filename": "Supplement.pdf",
+            "objectPath": "workspace/supplement.pdf",
+            "pages": ["Risk classes: Standard, Non-Nicotine, Non-Tobacco."],
+        }
+    ]
+    monkeypatch.setattr(server, "_extract_workspace_documents", lambda docs: (documents, corpus))
+
+    result = server._apply_workspace_document_evidence(snapshot, documents)
+
+    facts = {fact["label"]: fact for fact in result["extractedFacts"]}
+    assert facts["Risk classes"]["value"] == ["Standard", "Non-Tobacco", "Non-Nicotine"]
+    assert "Nicotine" not in facts["Risk classes"]["value"]
+    assert "Tobacco" not in facts["Risk classes"]["value"]
+
+
 def test_workspace_readiness_counts_missing_requirements() -> None:
     snapshot = {
         "complianceMatrix": {
