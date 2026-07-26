@@ -290,6 +290,18 @@ details > summary {
   margin-top: 0.2rem;
 }
 
+.workspace-document-actions {
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+  border-radius: 0.6rem;
+  margin: 0.9rem 0;
+  padding: 0.9rem;
+}
+
+.workspace-document-actions h3 {
+  margin-top: 0;
+}
+
 @media (max-width: 640px) {
   .projection-inputs--desktop {
     display: none;

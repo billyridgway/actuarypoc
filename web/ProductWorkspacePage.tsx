@@ -708,6 +708,57 @@ export const ProductWorkspacePage: React.FC<{
     }
   };
 
+  const uploadWorkspaceDocument: React.ChangeEventHandler<HTMLInputElement> = async (event) => {
+    const files = Array.from(event.target.files ?? []);
+    if (files.length === 0) return;
+    setDashboardUploading(true);
+    setDashboardUploadMessage(null);
+    try {
+      if (!workspaceId) throw new Error("Workspace context is required.");
+      for (const file of files) {
+        const form = new FormData();
+        form.append("file", file);
+        const response = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/documents`, {
+          method: "POST",
+          body: form,
+        });
+        if (!response.ok) {
+          throw new Error(
+            `${file.name}: ${(await response.text()) || `upload failed (HTTP ${response.status})`}`,
+          );
+        }
+      }
+      setDashboardUploadMessage(
+        `Uploaded ${files.length} document${files.length === 1 ? "" : "s"}. Rerun analysis to incorporate ${
+          files.length === 1 ? "it" : "them"
+        } into product understanding.`,
+      );
+    } catch (err: any) {
+      setDashboardUploadMessage(err?.message || "Upload failed.");
+    } finally {
+      setDashboardUploading(false);
+      event.target.value = "";
+    }
+  };
+
+  const rerunWorkspaceUnderstanding = async () => {
+    setDashboardUploadMessage("Rerunning analysis with all workspace documents…");
+    try {
+      if (!workspaceId) throw new Error("Workspace context is required.");
+      const response = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/analyze`, {
+        method: "POST",
+      });
+      if (!response.ok) {
+        throw new Error((await response.text()) || `Analysis failed (HTTP ${response.status})`);
+      }
+      const body = await response.json();
+      setData(body.snapshot as WorkspacePayload);
+      setDashboardUploadMessage("Product understanding updated from all workspace documents.");
+    } catch (err: any) {
+      setDashboardUploadMessage(err?.message || "Failed to rerun analysis.");
+    }
+  };
+
   const downloadProjectionCsv = () => {
     const rows = illustration?.rows ?? [];
     if (rows.length === 0) return;
@@ -908,6 +959,34 @@ export const ProductWorkspacePage: React.FC<{
         <p className="muted">
           Uploaded filing documents and whether their text was available to this analysis.
         </p>
+        <div className="workspace-document-actions">
+          <h3>Add documents and rerun analysis</h3>
+          <p className="muted">
+            Upload any additional filing, rate table, schedule, memorandum, or supporting document. Then rerun
+            analysis to rebuild product understanding from the complete workspace document set.
+          </p>
+          <div className="gap-actions">
+            <label className="button button-secondary">
+              {dashboardUploading ? "Uploading…" : "Add documents"}
+              <input
+                type="file"
+                multiple
+                style={{ display: "none" }}
+                disabled={dashboardUploading || !workspaceId}
+                onChange={uploadWorkspaceDocument}
+              />
+            </label>
+            <button
+              type="button"
+              className="button button-ghost"
+              disabled={dashboardUploading || !workspaceId}
+              onClick={() => void rerunWorkspaceUnderstanding()}
+            >
+              Rerun analysis
+            </button>
+          </div>
+          {dashboardUploadMessage && <p className="muted" role="status">{dashboardUploadMessage}</p>}
+        </div>
         {documentInventory && documentInventory.length > 0 ? (
           <details>
             <summary>
