@@ -13,9 +13,13 @@ interface WorkspaceRow {
   modalPremium?: number;
   annualPremium?: number;
   cumulativePremium?: number;
+  openingPolicyValue?: number;
+  premiumLoad?: number;
   guaranteedInterest?: number;
   coiCharge?: number;
+  policyFee?: number;
   policyValue?: number;
+  endingPolicyValue?: number;
   cashValue?: number;
   surrenderCharge?: number;
   surrenderValue?: number;
@@ -141,8 +145,18 @@ interface WorkspacePayload {
   };
   illustration?: {
     request?: Record<string, any>;
+    inputs?: Array<{
+      id?: string;
+      label?: string;
+      value?: any;
+      unit?: string;
+      status?: string;
+      source?: string;
+    }>;
     metrics?: Record<string, any>;
+    rows?: WorkspaceRow[];
     sampleRows?: WorkspaceRow[];
+    modelStatus?: string;
   } | null;
   mechanicsExplanation?: {
     title?: string;
@@ -238,6 +252,76 @@ const formatCurrency = (value: any): string => {
   });
 };
 
+const formatProjectionInputValue = (value: any, unit?: string): string => {
+  if (value == null || value === "") return "Not modeled";
+  if (unit === "USD") return formatCurrency(value);
+  if (unit === "rate" && Number.isFinite(Number(value))) return `${(Number(value) * 100).toFixed(2)}%`;
+  return `${String(value)}${unit && unit !== "years" ? ` ${unit}` : unit === "years" ? " years" : ""}`;
+};
+
+const ProjectionChart: React.FC<{ rows: WorkspaceRow[] }> = ({ rows }) => {
+  const width = 720;
+  const height = 280;
+  const left = 58;
+  const right = 16;
+  const top = 18;
+  const bottom = 42;
+  const series = [
+    { key: "cumulativePremium", label: "Cumulative premium", color: "#7c3aed" },
+    { key: "cashValue", label: "Cash value", color: "#2563eb" },
+    { key: "surrenderValue", label: "Surrender value", color: "#059669" },
+    { key: "deathBenefit", label: "Death benefit", color: "#dc2626" },
+  ] as const;
+  const values = rows.flatMap((row) =>
+    series.map((item) => Number(row[item.key] ?? 0)).filter((value) => Number.isFinite(value)),
+  );
+  const maxValue = Math.max(...values, 1);
+  const minYear = Number(rows[0]?.year ?? 1);
+  const maxYear = Number(rows[rows.length - 1]?.year ?? minYear + 1);
+  const x = (year: number) =>
+    left + ((year - minYear) / Math.max(maxYear - minYear, 1)) * (width - left - right);
+  const y = (value: number) => top + (1 - value / maxValue) * (height - top - bottom);
+  const ticks = [0, 0.25, 0.5, 0.75, 1];
+
+  return (
+    <div className="projection-chart">
+      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Projection values by policy year">
+        {ticks.map((tick) => (
+          <g key={tick}>
+            <line
+              x1={left}
+              x2={width - right}
+              y1={y(maxValue * tick)}
+              y2={y(maxValue * tick)}
+              className="projection-chart__grid"
+            />
+            <text x={left - 8} y={y(maxValue * tick) + 4} textAnchor="end" className="projection-chart__label">
+              ${(maxValue * tick / 1000).toFixed(0)}k
+            </text>
+          </g>
+        ))}
+        {series.map((item) => {
+          const points = rows
+            .map((row) => `${x(Number(row.year ?? minYear))},${y(Number(row[item.key] ?? 0))}`)
+            .join(" ");
+          return <polyline key={item.key} points={points} fill="none" stroke={item.color} strokeWidth="3" />;
+        })}
+        <text x={left} y={height - 12} className="projection-chart__label">Year {minYear}</text>
+        <text x={width - right} y={height - 12} textAnchor="end" className="projection-chart__label">
+          Year {maxYear}
+        </text>
+      </svg>
+      <div className="projection-chart__legend">
+        {series.map((item) => (
+          <span key={item.key}>
+            <i style={{ backgroundColor: item.color }} /> {item.label}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+};
+
 const formatStatusLabel = (value?: string | null): string => {
   const raw = (value || "").trim();
   if (!raw) return "Unknown";
@@ -327,6 +411,18 @@ export const ProductWorkspacePage: React.FC<{
   const [creatingCapabilityId, setCreatingCapabilityId] = React.useState<string | null>(null);
   const [updatingFeatureRequestId, setUpdatingFeatureRequestId] = React.useState<number | null>(null);
   const [showAdvancedDebug, setShowAdvancedDebug] = React.useState<boolean>(false);
+  const [scenarioIllustration, setScenarioIllustration] =
+    React.useState<WorkspacePayload["illustration"]>(null);
+  const [scenarioMechanics, setScenarioMechanics] =
+    React.useState<WorkspacePayload["mechanicsExplanation"]>(null);
+  const [projectionRunning, setProjectionRunning] = React.useState<boolean>(false);
+  const [projectionError, setProjectionError] = React.useState<string | null>(null);
+  const [projectionForm, setProjectionForm] = React.useState({
+    issueAge: 45,
+    faceAmount: 100000,
+    premiumMode: "ANNUAL",
+    modalPremium: 3000,
+  });
 
   React.useEffect(() => {
     if (snapshot) {
@@ -340,6 +436,20 @@ export const ProductWorkspacePage: React.FC<{
     setError("Workspace analysis is not available.");
     setLoading(false);
   }, [snapshot]);
+
+  React.useEffect(() => {
+    const request = data?.illustration?.request;
+    if (!request) return;
+    const annualPremium = data?.illustration?.rows?.[0]?.annualPremium;
+    setProjectionForm({
+      issueAge: Number(request.age ?? 45),
+      faceAmount: Number(request.faceAmount ?? 100000),
+      premiumMode: String(request.premiumMode ?? "ANNUAL"),
+      modalPremium: Number(annualPremium ?? 3000),
+    });
+    setScenarioIllustration(null);
+    setScenarioMechanics(null);
+  }, [data?.illustration]);
 
   // Load existing feature requests when viewing a workspace-backed snapshot.
   React.useEffect(() => {
@@ -390,8 +500,8 @@ export const ProductWorkspacePage: React.FC<{
   const compliance = data?.complianceMatrix;
   const readiness = data?.readinessDashboard;
   const gaps = data?.gaps;
-  const illustration = data?.illustration;
-  const mechanicsExplanation = data?.mechanicsExplanation;
+  const illustration = scenarioIllustration ?? data?.illustration;
+  const mechanicsExplanation = scenarioMechanics ?? data?.mechanicsExplanation;
   const pmr = data?.pmrReadiness;
   const documentInventory = data?.documentInventory;
   const extractedFacts = data?.extractedFacts ?? [];
@@ -544,6 +654,68 @@ export const ProductWorkspacePage: React.FC<{
       id === "policy_admin_fee_missing"
     );
   });
+
+  const runProjectionScenario = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!workspaceId) {
+      setProjectionError("Open this projection from a workspace to run scenarios.");
+      return;
+    }
+    setProjectionRunning(true);
+    setProjectionError(null);
+    try {
+      const response = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/projection`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(projectionForm),
+      });
+      if (!response.ok) {
+        throw new Error((await response.text()) || `Projection failed (HTTP ${response.status})`);
+      }
+      const body = (await response.json()) as {
+        illustration?: WorkspacePayload["illustration"];
+        mechanicsExplanation?: WorkspacePayload["mechanicsExplanation"];
+      };
+      setScenarioIllustration(body.illustration ?? null);
+      setScenarioMechanics(body.mechanicsExplanation ?? null);
+    } catch (err: any) {
+      setProjectionError(err?.message || "Projection failed.");
+    } finally {
+      setProjectionRunning(false);
+    }
+  };
+
+  const downloadProjectionCsv = () => {
+    const rows = illustration?.rows ?? [];
+    if (rows.length === 0) return;
+    const columns: Array<[keyof WorkspaceRow, string]> = [
+      ["year", "Policy Year"],
+      ["attainedAge", "Attained Age"],
+      ["openingPolicyValue", "Opening Policy Value"],
+      ["annualPremium", "Annual Premium"],
+      ["cumulativePremium", "Cumulative Premium"],
+      ["premiumLoad", "Premium Load"],
+      ["coiCharge", "COI Charge"],
+      ["policyFee", "Policy/Admin Fee"],
+      ["guaranteedInterest", "Interest Credited"],
+      ["endingPolicyValue", "Ending Policy Value"],
+      ["surrenderCharge", "Surrender Charge"],
+      ["surrenderValue", "Cash Surrender Value"],
+      ["deathBenefit", "Death Benefit"],
+      ["netAmountAtRisk", "Net Amount at Risk"],
+    ];
+    const escape = (value: any) => `"${String(value ?? "").replace(/"/g, '""')}"`;
+    const csv = [
+      columns.map(([, label]) => escape(label)).join(","),
+      ...rows.map((row) => columns.map(([key]) => escape(row[key])).join(",")),
+    ].join("\n");
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${product?.code || "ul"}-diagnostic-projection.csv`.replace(/\s+/g, "-");
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
 
   return (
     <div className="home-page">
@@ -1418,6 +1590,67 @@ export const ProductWorkspacePage: React.FC<{
                 ? "Diagnostic projection only. Not suitable for product validation, filed-rate review, or customer illustration. Key inputs are missing or provisional."
                 : "Draft projection for product understanding. This is not a filed-rate compliant carrier illustration."}
             </p>
+            <form className="projection-scenario" onSubmit={runProjectionScenario}>
+              <h3>Diagnostic scenario</h3>
+              <div className="projection-scenario__grid">
+                <label>
+                  Issue age
+                  <input
+                    type="number"
+                    min="0"
+                    max="120"
+                    value={projectionForm.issueAge}
+                    onChange={(event) =>
+                      setProjectionForm((current) => ({ ...current, issueAge: Number(event.target.value) }))
+                    }
+                  />
+                </label>
+                <label>
+                  Face amount
+                  <input
+                    type="number"
+                    min="1"
+                    step="1000"
+                    value={projectionForm.faceAmount}
+                    onChange={(event) =>
+                      setProjectionForm((current) => ({ ...current, faceAmount: Number(event.target.value) }))
+                    }
+                  />
+                </label>
+                <label>
+                  Premium mode
+                  <select
+                    value={projectionForm.premiumMode}
+                    onChange={(event) =>
+                      setProjectionForm((current) => ({ ...current, premiumMode: event.target.value }))
+                    }
+                  >
+                    <option value="ANNUAL">Annual</option>
+                    <option value="SEMIANNUAL">Semiannual</option>
+                    <option value="QUARTERLY">Quarterly</option>
+                    <option value="MONTHLY">Monthly</option>
+                  </select>
+                </label>
+                <label>
+                  Modal premium
+                  <input
+                    type="number"
+                    min="1"
+                    step="100"
+                    value={projectionForm.modalPremium}
+                    onChange={(event) =>
+                      setProjectionForm((current) => ({ ...current, modalPremium: Number(event.target.value) }))
+                    }
+                  />
+                </label>
+              </div>
+              <p>
+                <button type="submit" className="button button-secondary" disabled={projectionRunning}>
+                  {projectionRunning ? "Running…" : "Run diagnostic projection"}
+                </button>
+              </p>
+              {projectionError && <p className="error">{projectionError}</p>}
+            </form>
             {hasMaterialProjectionGaps && (
               <div className="projection-summary">
                 <p className="muted">
@@ -1445,6 +1678,33 @@ export const ProductWorkspacePage: React.FC<{
                 </ul>
               </div>
             )}
+            {illustration.inputs && illustration.inputs.length > 0 && (
+              <>
+                <h3>Projection inputs and provenance</h3>
+                <div className="table-scroll">
+                  <table className="kv-table">
+                    <thead>
+                      <tr>
+                        <th>Input</th>
+                        <th>Value</th>
+                        <th>Status</th>
+                        <th>Source / derivation</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {illustration.inputs.map((input) => (
+                        <tr key={input.id ?? input.label}>
+                          <td>{input.label}</td>
+                          <td>{formatProjectionInputValue(input.value, input.unit)}</td>
+                          <td>{formatStatusLabel(input.status)}</td>
+                          <td>{input.source || "(not recorded)"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
             {illustration.metrics && (
               <div className="projection-summary">
                 {typeof illustration.metrics.maximumYear === "number" && (
@@ -1464,35 +1724,60 @@ export const ProductWorkspacePage: React.FC<{
                 )}
               </div>
             )}
-            {illustration.sampleRows && illustration.sampleRows.length > 0 && (
+            {illustration.rows && illustration.rows.length > 0 && (
               <>
-                <h3>Sample projection rows</h3>
-                <table className="kv-table">
-                  <thead>
-                    <tr>
-                      <th>Year</th>
-                      <th>Attained age</th>
-                      <th>Premium mode</th>
-                      <th>Annual premium</th>
-                      <th>Cash value</th>
-                      <th>Surrender value</th>
-                      <th>Death benefit</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {illustration.sampleRows.map((row, idx) => (
-                      <tr key={idx}>
-                        <td>{row.year}</td>
-                        <td>{row.attainedAge ?? ""}</td>
-                        <td>{row.premiumMode ?? ""}</td>
-                        <td>{formatCurrency(row.annualPremium ?? row.modalPremium)}</td>
-                        <td>{formatCurrency(row.cashValue ?? row.policyValue)}</td>
-                        <td>{formatCurrency(row.surrenderValue)}</td>
-                        <td>{formatCurrency(row.deathBenefit)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                <h3>Projected values</h3>
+                <ProjectionChart rows={illustration.rows} />
+                <p>
+                  <button type="button" className="button button-secondary" onClick={downloadProjectionCsv}>
+                    Download full ledger CSV
+                  </button>
+                </p>
+                <details open>
+                  <summary>{illustration.rows.length}-year annual projection ledger</summary>
+                  <div className="table-scroll projection-ledger">
+                    <table className="kv-table">
+                      <thead>
+                        <tr>
+                          <th>Year</th>
+                          <th>Age</th>
+                          <th>Opening value</th>
+                          <th>Premium</th>
+                          <th>Cumulative premium</th>
+                          <th>Premium load</th>
+                          <th>COI</th>
+                          <th>Policy fee</th>
+                          <th>Interest</th>
+                          <th>Ending value</th>
+                          <th>Surrender charge</th>
+                          <th>Cash surrender value</th>
+                          <th>Death benefit</th>
+                          <th>Net amount at risk</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {illustration.rows.map((row, idx) => (
+                          <tr key={row.year ?? idx}>
+                            <td>{row.year}</td>
+                            <td>{row.attainedAge ?? ""}</td>
+                            <td>{formatCurrency(row.openingPolicyValue)}</td>
+                            <td>{formatCurrency(row.annualPremium)}</td>
+                            <td>{formatCurrency(row.cumulativePremium)}</td>
+                            <td>{formatCurrency(row.premiumLoad)}</td>
+                            <td>{formatCurrency(row.coiCharge)}</td>
+                            <td>{formatCurrency(row.policyFee)}</td>
+                            <td>{formatCurrency(row.guaranteedInterest)}</td>
+                            <td>{formatCurrency(row.endingPolicyValue ?? row.policyValue)}</td>
+                            <td>{formatCurrency(row.surrenderCharge)}</td>
+                            <td>{formatCurrency(row.surrenderValue)}</td>
+                            <td>{formatCurrency(row.deathBenefit)}</td>
+                            <td>{formatCurrency(row.netAmountAtRisk)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </details>
               </>
             )}
           </>
