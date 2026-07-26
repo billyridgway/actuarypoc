@@ -38,7 +38,10 @@ def test_promise_ul_workspace_snapshot_builds_without_review_storage(monkeypatch
 
 def test_workspace_evidence_replaces_generic_citation(monkeypatch) -> None:
     snapshot = server.build_product_workspace_snapshot("ICC18 P18PR UL")
-    documents = [{"description": "Promise UL Actuarial Memo.pdf", "object_path": "workspace/memo.pdf"}]
+    documents = [
+        {"description": "Promise UL Actuarial Memo.pdf", "object_path": "workspace/memo.pdf"},
+        {"description": "ICC18 P18PRUL.pdf", "object_path": "workspace/policy.pdf"},
+    ]
     corpus = [
         {
             "filename": "Promise UL Actuarial Memo.pdf",
@@ -48,7 +51,15 @@ def test_workspace_evidence_replaces_generic_citation(monkeypatch) -> None:
                 "Annual Interest Rate shown in the Policy Specification which is currently "
                 "set at 2%. Policy credits interest at least at the guaranteed minimum rate."
             ],
-        }
+        },
+        {
+            "filename": "ICC18 P18PRUL.pdf",
+            "objectPath": "workspace/policy.pdf",
+            "pages": [
+                "ICC18 P18PRULAPPLICANT. Issue ages 18 through 80. "
+                "Underwriting classes: Preferred Plus, Standard, Tobacco."
+            ],
+        },
     ]
     monkeypatch.setattr(server, "_extract_workspace_documents", lambda docs: (documents, corpus))
 
@@ -56,10 +67,22 @@ def test_workspace_evidence_replaces_generic_citation(monkeypatch) -> None:
 
     facts = {fact["label"]: fact for fact in result["extractedFacts"]}
     assert facts["Product name"]["provenanceKind"] == "workspace_document"
+    assert facts["Form numbers"]["value"] == ["ICC18 P18PRUL"]
+    assert facts["Issue age range"]["value"] == "18-80"
+    assert facts["Risk classes"]["value"] == ["Preferred Plus", "Standard", "Tobacco"]
+    assert result["formClassifications"]["primary"] == ["ICC18 P18PRUL"]
+    assert "ICC18 P18PRULAPPLICANT" not in result["formClassifications"]["referenced"]
     credited = result["complianceMatrix"]["requirements"][0]
     source = credited["evidence"][0]["sources"][0]
     assert source["document"] == "Promise UL Actuarial Memo.pdf"
     assert source["page"] == "1"
+
+    server._reconcile_workspace_readiness(result)
+    capabilities = server._build_capability_assessment(result)
+    statuses = {item["sourceRequirementId"]: item["status"] for item in capabilities["items"]}
+    assert statuses["coi_table"] == "unsupported"
+    assert statuses["surrender_schedule"] == "partial"
+    assert statuses["policy_admin_fees"] == "partial"
 
 
 def test_workspace_readiness_counts_missing_requirements() -> None:
@@ -72,6 +95,12 @@ def test_workspace_readiness_counts_missing_requirements() -> None:
             ]
         },
         "readinessDashboard": {},
+        "pmrReadiness": {
+            "messages": [
+                "No review exists.",
+                "Compliance summary: implemented=2, partial=2, missing=0, overall status=yellow.",
+            ]
+        },
     }
 
     server._reconcile_workspace_readiness(snapshot)
@@ -83,3 +112,7 @@ def test_workspace_readiness_counts_missing_requirements() -> None:
         "overallStatus": "yellow",
     }
     assert snapshot["readinessDashboard"]["projectionTrustLevel"] == "exploration_only"
+    assert snapshot["pmrReadiness"]["complianceSummary"]["missing"] == 1
+    assert snapshot["pmrReadiness"]["messages"][-1] == (
+        "Compliance summary: implemented=1, partial=1, missing=1, overall status=yellow."
+    )

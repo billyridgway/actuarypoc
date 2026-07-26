@@ -38,6 +38,12 @@ interface WorkspacePayload {
     productCode?: string | null;
     productType?: string | null;
     formNumbers?: string[] | null;
+    formClassifications?: {
+      primary?: string[];
+      riders?: string[];
+      supplements?: string[];
+      referenced?: string[];
+    };
     issueAgeRange?: string | null;
     riskClasses?: string[] | null;
     documentsReviewed?: number;
@@ -411,9 +417,7 @@ export const ProductWorkspacePage: React.FC<{
   const capabilityItems =
     capabilityAssessment && Array.isArray(capabilityAssessment.items) ? capabilityAssessment.items : [];
 
-  const capabilityHasUnsupportedItems =
-    capabilityItems && capabilityItems.length > 0 &&
-    capabilityItems.some((item) => (item.status || "unsupported").toLowerCase() !== "supported");
+  const capabilityHasItems = capabilityItems.length > 0;
 
   const featureRequestForCapability = (capabilityId: string): FeatureRequest | undefined => {
     if (!featureRequests || !Array.isArray(featureRequests)) return undefined;
@@ -629,9 +633,9 @@ export const ProductWorkspacePage: React.FC<{
       </section>
 
       <section className="card home-card">
-        <h2>Product Understanding (AI-generated draft)</h2>
+        <h2>Product Understanding (system-generated draft)</h2>
         <p>
-          <span className="tag">AI-generated draft</span>{" "}
+          <span className="tag">Deterministic extraction</span>{" "}
           <span className="tag">Needs actuarial review</span>
         </p>
         <p className="muted">
@@ -654,12 +658,24 @@ export const ProductWorkspacePage: React.FC<{
                 <td>{productUnderstanding.productType || "Not available in current analysis"}</td>
               </tr>
               <tr>
-                <th>Form Numbers</th>
+                <th>Uploaded Forms</th>
                 <td>
                   {productUnderstanding.formNumbers && productUnderstanding.formNumbers.length > 0
                     ? productUnderstanding.formNumbers.join(", ")
                     : "Not available in current analysis"}
                 </td>
+              </tr>
+              <tr>
+                <th>Primary Forms</th>
+                <td>{productUnderstanding.formClassifications?.primary?.join(", ") || "Not identified"}</td>
+              </tr>
+              <tr>
+                <th>Riders</th>
+                <td>{productUnderstanding.formClassifications?.riders?.join(", ") || "Not identified"}</td>
+              </tr>
+              <tr>
+                <th>Supplements / Endorsements</th>
+                <td>{productUnderstanding.formClassifications?.supplements?.join(", ") || "Not identified"}</td>
               </tr>
               <tr>
                 <th>Issue Age Range</th>
@@ -727,16 +743,19 @@ export const ProductWorkspacePage: React.FC<{
       </section>
 
       <section className="card home-card">
-        <h2>Extracted Facts (AI-generated draft)</h2>
+        <h2>Extracted Facts</h2>
         <p>
-          <span className="tag">AI-generated draft</span>{" "}
+          <span className="tag">Extracted or inferred</span>{" "}
           <span className="tag">Needs actuarial review</span>
         </p>
         <p className="muted">
-          Key product facts the system believes it has extracted from existing metadata and the current workspace
-          snapshot. These are AI-generated drafts and need actuarial review.
+          Deterministic facts from uploaded documents and the current workspace snapshot. Each row distinguishes
+          extracted evidence from inference or unresolved data.
         </p>
         {extractedFacts && extractedFacts.length > 0 ? (
+          <details>
+            <summary>{extractedFacts.length} extracted, inferred, and unresolved facts</summary>
+            <div className="table-scroll">
           <table className="kv-table">
             <thead>
               <tr>
@@ -765,6 +784,8 @@ export const ProductWorkspacePage: React.FC<{
               ))}
             </tbody>
           </table>
+            </div>
+          </details>
         ) : (
           <p className="muted">
             {loading
@@ -774,7 +795,7 @@ export const ProductWorkspacePage: React.FC<{
         )}
       </section>
 
-      <section className="card home-card">
+      {showAdvancedDebug && <section className="card home-card">
         <h2>Product summary</h2>
         {product ? (
           <table className="kv-table">
@@ -808,7 +829,7 @@ export const ProductWorkspacePage: React.FC<{
         ) : (
           <p className="muted">{loading ? "Loading product summary…" : "No Product Review metadata found yet."}</p>
         )}
-      </section>
+      </section>}
 
       {showAdvancedDebug && (
       <section className="card home-card">
@@ -953,16 +974,19 @@ export const ProductWorkspacePage: React.FC<{
       </section>
 
       <section className="card home-card">
-        <h2>Candidate Requirements (AI-generated)</h2>
+        <h2>Candidate Requirements (rules-based)</h2>
         <p>
-          <span className="tag">AI-generated draft</span>{" "}
+          <span className="tag">Deterministic candidate</span>{" "}
           <span className="tag">Needs actuarial review</span>
         </p>
         <p className="muted">
-          Draft filing and implementation requirements inferred from the current compliance matrix and evidence. These
-          are AI-generated candidates and must be reviewed and, if appropriate, translated into formal requirements.
+          Predefined implementation requirements checked against workspace evidence. These are confirmations and
+          probable matches, not independently discovered filing requirements.
         </p>
         {requirementsCandidates && requirementsCandidates.length > 0 ? (
+          <details>
+            <summary>{requirementsCandidates.length} requirement candidates</summary>
+            <div className="table-scroll">
           <table className="kv-table">
             <thead>
               <tr>
@@ -980,13 +1004,17 @@ export const ProductWorkspacePage: React.FC<{
                   <td>{r.sourceReference || "(not recorded)"}</td>
                   <td>
                     {typeof r.confidence === "number"
-                      ? `${(r.confidence * 100).toFixed(0)}%`
+                      ? `${(r.confidence * 100).toFixed(0)}%${
+                          r.confidence < 0.99 ? " (probable match)" : ""
+                        }`
                       : "Unknown"}
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
+            </div>
+          </details>
         ) : (
           <p className="muted">
             {loading
@@ -997,13 +1025,12 @@ export const ProductWorkspacePage: React.FC<{
       </section>
 
       <section className="card home-card">
-        <h2>Unsupported Platform Features</h2>
+        <h2>Platform Capability Alignment</h2>
         <p className="muted">
-          Deterministic detection of potential unsupported platform features based on candidate requirements and
-          existing evidence. This indicates where the filing appears to require functionality that the current
-          platform does not explicitly support.
+          One consistent view of supported, partial, and unsupported mechanics based on workspace requirements,
+          evidence, and the current projection implementation.
         </p>
-        {capabilityHasUnsupportedItems ? (
+        {capabilityHasItems ? (
           <>
             {capabilityAssessment?.summary && (
               <p className="muted">
@@ -1066,7 +1093,7 @@ export const ProductWorkspacePage: React.FC<{
           <p className="muted">
             {loading
               ? "Loading capability assessment…"
-              : "No unsupported platform features were deterministically detected from the current candidate requirements."}
+              : "No platform capability assessment is available for this workspace."}
           </p>
         )}
       </section>

@@ -336,13 +336,27 @@ def _apply_workspace_document_evidence(
         searchable_parts.append(str(doc.get("filename") or ""))
         searchable_parts.extend(str(page) for page in doc.get("pages") or [])
     searchable = "\n".join(searchable_parts)
-    searchable_upper = searchable.upper()
-    form_numbers = sorted(
+    form_pattern = re.compile(r"\bICC\d{2}\s+[APRS]\d{2}[A-Z]{2,6}(?=[^A-Z0-9]|$)")
+
+    uploaded_forms: set[str] = set()
+    for doc in corpus:
+        filename = str(doc.get("filename") or "").upper()
+        uploaded_forms.update(re.sub(r"\s+", " ", value).strip() for value in form_pattern.findall(filename))
+
+    referenced_forms = sorted(
         {
-            re.sub(r"\s+", " ", match).strip()
-            for match in re.findall(r"\bICC\d{2}\s+[A-Z]\d{2}[A-Z0-9]+\b", searchable_upper)
+            re.sub(r"\s+", " ", value).strip()
+            for value in form_pattern.findall(searchable.upper())
         }
+        - uploaded_forms
     )
+    form_classifications = {
+        "primary": sorted(value for value in uploaded_forms if re.search(r"\sP\d{2}", value)),
+        "riders": sorted(value for value in uploaded_forms if re.search(r"\sR\d{2}", value)),
+        "supplements": sorted(value for value in uploaded_forms if re.search(r"\s[AS]\d{2}", value)),
+        "referenced": referenced_forms,
+    }
+    form_numbers = sorted(uploaded_forms)
     identity_document = next(
         (
             str(doc.get("filename"))
@@ -375,7 +389,63 @@ def _apply_workspace_document_evidence(
         _replace_fact("Product code", "ICC18 P18PR UL", identity_document, 0.95)
         _replace_fact("Product type", "UL", identity_document, 0.95)
     if form_numbers:
-        _replace_fact("Form numbers", form_numbers, "Uploaded filing filenames and text", 0.9)
+        _replace_fact("Form numbers", form_numbers, "Uploaded filing filenames", 1.0)
+
+    issue_age_match: Optional[Tuple[str, str, int]] = None
+    risk_match: Optional[Tuple[List[str], str, int]] = None
+    risk_labels = [
+        "Preferred Plus",
+        "Standard Plus",
+        "Preferred",
+        "Standard",
+        "Substandard",
+        "Non-Tobacco",
+        "Tobacco",
+        "Non-Nicotine",
+        "Nicotine",
+    ]
+    for doc in corpus:
+        for page_number, page_text in enumerate(doc.get("pages") or [], start=1):
+            if issue_age_match is None:
+                age = re.search(
+                    r"issue ages?\D{0,40}(\d{1,2})\s*(?:-|through|to)\s*(\d{1,2})",
+                    page_text,
+                    flags=re.IGNORECASE,
+                )
+                if age and int(age.group(1)) <= int(age.group(2)) <= 100:
+                    issue_age_match = (
+                        f"{int(age.group(1))}-{int(age.group(2))}",
+                        str(doc["filename"]),
+                        page_number,
+                    )
+            if risk_match is None:
+                risk_context = re.search(
+                    r"(?:risk|underwriting)\s+class(?:es)?(.{0,500})",
+                    page_text,
+                    flags=re.IGNORECASE | re.DOTALL,
+                )
+                if risk_context:
+                    found = [
+                        label
+                        for label in risk_labels
+                        if re.search(
+                            rf"\b{re.escape(label)}\b"
+                            + (r"(?!\s+Plus)" if label in {"Preferred", "Standard"} else ""),
+                            risk_context.group(1),
+                            re.IGNORECASE,
+                        )
+                    ]
+                    if found:
+                        risk_match = (found, str(doc["filename"]), page_number)
+
+    if issue_age_match:
+        value, filename, page_number = issue_age_match
+        _replace_fact("Issue age range", value, f"{filename} p. {page_number}", 0.9)
+    if risk_match:
+        values, filename, page_number = risk_match
+        _replace_fact("Risk classes", values, f"{filename} p. {page_number}", 0.85)
+
+    snapshot["formClassifications"] = form_classifications
     snapshot["extractedFacts"] = facts
 
     requirements = (snapshot.get("complianceMatrix") or {}).get("requirements") or []
@@ -426,6 +496,19 @@ def _reconcile_workspace_readiness(snapshot: Dict[str, Any]) -> None:
         "exploration_only" if high_missing or counts["missing"] else
         "draft_illustration" if counts["partial"] else "filed_rate_ready"
     )
+    pmr = snapshot.setdefault("pmrReadiness", {})
+    pmr["complianceSummary"] = summary
+    messages = [
+        message
+        for message in pmr.get("messages") or []
+        if not str(message).lower().startswith("compliance summary:")
+    ]
+    messages.append(
+        "Compliance summary: "
+        f"implemented={counts['implemented']}, partial={counts['partial']}, "
+        f"missing={counts['missing']}, overall status={overall}."
+    )
+    pmr["messages"] = messages
 
 
 def _build_ul_projection_view(
@@ -769,8 +852,8 @@ def _build_requirements_candidates(snapshot: Optional[Dict[str, Any]]) -> List[D
     """Derive candidate requirements from the compliance matrix.
 
     This reuses the existing ``complianceMatrix.requirements`` section
-    and reformats each requirement as an AI-generated *candidate* that
-    requires actuarial review. No new LLM calls are introduced here.
+    and reformats each requirement as a deterministic candidate that
+    requires actuarial review. No LLM calls are introduced here.
     """
 
     out: List[Dict[str, Any]] = []
@@ -819,7 +902,13 @@ def _build_requirements_candidates(snapshot: Optional[Dict[str, Any]]) -> List[D
                 "sourceReference": source_reference,
                 "confidence": confidence,
                 "status": "candidate",
-                "aiGenerated": True,
+                "aiGenerated": False,
+                "generationMethod": "deterministic_requirement_check",
+                "matchQuality": (
+                    "exact" if isinstance(confidence, (int, float)) and confidence >= 0.99
+                    else "probable" if isinstance(confidence, (int, float))
+                    else "unverified"
+                ),
             }
         )
 
@@ -903,6 +992,7 @@ def _build_product_understanding(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         "productCode": product_code,
         "productType": product_type,
         "formNumbers": form_numbers,
+        "formClassifications": snapshot.get("formClassifications") or {},
         "issueAgeRange": issue_age_range,
         "riskClasses": risk_classes,
         "documentsReviewed": documents_reviewed,
@@ -1181,6 +1271,86 @@ def _build_capability_assessment(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     # 1) UL-specific assessment based on the product model.
     ul_assessment = _build_ul_capability_assessment(snapshot)
     if ul_assessment is not None:
+        requirements = {
+            str(req.get("id")): req
+            for req in ((snapshot.get("complianceMatrix") or {}).get("requirements") or [])
+            if isinstance(req, dict) and req.get("id")
+        }
+        canonical_capabilities = {
+            "coi_table": {
+                "capabilityId": "UL_CAP_COI_TABLE_AGE_GENDER_CLASS",
+                "name": "COI rate tables",
+                "nonImplementedStatus": "unsupported",
+                "reason": (
+                    "The current engine uses a flat placeholder COI rate and does not "
+                    "implement the filed age/gender/class tables."
+                ),
+            },
+            "surrender_schedule": {
+                "capabilityId": "UL_CAP_SURRENDER_FIXED_SCHEDULE",
+                "name": "Surrender charge schedule",
+                "nonImplementedStatus": "partial",
+                "reason": (
+                    "The current engine uses a simplified declining surrender pattern "
+                    "instead of the complete filed schedule."
+                ),
+            },
+            "policy_admin_fees": {
+                "capabilityId": "UL_CAP_LEVEL_POLICY_FEE",
+                "name": "Policy / admin fees",
+                "nonImplementedStatus": "partial",
+                "reason": (
+                    "The engine supports a level policy fee, but no evidenced fee schedule "
+                    "is loaded; the current projection applies a $0 fee."
+                ),
+            },
+        }
+        by_capability = {
+            str(item.get("capabilityId")): item
+            for item in ul_assessment.get("items") or []
+            if isinstance(item, dict)
+        }
+        product_code = ((snapshot.get("product") or {}).get("code") or None)
+        for requirement_id, definition in canonical_capabilities.items():
+            requirement = requirements.get(requirement_id) or {}
+            requirement_status = str(requirement.get("status") or "missing").lower()
+            capability_status = (
+                "supported"
+                if requirement_status == "implemented"
+                else str(definition["nonImplementedStatus"])
+            )
+            source = None
+            evidence = requirement.get("evidence") or []
+            if evidence and isinstance(evidence[0], dict):
+                sources = evidence[0].get("sources") or []
+                if sources and isinstance(sources[0], dict):
+                    source = sources[0]
+            by_capability[str(definition["capabilityId"])] = {
+                "capabilityId": definition["capabilityId"],
+                "name": definition["name"],
+                "status": capability_status,
+                "impact": requirement.get("impact") or "medium",
+                "reason": (
+                    "Workspace evidence and implementation are aligned."
+                    if capability_status == "supported"
+                    else definition["reason"]
+                ),
+                "productCode": product_code,
+                "sourceRequirementId": requirement_id,
+                "sourceRequirementText": requirement.get("filedRequirement"),
+                "sourceDocument": source.get("document") if source else None,
+                "sourceReference": source.get("page") if source else None,
+                "recommendedAction": (
+                    None if capability_status == "supported" else "Create feature request"
+                ),
+            }
+        items = list(by_capability.values())
+        ul_assessment["items"] = items
+        ul_assessment["summary"] = {
+            "supported": sum(1 for item in items if item.get("status") == "supported"),
+            "partial": sum(1 for item in items if item.get("status") == "partial"),
+            "unsupported": sum(1 for item in items if item.get("status") == "unsupported"),
+        }
         return ul_assessment
 
     # 2) Fallback: existing keyword-based heuristic for non-UL products
