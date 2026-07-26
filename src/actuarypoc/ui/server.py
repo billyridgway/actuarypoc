@@ -5108,8 +5108,9 @@ def _get_illustration_provider(product_code: str) -> Optional[ProductIllustratio
 def _get_product_type(product_code: str) -> str:
     """Best-effort lookup of a product's type from Product Review metadata.
 
-    This is advisory only; when unavailable we return an empty string and
-    fall back to default illustration routing.
+    Product Review metadata remains the preferred source. The canonical
+    Promise UL code also has a deterministic fallback so workspace analysis
+    does not depend on the optional legacy Postgres review store.
     """
 
     code_norm = (product_code or "").strip().upper()
@@ -5119,15 +5120,19 @@ def _get_product_type(product_code: str) -> str:
     try:
         rec = get_product_review(code_norm)
     except Exception:
-        return ""
-    if not isinstance(rec, dict):
-        return ""
+        rec = None
 
-    meta = rec.get("metadata") or {}
-    if not isinstance(meta, dict):
-        meta = {}
-    product_type = meta.get("type") or meta.get("productType") or ""
-    return str(product_type or "")
+    if isinstance(rec, dict):
+        meta = rec.get("metadata") or {}
+        if isinstance(meta, dict):
+            product_type = meta.get("type") or meta.get("productType") or ""
+            if product_type:
+                return str(product_type)
+
+    if _normalise_promise_ul_code(code_norm) == "ICC18 P18PR UL":
+        return "UL"
+
+    return ""
 
 
 def _is_ul_product_type(product_type: str) -> bool:
