@@ -34,6 +34,21 @@ def test_promise_ul_workspace_snapshot_builds_without_review_storage(monkeypatch
     assert snapshot["product"]["code"] == "ICC18 P18PR UL"
     assert snapshot["productModel"]["type"] == "ul"
     assert snapshot["illustration"] is not None
+    assert len(snapshot["illustration"]["rows"]) == 30
+    assert snapshot["illustration"]["modelStatus"] == "diagnostic"
+    assert {item["id"] for item in snapshot["illustration"]["inputs"]} >= {
+        "issue_age",
+        "face_amount",
+        "premium",
+        "coi_rate",
+        "policy_fee",
+        "surrender_schedule",
+    }
+    first_row = snapshot["illustration"]["rows"][0]
+    assert first_row["openingPolicyValue"] == 0.0
+    assert "coiCharge" in first_row
+    assert "policyFee" in first_row
+    assert "endingPolicyValue" in first_row
 
 
 def test_workspace_evidence_replaces_generic_citation(monkeypatch) -> None:
@@ -116,3 +131,24 @@ def test_workspace_readiness_counts_missing_requirements() -> None:
     assert snapshot["pmrReadiness"]["messages"][-1] == (
         "Compliance summary: implemented=1, partial=1, missing=1, overall status=yellow."
     )
+
+
+def test_diagnostic_projection_preserves_full_user_scenario() -> None:
+    projection, _, _, _, _ = server._build_ul_projection_view(
+        "ICC18 P18PR UL",
+        {
+            "age": 50,
+            "faceAmount": 200_000,
+            "premiumMode": "MONTHLY",
+            "modalPremium": 500,
+        },
+    )
+
+    assert projection is not None
+    assert len(projection["rows"]) == 30
+    assert projection["rows"][0]["attainedAge"] == 50
+    assert projection["rows"][0]["annualPremium"] == 6_000
+    inputs = {item["id"]: item for item in projection["inputs"]}
+    assert inputs["issue_age"]["status"] == "user_entered"
+    assert inputs["face_amount"]["value"] == 200_000
+    assert inputs["premium"]["source"] == "Annualized from user-entered modal premium"

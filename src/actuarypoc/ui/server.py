@@ -513,7 +513,7 @@ def _reconcile_workspace_readiness(snapshot: Dict[str, Any]) -> None:
 
 def _build_ul_projection_view(
     product_code: str,
-    *_: Any,
+    request: Optional[Dict[str, Any]] = None,
 ) -> Tuple[
     Optional[Dict[str, Any]],
     Optional[Dict[str, Any]],
@@ -533,7 +533,7 @@ def _build_ul_projection_view(
     provider = _get_illustration_provider(product_code)
     if provider is not None:
         try:
-            illustration = provider(product_code, {})
+            illustration = provider(product_code, request or {})
         except Exception:
             illustration = None
 
@@ -561,8 +561,11 @@ def _build_ul_projection_view(
 
         projection_snapshot = {
             "request": illustration.get("request") or {},
+            "inputs": illustration.get("projectionInputs") or [],
             "metrics": metrics,
+            "rows": rows,
             "sampleRows": sample_rows,
+            "modelStatus": "diagnostic",
         }
 
         me = illustration.get("mechanicsExplanation")
@@ -1727,6 +1730,49 @@ def api_workspace_analyze(workspace_id: str) -> Dict[str, Any]:
     return {
         "workspace": _workspace_to_api(updated),
         "snapshot": snapshot,
+    }
+
+
+class WorkspaceProjectionRequest(BaseModel):  # type: ignore[misc]
+    issueAge: int = 45
+    faceAmount: float = 100_000.0
+    premiumMode: str = "ANNUAL"
+    modalPremium: Optional[float] = None
+
+
+@app.post("/api/workspaces/{workspace_id}/projection")
+def api_workspace_projection(
+    workspace_id: str, payload: WorkspaceProjectionRequest
+) -> Dict[str, Any]:
+    """Run a non-persisted diagnostic scenario for an analyzed UL workspace."""
+
+    ws = get_workspace(workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    product_code = str(ws.get("inferred_product_code") or "ICC18 P18PR UL")
+    product_type = str(ws.get("inferred_product_type") or "UL")
+    if not _is_ul_product_type(product_type):
+        raise HTTPException(status_code=400, detail="Diagnostic projection is available only for UL workspaces")
+    if payload.issueAge < 0 or payload.issueAge > 120:
+        raise HTTPException(status_code=400, detail="Issue age must be between 0 and 120")
+    if payload.faceAmount <= 0:
+        raise HTTPException(status_code=400, detail="Face amount must be greater than zero")
+    if payload.modalPremium is not None and payload.modalPremium <= 0:
+        raise HTTPException(status_code=400, detail="Modal premium must be greater than zero")
+
+    request = {
+        "age": payload.issueAge,
+        "faceAmount": payload.faceAmount,
+        "premiumMode": payload.premiumMode,
+        "modalPremium": payload.modalPremium,
+    }
+    projection, mechanics, warnings, notes, gaps = _build_ul_projection_view(product_code, request)
+    if projection is None:
+        raise HTTPException(status_code=503, detail="Diagnostic projection is not available")
+    return {
+        "illustration": projection,
+        "mechanicsExplanation": mechanics,
+        "gaps": {"items": gaps, "warnings": warnings, "notes": notes},
     }
 
 
@@ -9441,6 +9487,7 @@ def _run_ul_projection(
 
     for year in range(1, horizon_years + 1):
         attained_age = age_norm + year - 1
+        opening_policy_value = policy_value
 
         # Level premium each projection year. The internal accumulation
         # uses the *annual* premium so that IRR-style metrics line up
@@ -9491,9 +9538,13 @@ def _run_ul_projection(
                 # annualised projection.
                 "premium": premium_annual,
                 "cumulativePremium": cumulative_premium,
+                "openingPolicyValue": opening_policy_value,
+                "premiumLoad": 0.0,
                 "guaranteedInterest": guaranteed_interest,
                 "coiCharge": coi_charge,
+                "policyFee": config.policy_fee_annual,
                 "policyValue": policy_value,
+                "endingPolicyValue": policy_value,
                 "cashValue": cash_value,
                 "surrenderCharge": surrender_charge,
                 "surrenderValue": surrender_value,
@@ -9616,12 +9667,123 @@ def build_ul_illustration_for_product(product_code: str, request: Dict[str, Any]
         "This is not yet backed by an approved executable DSL/projection model.",
     ]
 
+    first_row = (projection.get("rows") or [{}])[0]
+
+    def _provenance_source(*needles: str) -> Optional[str]:
+        for item in cfg.assumption_provenance or []:
+            if not isinstance(item, dict):
+                continue
+            searchable = " ".join(
+                str(item.get(key) or "") for key in ("name", "field", "id", "source")
+            ).lower()
+            if any(needle.lower() in searchable for needle in needles):
+                return str(item.get("source") or item.get("name") or "Runtime assumption")
+        return None
+
+    projection_inputs = [
+        {
+            "id": "issue_age",
+            "label": "Issue age",
+            "value": normalised_request.get("age"),
+            "status": "user_entered" if request.get("age") is not None else "default",
+            "source": "User-entered scenario" if request.get("age") is not None else "Diagnostic scenario default",
+        },
+        {
+            "id": "sex",
+            "label": "Sex",
+            "value": None,
+            "status": "not_modeled",
+            "source": "Current draft engine is not sex-distinct",
+        },
+        {
+            "id": "risk_class",
+            "label": "Risk class",
+            "value": None,
+            "status": "not_modeled",
+            "source": "Current draft engine is not risk-class-distinct",
+        },
+        {
+            "id": "face_amount",
+            "label": "Face amount",
+            "value": normalised_request.get("faceAmount"),
+            "unit": "USD",
+            "status": "user_entered" if request.get("faceAmount") is not None else "default",
+            "source": "User-entered scenario" if request.get("faceAmount") is not None else "Diagnostic scenario default",
+        },
+        {
+            "id": "premium",
+            "label": "Annual premium",
+            "value": first_row.get("annualPremium"),
+            "unit": "USD",
+            "status": "user_entered" if request.get("modalPremium") is not None else "derived_placeholder",
+            "source": (
+                "Annualized from user-entered modal premium"
+                if request.get("modalPremium") is not None
+                else "3% of face amount when no scenario premium is supplied"
+            ),
+        },
+        {
+            "id": "premium_mode",
+            "label": "Premium mode",
+            "value": normalised_request.get("premiumMode"),
+            "status": "user_entered" if request.get("premiumMode") is not None else "default",
+            "source": "User-entered scenario" if request.get("premiumMode") is not None else "Diagnostic scenario default",
+        },
+        {
+            "id": "death_benefit_option",
+            "label": "Death benefit option",
+            "value": getattr(cfg.death_benefit, "option_type", None) or "level",
+            "status": "configured",
+            "source": _provenance_source("death benefit") or "UL runtime configuration",
+        },
+        {
+            "id": "guaranteed_rate",
+            "label": "Guaranteed credited rate",
+            "value": cfg.guaranteed_rate,
+            "unit": "rate",
+            "status": "evidenced",
+            "source": _provenance_source("guaranteed", "credit") or "UL runtime configuration",
+        },
+        {
+            "id": "coi_rate",
+            "label": "COI rate",
+            "value": cfg.coi_rate_flat,
+            "unit": "rate",
+            "status": "placeholder",
+            "source": "Flat rate applied to face amount; filed COI table not loaded",
+        },
+        {
+            "id": "policy_fee",
+            "label": "Annual policy/admin fee",
+            "value": cfg.policy_fee_annual,
+            "unit": "USD",
+            "status": "missing",
+            "source": "No evidenced fee schedule; current configured amount is $0",
+        },
+        {
+            "id": "surrender_schedule",
+            "label": "Surrender charge schedule",
+            "value": f"{cfg.max_surrender_pct:.2%} of face declining over {cfg.surrender_period_years} years",
+            "status": "placeholder",
+            "source": "Simplified runtime schedule; filed schedule not loaded",
+        },
+        {
+            "id": "projection_horizon",
+            "label": "Projection horizon",
+            "value": horizon_years,
+            "unit": "years",
+            "status": "configured",
+            "source": "Workspace diagnostic configuration",
+        },
+    ]
+
     return {
         "productCode": code_norm,
         "productName": "Promise UL",
         "request": normalised_request,
         "templateScenarioId": None,
         "projection": projection,
+        "projectionInputs": projection_inputs,
         "mechanicsExplanation": mechanics_explanation,
         "projectionAssumptions": cfg.assumption_provenance or [],
         "warnings": warnings,
