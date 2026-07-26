@@ -420,9 +420,9 @@ def _apply_workspace_document_evidence(
                     )
             if risk_match is None:
                 risk_context = re.search(
-                    r"(?:risk|underwriting)\s+class(?:es)?(.{0,500})",
+                    r"(?:risk|underwriting)\s+class(?:es)?\s*[:\-]\s*([^\n\r]{0,300})",
                     page_text,
-                    flags=re.IGNORECASE | re.DOTALL,
+                    flags=re.IGNORECASE,
                 )
                 if risk_context:
                     found = [
@@ -435,7 +435,11 @@ def _apply_workspace_document_evidence(
                             re.IGNORECASE,
                         )
                     ]
-                    if found:
+                    # A single mention such as "substandard class" in
+                    # narrative filing text is not a class inventory.
+                    # Require an explicit labeled list with at least two
+                    # distinct values before promoting it to a product fact.
+                    if len(set(found)) >= 2:
                         risk_match = (found, str(doc["filename"]), page_number)
 
     if issue_age_match:
@@ -997,7 +1001,9 @@ def _build_product_understanding(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         "formNumbers": form_numbers,
         "formClassifications": snapshot.get("formClassifications") or {},
         "issueAgeRange": issue_age_range,
+        "issueAgeSource": f_issue_age.get("source"),
         "riskClasses": risk_classes,
+        "riskClassesSource": f_risk_classes.get("source"),
         "documentsReviewed": documents_reviewed,
         "requirementsIdentified": requirements_identified,
         "confidence": confidence,
@@ -9682,6 +9688,13 @@ def build_ul_illustration_for_product(product_code: str, request: Dict[str, Any]
 
     projection_inputs = [
         {
+            "id": "scenario_basis",
+            "label": "Projection basis",
+            "value": "Guaranteed/default diagnostic scenario",
+            "status": "diagnostic",
+            "source": "Guaranteed credited rate with provisional charges; no current-scale scenario is modeled",
+        },
+        {
             "id": "issue_age",
             "label": "Issue age",
             "value": normalised_request.get("age"),
@@ -9774,6 +9787,20 @@ def build_ul_illustration_for_product(product_code: str, request: Dict[str, Any]
             "unit": "years",
             "status": "configured",
             "source": "Workspace diagnostic configuration",
+        },
+        {
+            "id": "premium_timing",
+            "label": "Premium timing",
+            "value": "Beginning of policy year",
+            "status": "configured",
+            "source": "The full annual premium is included in the balance receiving that year's credited interest",
+        },
+        {
+            "id": "charge_timing",
+            "label": "Charge timing",
+            "value": "End of policy year",
+            "status": "configured",
+            "source": "COI and policy fees are deducted after interest and do not reduce that year's interest-crediting base",
         },
     ]
 

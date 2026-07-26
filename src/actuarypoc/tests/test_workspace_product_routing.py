@@ -84,7 +84,9 @@ def test_workspace_evidence_replaces_generic_citation(monkeypatch) -> None:
     assert facts["Product name"]["provenanceKind"] == "workspace_document"
     assert facts["Form numbers"]["value"] == ["ICC18 P18PRUL"]
     assert facts["Issue age range"]["value"] == "18-80"
+    assert facts["Issue age range"]["source"] == "ICC18 P18PRUL.pdf p. 1"
     assert facts["Risk classes"]["value"] == ["Preferred Plus", "Standard", "Tobacco"]
+    assert facts["Risk classes"]["source"] == "ICC18 P18PRUL.pdf p. 1"
     assert result["formClassifications"]["primary"] == ["ICC18 P18PRUL"]
     assert "ICC18 P18PRULAPPLICANT" not in result["formClassifications"]["referenced"]
     credited = result["complianceMatrix"]["requirements"][0]
@@ -98,6 +100,25 @@ def test_workspace_evidence_replaces_generic_citation(monkeypatch) -> None:
     assert statuses["coi_table"] == "unsupported"
     assert statuses["surrender_schedule"] == "partial"
     assert statuses["policy_admin_fees"] == "partial"
+
+
+def test_workspace_evidence_ignores_narrative_risk_class_mention(monkeypatch) -> None:
+    snapshot = server.build_product_workspace_snapshot("ICC18 P18PR UL")
+    documents = [{"description": "Policy.pdf", "object_path": "workspace/policy.pdf"}]
+    corpus = [
+        {
+            "filename": "Policy.pdf",
+            "objectPath": "workspace/policy.pdf",
+            "pages": ["A policy may be rated substandard based on individual underwriting considerations."],
+        }
+    ]
+    monkeypatch.setattr(server, "_extract_workspace_documents", lambda docs: (documents, corpus))
+
+    result = server._apply_workspace_document_evidence(snapshot, documents)
+
+    facts = {fact["label"]: fact for fact in result["extractedFacts"]}
+    assert facts["Risk classes"]["value"] is None
+    assert facts["Risk classes"]["provenanceKind"] == "unresolved"
 
 
 def test_workspace_readiness_counts_missing_requirements() -> None:
@@ -152,3 +173,6 @@ def test_diagnostic_projection_preserves_full_user_scenario() -> None:
     assert inputs["issue_age"]["status"] == "user_entered"
     assert inputs["face_amount"]["value"] == 200_000
     assert inputs["premium"]["source"] == "Annualized from user-entered modal premium"
+    assert inputs["scenario_basis"]["value"] == "Guaranteed/default diagnostic scenario"
+    assert inputs["premium_timing"]["value"] == "Beginning of policy year"
+    assert inputs["charge_timing"]["value"] == "End of policy year"

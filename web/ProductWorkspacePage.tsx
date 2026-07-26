@@ -49,7 +49,9 @@ interface WorkspacePayload {
       referenced?: string[];
     };
     issueAgeRange?: string | null;
+    issueAgeSource?: string | null;
     riskClasses?: string[] | null;
+    riskClassesSource?: string | null;
     documentsReviewed?: number;
     requirementsIdentified?: number;
     confidence?: string | null;
@@ -272,8 +274,16 @@ const ProjectionChart: React.FC<{ rows: WorkspaceRow[] }> = ({ rows }) => {
     { key: "surrenderValue", label: "Surrender value", color: "#059669" },
     { key: "deathBenefit", label: "Death benefit", color: "#dc2626" },
   ] as const;
+  type SeriesKey = (typeof series)[number]["key"];
+  const [visible, setVisible] = React.useState<Record<SeriesKey, boolean>>({
+    cumulativePremium: true,
+    cashValue: true,
+    surrenderValue: true,
+    deathBenefit: false,
+  });
+  const visibleSeries = series.filter((item) => visible[item.key]);
   const values = rows.flatMap((row) =>
-    series.map((item) => Number(row[item.key] ?? 0)).filter((value) => Number.isFinite(value)),
+    visibleSeries.map((item) => Number(row[item.key] ?? 0)).filter((value) => Number.isFinite(value)),
   );
   const maxValue = Math.max(...values, 1);
   const minYear = Number(rows[0]?.year ?? 1);
@@ -300,7 +310,7 @@ const ProjectionChart: React.FC<{ rows: WorkspaceRow[] }> = ({ rows }) => {
             </text>
           </g>
         ))}
-        {series.map((item) => {
+        {visibleSeries.map((item) => {
           const points = rows
             .map((row) => `${x(Number(row.year ?? minYear))},${y(Number(row[item.key] ?? 0))}`)
             .join(" ");
@@ -313,9 +323,15 @@ const ProjectionChart: React.FC<{ rows: WorkspaceRow[] }> = ({ rows }) => {
       </svg>
       <div className="projection-chart__legend">
         {series.map((item) => (
-          <span key={item.key}>
+          <button
+            type="button"
+            key={item.key}
+            className={visible[item.key] ? "is-visible" : ""}
+            aria-pressed={visible[item.key]}
+            onClick={() => setVisible((current) => ({ ...current, [item.key]: !current[item.key] }))}
+          >
             <i style={{ backgroundColor: item.color }} /> {item.label}
-          </span>
+          </button>
         ))}
       </div>
     </div>
@@ -417,6 +433,7 @@ export const ProductWorkspacePage: React.FC<{
     React.useState<WorkspacePayload["mechanicsExplanation"]>(null);
   const [projectionRunning, setProjectionRunning] = React.useState<boolean>(false);
   const [projectionError, setProjectionError] = React.useState<string | null>(null);
+  const [scenarioDirty, setScenarioDirty] = React.useState<boolean>(false);
   const [projectionForm, setProjectionForm] = React.useState({
     issueAge: 45,
     faceAmount: 100000,
@@ -449,6 +466,7 @@ export const ProductWorkspacePage: React.FC<{
     });
     setScenarioIllustration(null);
     setScenarioMechanics(null);
+    setScenarioDirty(false);
   }, [data?.illustration]);
 
   // Load existing feature requests when viewing a workspace-backed snapshot.
@@ -678,6 +696,7 @@ export const ProductWorkspacePage: React.FC<{
       };
       setScenarioIllustration(body.illustration ?? null);
       setScenarioMechanics(body.mechanicsExplanation ?? null);
+      setScenarioDirty(false);
     } catch (err: any) {
       setProjectionError(err?.message || "Projection failed.");
     } finally {
@@ -851,7 +870,12 @@ export const ProductWorkspacePage: React.FC<{
               </tr>
               <tr>
                 <th>Issue Age Range</th>
-                <td>{productUnderstanding.issueAgeRange || "Not available in current analysis"}</td>
+                <td>
+                  {productUnderstanding.issueAgeRange || "Not available in current analysis"}
+                  {productUnderstanding.issueAgeSource && (
+                    <small className="fact-source">Source: {productUnderstanding.issueAgeSource}</small>
+                  )}
+                </td>
               </tr>
               <tr>
                 <th>Risk Classes</th>
@@ -859,6 +883,9 @@ export const ProductWorkspacePage: React.FC<{
                   {productUnderstanding.riskClasses && productUnderstanding.riskClasses.length > 0
                     ? productUnderstanding.riskClasses.join(", ")
                     : "Not available in current analysis"}
+                  {productUnderstanding.riskClassesSource && (
+                    <small className="fact-source">Source: {productUnderstanding.riskClassesSource}</small>
+                  )}
                 </td>
               </tr>
             </tbody>
@@ -1592,6 +1619,18 @@ export const ProductWorkspacePage: React.FC<{
             </p>
             <form className="projection-scenario" onSubmit={runProjectionScenario}>
               <h3>Diagnostic scenario</h3>
+              <p className="muted">
+                <span className="tag">
+                  {scenarioIllustration
+                    ? scenarioDirty
+                      ? "Edited — run to apply"
+                      : "User-entered scenario applied"
+                    : scenarioDirty
+                      ? "Edited — run to apply"
+                      : "Derived default scenario"}
+                </span>{" "}
+                Guaranteed/default basis; a current-scale scenario is not modeled.
+              </p>
               <div className="projection-scenario__grid">
                 <label>
                   Issue age
@@ -1600,9 +1639,10 @@ export const ProductWorkspacePage: React.FC<{
                     min="0"
                     max="120"
                     value={projectionForm.issueAge}
-                    onChange={(event) =>
-                      setProjectionForm((current) => ({ ...current, issueAge: Number(event.target.value) }))
-                    }
+                    onChange={(event) => {
+                      setScenarioDirty(true);
+                      setProjectionForm((current) => ({ ...current, issueAge: Number(event.target.value) }));
+                    }}
                   />
                 </label>
                 <label>
@@ -1612,18 +1652,20 @@ export const ProductWorkspacePage: React.FC<{
                     min="1"
                     step="1000"
                     value={projectionForm.faceAmount}
-                    onChange={(event) =>
-                      setProjectionForm((current) => ({ ...current, faceAmount: Number(event.target.value) }))
-                    }
+                    onChange={(event) => {
+                      setScenarioDirty(true);
+                      setProjectionForm((current) => ({ ...current, faceAmount: Number(event.target.value) }));
+                    }}
                   />
                 </label>
                 <label>
                   Premium mode
                   <select
                     value={projectionForm.premiumMode}
-                    onChange={(event) =>
-                      setProjectionForm((current) => ({ ...current, premiumMode: event.target.value }))
-                    }
+                    onChange={(event) => {
+                      setScenarioDirty(true);
+                      setProjectionForm((current) => ({ ...current, premiumMode: event.target.value }));
+                    }}
                   >
                     <option value="ANNUAL">Annual</option>
                     <option value="SEMIANNUAL">Semiannual</option>
@@ -1638,9 +1680,10 @@ export const ProductWorkspacePage: React.FC<{
                     min="1"
                     step="100"
                     value={projectionForm.modalPremium}
-                    onChange={(event) =>
-                      setProjectionForm((current) => ({ ...current, modalPremium: Number(event.target.value) }))
-                    }
+                    onChange={(event) => {
+                      setScenarioDirty(true);
+                      setProjectionForm((current) => ({ ...current, modalPremium: Number(event.target.value) }));
+                    }}
                   />
                 </label>
               </div>
@@ -1735,7 +1778,7 @@ export const ProductWorkspacePage: React.FC<{
                 </p>
                 <details open>
                   <summary>{illustration.rows.length}-year annual projection ledger</summary>
-                  <div className="table-scroll projection-ledger">
+                  <div className="table-scroll projection-ledger projection-ledger--desktop">
                     <table className="kv-table">
                       <thead>
                         <tr>
@@ -1776,6 +1819,27 @@ export const ProductWorkspacePage: React.FC<{
                         ))}
                       </tbody>
                     </table>
+                  </div>
+                  <div className="projection-ledger-cards">
+                    {illustration.rows.map((row, idx) => (
+                      <article className="projection-ledger-card" key={row.year ?? idx}>
+                        <h4>Year {row.year} · Age {row.attainedAge ?? "—"}</h4>
+                        <dl>
+                          <div><dt>Opening value</dt><dd>{formatCurrency(row.openingPolicyValue)}</dd></div>
+                          <div><dt>Premium</dt><dd>{formatCurrency(row.annualPremium)}</dd></div>
+                          <div><dt>Cumulative premium</dt><dd>{formatCurrency(row.cumulativePremium)}</dd></div>
+                          <div><dt>Premium load</dt><dd>{formatCurrency(row.premiumLoad)}</dd></div>
+                          <div><dt>COI</dt><dd>{formatCurrency(row.coiCharge)}</dd></div>
+                          <div><dt>Policy fee</dt><dd>{formatCurrency(row.policyFee)}</dd></div>
+                          <div><dt>Interest</dt><dd>{formatCurrency(row.guaranteedInterest)}</dd></div>
+                          <div><dt>Ending value</dt><dd>{formatCurrency(row.endingPolicyValue ?? row.policyValue)}</dd></div>
+                          <div><dt>Surrender charge</dt><dd>{formatCurrency(row.surrenderCharge)}</dd></div>
+                          <div><dt>Cash surrender value</dt><dd>{formatCurrency(row.surrenderValue)}</dd></div>
+                          <div><dt>Death benefit</dt><dd>{formatCurrency(row.deathBenefit)}</dd></div>
+                          <div><dt>Net amount at risk</dt><dd>{formatCurrency(row.netAmountAtRisk)}</dd></div>
+                        </dl>
+                      </article>
+                    ))}
                   </div>
                 </details>
               </>
