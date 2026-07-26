@@ -34,6 +34,10 @@ def _feature_request_key(workspace_id: str, feature_request_id: int) -> str:
     return f"workspaces/{workspace_id}/feature-requests/{feature_request_id}.json"
 
 
+def _executable_mechanics_key(workspace_id: str) -> str:
+    return f"workspaces/{workspace_id}/analysis/executable-ul-mechanics.json"
+
+
 def _client_and_bucket() -> tuple[Any, str]:
     client = get_minio_client()
     ensure_bucket(client)
@@ -150,6 +154,22 @@ def create_workspace_document(
 def list_workspace_documents(workspace_id: str) -> List[Dict[str, Any]]:
     documents = _list_json(f"workspaces/{workspace_id}/documents/")
     return sorted(documents, key=lambda row: (str(row.get("created_at") or ""), int(row.get("id") or 0)))
+
+
+def store_workspace_executable_mechanics(
+    workspace_id: str, value: Dict[str, Any]
+) -> str:
+    """Persist the validated, provenance-bearing mechanics used by projections."""
+
+    if get_workspace(workspace_id) is None:
+        raise ValueError("workspace does not exist")
+    key = _executable_mechanics_key(workspace_id)
+    _write_json(key, value)
+    return key
+
+
+def load_workspace_executable_mechanics(workspace_id: str) -> Optional[Dict[str, Any]]:
+    return _read_json(_executable_mechanics_key(workspace_id))
 
 
 def update_workspace_analysis(

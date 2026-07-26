@@ -439,6 +439,9 @@ export const ProductWorkspacePage: React.FC<{
     faceAmount: 100000,
     premiumMode: "ANNUAL",
     modalPremium: 3000,
+    sex: "",
+    riskClass: "",
+    tobaccoStatus: "",
   });
 
   React.useEffect(() => {
@@ -1766,6 +1769,42 @@ export const ProductWorkspacePage: React.FC<{
                     onChange={(event) => {
                       setScenarioDirty(true);
                       setProjectionForm((current) => ({ ...current, modalPremium: Number(event.target.value) }));
+                    }}
+                  />
+                </label>
+                <label>
+                  Sex (as filed)
+                  <input
+                    type="text"
+                    value={projectionForm.sex}
+                    placeholder="e.g. F"
+                    onChange={(event) => {
+                      setScenarioDirty(true);
+                      setProjectionForm((current) => ({ ...current, sex: event.target.value }));
+                    }}
+                  />
+                </label>
+                <label>
+                  Underwriting / risk class
+                  <input
+                    type="text"
+                    value={projectionForm.riskClass}
+                    placeholder="e.g. Standard"
+                    onChange={(event) => {
+                      setScenarioDirty(true);
+                      setProjectionForm((current) => ({ ...current, riskClass: event.target.value }));
+                    }}
+                  />
+                </label>
+                <label>
+                  Tobacco / nicotine status
+                  <input
+                    type="text"
+                    value={projectionForm.tobaccoStatus}
+                    placeholder="e.g. Non-Tobacco"
+                    onChange={(event) => {
+                      setScenarioDirty(true);
+                      setProjectionForm((current) => ({ ...current, tobaccoStatus: event.target.value }));
                     }}
                   />
                 </label>

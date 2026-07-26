@@ -66,6 +66,7 @@ from actuarypoc.extract.assumptions_for_product import (
 )
 from actuarypoc.extract.mechanics_for_product import generate_mechanics_for_product
 from actuarypoc.extract.mechanic_assumptions_extractor import extract_mechanic_assumptions
+from actuarypoc.extract.workspace_ul_mechanics import extract_ul_mechanics, usable_mechanics
 from actuarypoc.agents.pmr_ai import summarise_pmr, propose_decision
 from actuarypoc.agents.scenario_ai import generate_scenarios_for_product
 from actuarypoc.storage.postgres_client import (
@@ -97,6 +98,8 @@ from actuarypoc.storage.workspace_store import (
     create_feature_request,
     list_feature_requests,
     update_feature_request_status,
+    store_workspace_executable_mechanics,
+    load_workspace_executable_mechanics,
 )
 
 try:  # FastAPI can be configured with either Pydantic v1 or v2
@@ -285,6 +288,44 @@ def _extract_workspace_documents(
         processed.append(document)
 
     return processed, corpus
+
+
+def _extract_workspace_executable_mechanics(
+    workspace_documents: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Extract only strictly structured workspace rate/schedule tables."""
+
+    client = get_minio_client()
+    ensure_bucket(client)
+    bucket = get_bucket_name()
+    combined: Dict[str, Any] = {
+        "version": 1,
+        "mechanics": {"coi": [], "surrender": [], "fees": []},
+        "warnings": [],
+    }
+    for document in workspace_documents:
+        filename = str(document.get("description") or "")
+        if Path(filename).suffix.lower() not in {".csv", ".tsv", ".xlsx", ".xlsm"}:
+            continue
+        response = None
+        try:
+            response = client.get_object(bucket, str(document.get("object_path") or ""))
+            extracted = extract_ul_mechanics(filename, response.read())
+            for mechanic, rows in (extracted.get("mechanics") or {}).items():
+                combined["mechanics"].setdefault(mechanic, []).extend(rows or [])
+            combined["warnings"].extend(extracted.get("warnings") or [])
+        except Exception as exc:  # noqa: BLE001
+            combined["warnings"].append(f"{filename}: structured extraction rejected: {exc}")
+        finally:
+            if response is not None:
+                response.close()
+                response.release_conn()
+    combined["usable"] = usable_mechanics(combined)
+    combined["status"] = {
+        mechanic: ("executable" if mechanic in combined["usable"] else "missing_or_incomplete")
+        for mechanic in ("coi", "surrender", "fees")
+    }
+    return combined
 
 
 def _normalise_evidence_text(value: Any) -> str:
@@ -575,6 +616,7 @@ def _build_ul_projection_view(
             "rows": rows,
             "sampleRows": sample_rows,
             "modelStatus": "diagnostic",
+            "mechanicsExecution": projection.get("mechanicsExecution") or {},
         }
 
         me = illustration.get("mechanicsExplanation")
@@ -1260,6 +1302,22 @@ def _build_ul_capability_assessment(snapshot: Dict[str, Any]) -> Optional[Dict[s
             }
         )
 
+    executable_status = (snapshot.get("executableMechanics") or {}).get("status") or {}
+    capability_mechanic = {
+        "UL_CAP_COI_TABLE_AGE_GENDER_CLASS": "coi",
+        "UL_CAP_SURRENDER_FIXED_SCHEDULE": "surrender",
+        "UL_CAP_LEVEL_POLICY_FEE": "fees",
+    }
+    for item in items:
+        mechanic = capability_mechanic.get(str(item.get("capabilityId") or ""))
+        if mechanic and executable_status.get(mechanic) == "executable":
+            item["status"] = "supported"
+            item["reason"] = (
+                "A validated workspace schedule with recorded file/sheet/row provenance "
+                "is loaded and executed by the diagnostic projection."
+            )
+            item["recommendedAction"] = None
+
     supported = sum(1 for it in items if (it.get("status") or "").lower() == "supported")
     partial = sum(1 for it in items if (it.get("status") or "").lower() == "partial")
     unsupported = sum(1 for it in items if (it.get("status") or "").lower() == "unsupported")
@@ -1325,12 +1383,19 @@ def _build_capability_assessment(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             if isinstance(item, dict)
         }
         product_code = ((snapshot.get("product") or {}).get("code") or None)
+        executable_status = (snapshot.get("executableMechanics") or {}).get("status") or {}
+        requirement_mechanic = {
+            "coi_table": "coi",
+            "surrender_schedule": "surrender",
+            "policy_admin_fees": "fees",
+        }
         for requirement_id, definition in canonical_capabilities.items():
             requirement = requirements.get(requirement_id) or {}
             requirement_status = str(requirement.get("status") or "missing").lower()
+            mechanic_status = executable_status.get(requirement_mechanic[requirement_id])
             capability_status = (
                 "supported"
-                if requirement_status == "implemented"
+                if mechanic_status == "executable"
                 else str(definition["nonImplementedStatus"])
             )
             source = None
@@ -1345,7 +1410,7 @@ def _build_capability_assessment(snapshot: Dict[str, Any]) -> Dict[str, Any]:
                 "status": capability_status,
                 "impact": requirement.get("impact") or "medium",
                 "reason": (
-                    "Workspace evidence and implementation are aligned."
+                    "A validated workspace schedule is loaded and executed with recorded provenance."
                     if capability_status == "supported"
                     else definition["reason"]
                 ),
@@ -1680,6 +1745,16 @@ def api_workspace_analyze(workspace_id: str) -> Dict[str, Any]:
     if int(ws.get("document_count") or 0) <= 0:
         raise HTTPException(status_code=400, detail="At least one document is required before analysis")
 
+    try:
+        docs_for_inventory = list_workspace_documents(workspace_id)
+    except Exception:
+        docs_for_inventory = []
+    mechanics_artifact = _extract_workspace_executable_mechanics(docs_for_inventory)
+    mechanics_artifact["workspaceId"] = workspace_id
+    mechanics_artifact["objectKey"] = store_workspace_executable_mechanics(
+        workspace_id, mechanics_artifact
+    )
+
     # Build the product-line baseline, then replace its evidence and identity
     # facts with findings from this workspace's durable uploaded documents.
     try:
@@ -1703,11 +1778,22 @@ def api_workspace_analyze(workspace_id: str) -> Dict[str, Any]:
     # can surface document inventory, extracted facts, and candidate
     # requirements and capability assessment without requiring additional
     # API calls.
-    try:
-        docs_for_inventory = list_workspace_documents(workspace_id)
-    except Exception:
-        docs_for_inventory = []
     snapshot = _apply_workspace_document_evidence(snapshot, docs_for_inventory)
+    executable_request = {
+        "_workspaceExecutableMechanics": mechanics_artifact.get("usable") or {}
+    }
+    projection, mechanics, warnings, notes, gaps = _build_ul_projection_view(
+        "ICC18 P18PR UL", executable_request
+    )
+    execution = (projection or {}).get("mechanicsExecution") or {}
+    for mechanic in ("coi", "surrender", "fees"):
+        if (execution.get(mechanic) or {}).get("fallbackYears"):
+            mechanics_artifact["status"][mechanic] = "partial_fallback"
+    store_workspace_executable_mechanics(workspace_id, mechanics_artifact)
+    snapshot["illustration"] = projection
+    snapshot["mechanicsExplanation"] = mechanics
+    snapshot["gaps"] = {"items": gaps, "warnings": warnings, "notes": notes}
+    snapshot["executableMechanics"] = mechanics_artifact
     _reconcile_workspace_readiness(snapshot)
     snapshot["requirementsCandidates"] = _build_requirements_candidates(snapshot)
     snapshot["productUnderstanding"] = _build_product_understanding(snapshot)
@@ -1749,6 +1835,9 @@ class WorkspaceProjectionRequest(BaseModel):  # type: ignore[misc]
     faceAmount: float = 100_000.0
     premiumMode: str = "ANNUAL"
     modalPremium: Optional[float] = None
+    sex: Optional[str] = None
+    riskClass: Optional[str] = None
+    tobaccoStatus: Optional[str] = None
 
 
 @app.post("/api/workspaces/{workspace_id}/projection")
@@ -1776,7 +1865,12 @@ def api_workspace_projection(
         "faceAmount": payload.faceAmount,
         "premiumMode": payload.premiumMode,
         "modalPremium": payload.modalPremium,
+        "sex": payload.sex,
+        "riskClass": payload.riskClass,
+        "tobaccoStatus": payload.tobaccoStatus,
     }
+    artifact = load_workspace_executable_mechanics(workspace_id) or {}
+    request["_workspaceExecutableMechanics"] = artifact.get("usable") or {}
     projection, mechanics, warnings, notes, gaps = _build_ul_projection_view(product_code, request)
     if projection is None:
         raise HTTPException(status_code=503, detail="Diagnostic projection is not available")
@@ -8624,6 +8718,7 @@ class UlRuntimeConfig:
     death_benefit: Optional[UlDeathBenefitConfig] = None
     # High-level assumption provenance suitable for UI surfaces.
     assumption_provenance: Optional[List[Dict[str, Any]]] = None
+    executable_mechanics: Optional[Dict[str, Any]] = None
 
 
 def build_ul_projection_explanation(
@@ -9490,11 +9585,41 @@ def _run_ul_projection(
     surrender_period_years = config.surrender_period_years
     max_surrender_pct = config.max_surrender_pct
     coi_rate = config.coi_rate_flat
+    executable = config.executable_mechanics or {}
+
+    def _matches(row: Dict[str, Any], field: str, actual: Any) -> bool:
+        expected = row.get(field)
+        return expected in {None, "", "ANY", "All"} or (
+            actual is not None and str(expected).strip().lower() == str(actual).strip().lower()
+        )
+
+    def _select(rows: List[Dict[str, Any]], year: int, attained_age: int) -> Optional[Dict[str, Any]]:
+        candidates = [
+            row for row in rows
+            if (row.get("duration") in {None, year})
+            and (row.get("attained_age") in {None, attained_age})
+            and _matches(row, "sex", request.get("sex"))
+            and _matches(row, "risk_class", request.get("riskClass"))
+            and _matches(row, "tobacco_status", request.get("tobaccoStatus"))
+            and _matches(row, "issue_age", age_norm)
+            and _matches(row, "premium_mode", premium_mode_raw)
+        ]
+        if not candidates:
+            return None
+        candidates.sort(
+            key=lambda row: sum(
+                row.get(field) not in {None, "", "ANY", "All"}
+                for field in ("duration", "attained_age", "sex", "risk_class", "tobacco_status", "issue_age", "premium_mode")
+            ),
+            reverse=True,
+        )
+        return candidates[0]
 
     rows: List[Dict[str, Any]] = []
     years: List[int] = []
     policy_value: float = 0.0
     cumulative_premium: float = 0.0
+    fallback_years: Dict[str, List[int]] = {"coi": [], "surrender": [], "fees": []}
 
     for year in range(1, horizon_years + 1):
         attained_age = age_norm + year - 1
@@ -9512,24 +9637,81 @@ def _run_ul_projection(
         base = policy_value + premium_annual
         guaranteed_interest = base * guaranteed_rate
 
-        # COI charge as a flat fraction of face. This greatly
-        # oversimplifies true UL COI behaviour but gives a
-        # product-understanding curve.
-        coi_charge = face_amount * coi_rate
+        coi_row = _select(list(executable.get("coi") or []), year, attained_age)
+        if coi_row:
+            rate = float(coi_row["rate"])
+            unit = coi_row["rate_unit"]
+            nar_before_charge = max(face_amount - base - guaranteed_interest, 0.0)
+            if unit == "per_1000_monthly":
+                coi_charge = nar_before_charge / 1000.0 * rate * 12.0
+            elif unit == "per_1000_annual":
+                coi_charge = nar_before_charge / 1000.0 * rate
+            else:
+                coi_charge = nar_before_charge * rate
+        else:
+            coi_charge = face_amount * coi_rate
+            fallback_years["coi"].append(year)
+
+        fee_row = _select(list(executable.get("fees") or []), year, attained_age)
+        if fee_row:
+            amount = float(fee_row["amount"])
+            fee_unit = fee_row["fee_unit"]
+            if fee_unit == "modal_fixed":
+                policy_fee = amount * freq
+            elif fee_unit == "per_1000_face_annual":
+                policy_fee = face_amount / 1000.0 * amount
+            else:
+                policy_fee = amount
+        else:
+            policy_fee = config.policy_fee_annual
+            fallback_years["fees"].append(year)
 
         # Update policy value at end of year.
-        policy_value = base + guaranteed_interest - coi_charge - config.policy_fee_annual
+        policy_value = base + guaranteed_interest - coi_charge - policy_fee
         if policy_value < 0.0:
             policy_value = 0.0
 
         # Placeholder surrender charge schedule: linear decline from
         # max_surrender_pct of face down to 0 over the surrender period.
-        if year <= surrender_period_years:
+        surrender_rows = list(executable.get("surrender") or [])
+        surrender_row = _select(surrender_rows, year, attained_age)
+        if surrender_row:
+            charge = float(surrender_row["charge"])
+            charge_unit = surrender_row["charge_unit"]
+            if charge_unit == "percent_face":
+                surrender_charge = face_amount * charge
+            elif charge_unit == "per_1000_face":
+                surrender_charge = face_amount / 1000.0 * charge
+            else:
+                surrender_charge = charge
+        elif surrender_rows:
+            compatible = [
+                row for row in surrender_rows
+                if _matches(row, "sex", request.get("sex"))
+                and _matches(row, "issue_age", age_norm)
+            ]
+            last_duration = max(
+                (int(row["duration"]) for row in compatible if row.get("duration") is not None),
+                default=0,
+            )
+            if compatible and year > last_duration:
+                surrender_charge = 0.0
+            else:
+                fallback_years["surrender"].append(year)
+                if year <= surrender_period_years:
+                    remaining = surrender_period_years - year + 1
+                    surrender_pct = max_surrender_pct * (remaining / surrender_period_years)
+                    surrender_charge = face_amount * surrender_pct
+                else:
+                    surrender_charge = 0.0
+        elif year <= surrender_period_years:
             remaining = surrender_period_years - year + 1
             surrender_pct = max_surrender_pct * (remaining / surrender_period_years)
             surrender_charge = face_amount * surrender_pct
         else:
             surrender_charge = 0.0
+        if not surrender_row and not surrender_rows:
+            fallback_years["surrender"].append(year)
 
         cash_value = policy_value
         surrender_value = max(cash_value - surrender_charge, 0.0)
@@ -9553,7 +9735,7 @@ def _run_ul_projection(
                 "premiumLoad": 0.0,
                 "guaranteedInterest": guaranteed_interest,
                 "coiCharge": coi_charge,
-                "policyFee": config.policy_fee_annual,
+                "policyFee": policy_fee,
                 "policyValue": policy_value,
                 "endingPolicyValue": policy_value,
                 "cashValue": cash_value,
@@ -9616,12 +9798,23 @@ def _run_ul_projection(
             "finalSurrenderValue": final_surrender,
             "finalNetAmountAtRisk": final_nar,
         },
+        "mechanicsExecution": {
+            mechanic: {
+                "scheduleLoaded": bool(executable.get(mechanic)),
+                "fallbackYears": years,
+                "fullyApplied": bool(executable.get(mechanic)) and not years,
+            }
+            for mechanic, years in fallback_years.items()
+        },
     }
 
     normalised_request = {
         "age": age_norm,
         "faceAmount": face_amount,
         "premiumMode": premium_mode_raw,
+        "sex": request.get("sex"),
+        "riskClass": request.get("riskClass"),
+        "tobaccoStatus": request.get("tobaccoStatus"),
     }
 
     return projection, normalised_request
@@ -9639,6 +9832,7 @@ def build_ul_illustration_for_product(product_code: str, request: Dict[str, Any]
     code_norm = (product_code or "").strip().upper()
 
     cfg = load_ul_runtime_config(product_code)
+    cfg.executable_mechanics = request.get("_workspaceExecutableMechanics") or None
 
     horizon_years = 30
     projection, normalised_request = _run_ul_projection(request=request, config=cfg, horizon_years=horizon_years)
@@ -9657,16 +9851,51 @@ def build_ul_illustration_for_product(product_code: str, request: Dict[str, Any]
             projection=projection,
             year=1,
         )
+        if mechanics_explanation is not None and cfg.executable_mechanics:
+            mechanics_explanation["executedSchedules"] = [
+                {
+                    "mechanic": mechanic,
+                    "rowCount": len(rows),
+                    "provenance": [row.get("provenance") for row in rows],
+                }
+                for mechanic, rows in cfg.executable_mechanics.items()
+                if rows
+            ]
     except Exception:
         # Explanation is best-effort only; failures must not block the
         # core projection path.
         mechanics_explanation = None
 
-    warnings = [
-        "COI rates are placeholder (flat 40 bps of face amount) because the actual COI rate table is not yet uploaded.",
-        "Surrender charges use a simple declining schedule over 19 years because the full schedule is not yet uploaded.",
-        "No policy or admin fees are applied; treat this as a simplified product-understanding projection, not a filed-rate or illustration-compliant result.",
-    ]
+    executable = cfg.executable_mechanics or {}
+    execution = projection.get("mechanicsExecution") or {}
+    warnings: List[str] = []
+    if not executable.get("coi"):
+        warnings.append(
+            "COI rates are placeholder (flat 40 bps of face amount) because no complete executable COI table is loaded."
+        )
+    elif (execution.get("coi") or {}).get("fallbackYears"):
+        warnings.append(
+            "The loaded COI table did not match every scenario duration/age/class selector; "
+            "placeholder COI was retained for unmatched years."
+        )
+    if not executable.get("surrender"):
+        warnings.append(
+            "Surrender charges use a simple declining schedule over 19 years because no complete executable schedule is loaded."
+        )
+    elif (execution.get("surrender") or {}).get("fallbackYears"):
+        warnings.append(
+            "The loaded surrender schedule did not match every scenario selector; "
+            "the simplified surrender placeholder was retained for unmatched years."
+        )
+    if not executable.get("fees"):
+        warnings.append(
+            "No policy or admin fees are applied because no complete evidenced fee schedule is loaded."
+        )
+    elif (execution.get("fees") or {}).get("fallbackYears"):
+        warnings.append(
+            "The loaded fee schedule did not cover every scenario duration/mode; "
+            "the missing-fee fallback was retained for unmatched years."
+        )
 
     # Append any non-fatal config validation warnings so that future
     # inconsistencies between the scalar and per-year config surfaces
@@ -9691,6 +9920,17 @@ def build_ul_illustration_for_product(product_code: str, request: Dict[str, Any]
                 return str(item.get("source") or item.get("name") or "Runtime assumption")
         return None
 
+    def _mechanics_source(rows: Any) -> str:
+        sources = []
+        for row in rows or []:
+            provenance = row.get("provenance") or {}
+            label = provenance.get("filename")
+            if provenance.get("sheet"):
+                label = f"{label} sheet {provenance['sheet']}"
+            if label and label not in sources:
+                sources.append(label)
+        return "; ".join(sources) or "Validated workspace table"
+
     projection_inputs = [
         {
             "id": "scenario_basis",
@@ -9709,16 +9949,23 @@ def build_ul_illustration_for_product(product_code: str, request: Dict[str, Any]
         {
             "id": "sex",
             "label": "Sex",
-            "value": None,
-            "status": "not_modeled",
-            "source": "Current draft engine is not sex-distinct",
+            "value": normalised_request.get("sex"),
+            "status": "scenario_selector" if normalised_request.get("sex") else "not_supplied",
+            "source": "Used to select evidenced schedule rows when supplied",
         },
         {
             "id": "risk_class",
             "label": "Risk class",
-            "value": None,
-            "status": "not_modeled",
-            "source": "Current draft engine is not risk-class-distinct",
+            "value": normalised_request.get("riskClass"),
+            "status": "scenario_selector" if normalised_request.get("riskClass") else "not_supplied",
+            "source": "Used to select evidenced schedule rows when supplied",
+        },
+        {
+            "id": "tobacco_status",
+            "label": "Tobacco / nicotine status",
+            "value": normalised_request.get("tobaccoStatus"),
+            "status": "scenario_selector" if normalised_request.get("tobaccoStatus") else "not_supplied",
+            "source": "Used to select evidenced schedule rows when supplied",
         },
         {
             "id": "face_amount",
@@ -9764,26 +10011,26 @@ def build_ul_illustration_for_product(product_code: str, request: Dict[str, Any]
         },
         {
             "id": "coi_rate",
-            "label": "COI rate",
-            "value": cfg.coi_rate_flat,
-            "unit": "rate",
-            "status": "placeholder",
-            "source": "Flat rate applied to face amount; filed COI table not loaded",
+            "label": "COI schedule",
+            "value": f"{len(executable.get('coi') or [])} executable rows" if executable.get("coi") else cfg.coi_rate_flat,
+            "unit": None if executable.get("coi") else "rate",
+            "status": "evidenced" if executable.get("coi") else "placeholder",
+            "source": _mechanics_source(executable.get("coi")) if executable.get("coi") else "Flat rate applied to face amount; filed COI table not loaded",
         },
         {
             "id": "policy_fee",
             "label": "Annual policy/admin fee",
-            "value": cfg.policy_fee_annual,
+            "value": f"{len(executable.get('fees') or [])} executable rows" if executable.get("fees") else cfg.policy_fee_annual,
             "unit": "USD",
-            "status": "missing",
-            "source": "No evidenced fee schedule; current configured amount is $0",
+            "status": "evidenced" if executable.get("fees") else "missing",
+            "source": _mechanics_source(executable.get("fees")) if executable.get("fees") else "No evidenced fee schedule; current configured amount is $0",
         },
         {
             "id": "surrender_schedule",
             "label": "Surrender charge schedule",
-            "value": f"{cfg.max_surrender_pct:.2%} of face declining over {cfg.surrender_period_years} years",
-            "status": "placeholder",
-            "source": "Simplified runtime schedule; filed schedule not loaded",
+            "value": f"{len(executable.get('surrender') or [])} executable rows" if executable.get("surrender") else f"{cfg.max_surrender_pct:.2%} of face declining over {cfg.surrender_period_years} years",
+            "status": "evidenced" if executable.get("surrender") else "placeholder",
+            "source": _mechanics_source(executable.get("surrender")) if executable.get("surrender") else "Simplified runtime schedule; filed schedule not loaded",
         },
         {
             "id": "projection_horizon",
