@@ -8,6 +8,10 @@ def test_ul_capabilities_catalog_non_empty() -> None:
     assert any(c.product_type == "ul" for c in caps)
     ids = {c.capability_id for c in caps}
     assert "UL_CAP_COI_TABLE_AGE_GENDER_CLASS" in ids
+    capabilities = {item.capability_id: item for item in caps}
+    assert capabilities["UL_CAP_COI_TABLE_AGE_GENDER_CLASS"].implementation_status == "supported"
+    assert "attained_age" in capabilities["UL_CAP_COI_TABLE_AGE_GENDER_CLASS"].supported_selectors
+    assert "modal_fixed" in capabilities["UL_CAP_LEVEL_POLICY_FEE"].supported_units
 
 
 def test_feature_request_dataclass_basic_fields() -> None:

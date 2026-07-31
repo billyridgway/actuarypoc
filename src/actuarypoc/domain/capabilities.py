@@ -25,6 +25,9 @@ class EngineCapability:
     capability_id: str
     product_type: str  # "term" | "whole" | "ul" | ...
     description: str
+    implementation_status: str = "supported"
+    supported_selectors: List[str] = field(default_factory=list)
+    supported_units: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -60,16 +63,22 @@ _UL_CAPABILITIES: List[EngineCapability] = [
         capability_id="UL_CAP_COI_TABLE_AGE_GENDER_CLASS",
         product_type="ul",
         description="COI rate tables by age, gender, risk class, and duration",
+        supported_selectors=["duration", "attained_age", "sex", "risk_class", "tobacco_status"],
+        supported_units=["per_1000_monthly", "per_1000_annual", "percent_nar_annual"],
     ),
     EngineCapability(
         capability_id="UL_CAP_SURRENDER_FIXED_SCHEDULE",
         product_type="ul",
         description="Fixed surrender charge schedule by duration",
+        supported_selectors=["duration", "issue_age", "sex"],
+        supported_units=["percent_face", "per_1000_face", "fixed"],
     ),
     EngineCapability(
         capability_id="UL_CAP_LEVEL_POLICY_FEE",
         product_type="ul",
         description="Level per-policy / per-period policy fee",
+        supported_selectors=["duration", "premium_mode"],
+        supported_units=["annual_fixed", "modal_fixed", "per_1000_face_annual"],
     ),
 ]
 
