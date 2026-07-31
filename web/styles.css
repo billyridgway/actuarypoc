@@ -399,6 +399,28 @@ details > summary {
   font-size: 9px;
 }
 
+.logic-graph__capability {
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+}
+
+.logic-graph__capability--unsupported {
+  fill: var(--danger);
+}
+
+.logic-graph__capability--partial {
+  fill: var(--warning);
+}
+
+.logic-graph__platform-summary {
+  border-left: 1px solid var(--border);
+  color: var(--text-main);
+  font-weight: 700;
+  margin-left: 4px;
+  padding-left: 10px;
+}
+
 .logic-graph__input {
   color: var(--text-main);
   display: grid;
@@ -438,6 +460,16 @@ details > summary {
   outline: 2px solid color-mix(in srgb, var(--accent) 20%, transparent);
 }
 
+.logic-graph__node--missing .logic-graph__input input,
+.logic-graph__node--missing .logic-graph__input select {
+  border-color: var(--danger);
+}
+
+.logic-graph__node--provisional .logic-graph__input input,
+.logic-graph__node--provisional .logic-graph__input select {
+  border-color: var(--warning);
+}
+
 .logic-graph__detail {
   background: var(--success-soft);
   border: 1px solid color-mix(in srgb, var(--success) 45%, var(--border));
@@ -447,6 +479,23 @@ details > summary {
   grid-template-columns: minmax(12rem, 0.8fr) minmax(16rem, 1.4fr);
   margin-top: 0.75rem;
   padding: 0.9rem 1rem;
+}
+
+.logic-graph__capability-detail {
+  background: color-mix(in srgb, var(--warning-soft) 72%, white);
+  border: 1px solid color-mix(in srgb, var(--warning) 50%, var(--border));
+  border-radius: 0.55rem;
+  margin-top: 0.65rem;
+  padding: 0.55rem 0.7rem;
+}
+
+.logic-graph__capability-detail--unsupported {
+  background: color-mix(in srgb, var(--danger-soft) 72%, white);
+  border-color: color-mix(in srgb, var(--danger) 50%, var(--border));
+}
+
+.logic-graph__capability-detail p {
+  margin: 0.2rem 0;
 }
 
 .logic-graph__detail--provisional {
