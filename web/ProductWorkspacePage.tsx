@@ -28,6 +28,24 @@ interface WorkspaceRow {
   status?: string | null;
 }
 
+interface ProjectionInput {
+  id?: string;
+  label?: string;
+  value?: any;
+  unit?: string;
+  status?: string;
+  source?: string;
+}
+
+interface MechanicsStep {
+  id?: string;
+  order?: number;
+  title?: string;
+  formulaText?: string;
+  inputs?: Array<{ label?: string; value?: any; unit?: string; source?: string }>;
+  result?: { label?: string; value?: any; unit?: string; source?: string };
+}
+
 interface WorkspacePayload {
   product?: {
     code?: string;
@@ -147,14 +165,7 @@ interface WorkspacePayload {
   };
   illustration?: {
     request?: Record<string, any>;
-    inputs?: Array<{
-      id?: string;
-      label?: string;
-      value?: any;
-      unit?: string;
-      status?: string;
-      source?: string;
-    }>;
+    inputs?: ProjectionInput[];
     metrics?: Record<string, any>;
     rows?: WorkspaceRow[];
     sampleRows?: WorkspaceRow[];
@@ -162,14 +173,7 @@ interface WorkspacePayload {
   } | null;
   mechanicsExplanation?: {
     title?: string;
-    steps?: Array<{
-      id?: string;
-      order?: number;
-      title?: string;
-      formulaText?: string;
-      inputs?: Array<{ label?: string; value?: any; source?: string }>;
-      result?: { label?: string; value?: any; source?: string };
-    }>;
+    steps?: MechanicsStep[];
   } | null;
   pmrReadiness?: {
     status?: string;
@@ -259,6 +263,223 @@ const formatProjectionInputValue = (value: any, unit?: string): string => {
   if (unit === "USD") return formatCurrency(value);
   if (unit === "rate" && Number.isFinite(Number(value))) return `${(Number(value) * 100).toFixed(2)}%`;
   return `${String(value)}${unit && unit !== "years" ? ` ${unit}` : unit === "years" ? " years" : ""}`;
+};
+
+type LogicNodeStatus = "ready" | "provisional" | "missing";
+
+interface LogicGraphNode {
+  id: string;
+  kind: "input" | "rule";
+  label: string;
+  status: LogicNodeStatus;
+  detail?: string;
+  value?: any;
+  unit?: string;
+  source?: string;
+  formula?: string;
+  dependencies: string[];
+  level: number;
+}
+
+const normaliseLogicLabel = (value?: string): string =>
+  String(value || "")
+    .toLowerCase()
+    .replace(/annual|flat|deducted|added|closing|ending/g, "")
+    .replace(/[^a-z0-9]/g, "");
+
+const inputStatus = (status?: string): LogicNodeStatus => {
+  const value = String(status || "").toLowerCase();
+  if (["missing", "not_available"].includes(value)) return "missing";
+  if (["placeholder", "derived_placeholder", "default", "diagnostic", "not_supplied"].includes(value)) return "provisional";
+  return "ready";
+};
+
+const ProjectionLogicGraph: React.FC<{
+  inputs: ProjectionInput[];
+  steps: MechanicsStep[];
+}> = ({ inputs, steps }) => {
+  const [selectedId, setSelectedId] = React.useState<string | null>(null);
+  const [problemsOnly, setProblemsOnly] = React.useState(false);
+
+  const graph = React.useMemo(() => {
+    const nodes: LogicGraphNode[] = inputs.map((input, index) => ({
+      id: `input:${input.id || index}`,
+      kind: "input",
+      label: input.label || input.id || "Input",
+      status: inputStatus(input.status),
+      detail: input.status,
+      value: input.value,
+      unit: input.unit,
+      source: input.source,
+      dependencies: [],
+      level: 0,
+    }));
+    const inputNodes = [...nodes];
+    const ruleNodes: LogicGraphNode[] = [];
+
+    const explicitInputIds: Record<string, string[]> = {
+      premium_added: ["premium", "premium_mode"],
+      coi_charge_deducted: ["face_amount", "coi_rate"],
+      policy_admin_fee_deducted: ["policy_fee"],
+      interest_credited: ["guaranteed_rate", "premium"],
+      surrender_charge: ["face_amount", "surrender_schedule"],
+      death_benefit: ["face_amount", "death_benefit_option"],
+    };
+
+    [...steps]
+      .sort((a, b) => Number(a.order || 0) - Number(b.order || 0))
+      .forEach((step, index) => {
+        const stepId = step.id || `step-${index}`;
+        const requestedLabels = (step.inputs || []).map((input) => normaliseLogicLabel(input.label));
+        const dependencies = new Set<string>();
+
+        for (const prior of ruleNodes) {
+          const resultLabel = normaliseLogicLabel(
+            steps.find((candidate) => `rule:${candidate.id || `step-${steps.indexOf(candidate)}`}` === prior.id)?.result?.label,
+          );
+          if (resultLabel && requestedLabels.some((label) => label === resultLabel || label.includes(resultLabel))) {
+            dependencies.add(prior.id);
+          }
+        }
+        for (const input of inputNodes) {
+          const inputId = input.id.replace("input:", "");
+          const label = normaliseLogicLabel(input.label);
+          if (
+            (explicitInputIds[stepId] || []).includes(inputId) ||
+            (label && requestedLabels.some((requested) => requested === label || requested.includes(label)))
+          ) {
+            dependencies.add(input.id);
+          }
+        }
+
+        const dependencyNodes = [...dependencies]
+          .map((id) => [...inputNodes, ...ruleNodes].find((node) => node.id === id))
+          .filter((node): node is LogicGraphNode => Boolean(node));
+        const hasMissing = dependencyNodes.some((node) => node.status === "missing");
+        const hasProvisional = dependencyNodes.some((node) => node.status === "provisional");
+        const level = Math.max(1, ...dependencyNodes.map((node) => node.level + 1));
+        ruleNodes.push({
+          id: `rule:${stepId}`,
+          kind: "rule",
+          label: step.title || step.result?.label || `Step ${index + 1}`,
+          status: hasMissing || hasProvisional ? "provisional" : "ready",
+          detail: hasMissing ? "Uses a fallback because required data is missing" : hasProvisional ? "Uses a placeholder or default" : "Ready",
+          value: step.result?.value,
+          unit: step.result?.unit,
+          source: step.result?.source,
+          formula: step.formulaText,
+          dependencies: [...dependencies],
+          level,
+        });
+      });
+
+    return [...inputNodes, ...ruleNodes];
+  }, [inputs, steps]);
+
+  const visibleIds = React.useMemo(() => {
+    if (!problemsOnly) return new Set(graph.map((node) => node.id));
+    const ids = new Set(graph.filter((node) => node.status !== "ready").map((node) => node.id));
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const node of graph) {
+        if (ids.has(node.id)) {
+          for (const dependency of node.dependencies) {
+            if (!ids.has(dependency)) {
+              ids.add(dependency);
+              changed = true;
+            }
+          }
+        }
+      }
+    }
+    return ids;
+  }, [graph, problemsOnly]);
+
+  const visibleNodes = graph.filter((node) => visibleIds.has(node.id));
+  const levels = [...new Set(visibleNodes.map((node) => node.level))].sort((a, b) => a - b);
+  const columnWidth = 250;
+  const rowHeight = 104;
+  const nodeWidth = 190;
+  const nodeHeight = 68;
+  const padding = 34;
+  const maxRows = Math.max(1, ...levels.map((level) => visibleNodes.filter((node) => node.level === level).length));
+  const width = Math.max(720, levels.length * columnWidth + padding * 2);
+  const height = Math.max(360, maxRows * rowHeight + padding * 2);
+  const positions = new Map<string, { x: number; y: number }>();
+  levels.forEach((level, columnIndex) => {
+    const column = visibleNodes.filter((node) => node.level === level);
+    const offset = (height - column.length * rowHeight) / 2;
+    column.forEach((node, rowIndex) => positions.set(node.id, { x: padding + columnIndex * columnWidth, y: offset + rowIndex * rowHeight }));
+  });
+
+  const selected = graph.find((node) => node.id === selectedId) || null;
+  const problemCount = graph.filter((node) => node.status !== "ready").length;
+
+  return (
+    <div className="logic-graph">
+      <div className="logic-graph__toolbar">
+        <div className="logic-graph__legend" aria-label="Graph status legend">
+          <span><i className="logic-graph__dot logic-graph__dot--ready" />Ready</span>
+          <span><i className="logic-graph__dot logic-graph__dot--provisional" />Placeholder / default</span>
+          <span><i className="logic-graph__dot logic-graph__dot--missing" />Missing input</span>
+        </div>
+        <button type="button" className="button button-ghost" onClick={() => setProblemsOnly((value) => !value)}>
+          {problemsOnly ? "Show all logic" : `Show problems only (${problemCount})`}
+        </button>
+      </div>
+      <div className="logic-graph__viewport">
+        <svg width={width} height={height} role="img" aria-label="Directed graph of projection inputs and calculation rules">
+          <defs>
+            <marker id="logic-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+              <path d="M0,0 L8,4 L0,8 Z" className="logic-graph__arrowhead" />
+            </marker>
+          </defs>
+          {visibleNodes.flatMap((node) => {
+            const end = positions.get(node.id);
+            if (!end) return [];
+            return node.dependencies.map((dependency) => {
+              const start = positions.get(dependency);
+              if (!start || !visibleIds.has(dependency)) return null;
+              const sourceNode = graph.find((candidate) => candidate.id === dependency);
+              const affected = sourceNode?.status === "missing" || node.status === "missing";
+              const x1 = start.x + nodeWidth;
+              const y1 = start.y + nodeHeight / 2;
+              const x2 = end.x;
+              const y2 = end.y + nodeHeight / 2;
+              const bend = Math.max(28, (x2 - x1) / 2);
+              return <path key={`${dependency}-${node.id}`} d={`M${x1},${y1} C${x1 + bend},${y1} ${x2 - bend},${y2} ${x2},${y2}`} className={`logic-graph__edge${affected ? " logic-graph__edge--missing" : ""}`} markerEnd="url(#logic-arrow)" />;
+            });
+          })}
+          {visibleNodes.map((node) => {
+            const position = positions.get(node.id)!;
+            return (
+              <g key={node.id} className={`logic-graph__node logic-graph__node--${node.status}${selectedId === node.id ? " is-selected" : ""}`} onClick={() => setSelectedId(node.id)} role="button" tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") setSelectedId(node.id); }}>
+                <rect x={position.x} y={position.y} width={nodeWidth} height={nodeHeight} rx="10" />
+                <text x={position.x + 14} y={position.y + 20} className="logic-graph__kind">{node.kind === "input" ? "INPUT" : "RULE"}</text>
+                <text x={position.x + 14} y={position.y + 43} className="logic-graph__label">{node.label.length > 24 ? `${node.label.slice(0, 24)}…` : node.label}</text>
+                <text x={position.x + 14} y={position.y + 59} className="logic-graph__status">{node.detail || node.status}</text>
+              </g>
+            );
+          })}
+        </svg>
+      </div>
+      {selected && (
+        <aside className={`logic-graph__detail logic-graph__detail--${selected.status}`}>
+          <div>
+            <span className="logic-graph__eyebrow">{selected.kind === "input" ? "Projection input" : "Calculation rule"}</span>
+            <h3>{selected.label}</h3>
+            <p className="muted">{selected.detail}</p>
+          </div>
+          <div>
+            {selected.value !== undefined && <p><strong>Current value:</strong> {formatProjectionInputValue(selected.value, selected.unit)}</p>}
+            {selected.formula && <p><strong>Logic:</strong> {selected.formula}</p>}
+            {selected.source && <p><strong>Source:</strong> {selected.source}</p>}
+          </div>
+        </aside>
+      )}
+    </div>
+  );
 };
 
 const ProjectionChart: React.FC<{ rows: WorkspaceRow[] }> = ({ rows }) => {
@@ -466,6 +687,9 @@ export const ProductWorkspacePage: React.FC<{
       faceAmount: Number(request.faceAmount ?? 100000),
       premiumMode: String(request.premiumMode ?? "ANNUAL"),
       modalPremium: Number(annualPremium ?? 3000),
+      sex: String(request.sex ?? ""),
+      riskClass: String(request.riskClass ?? ""),
+      tobaccoStatus: String(request.tobaccoStatus ?? ""),
     });
     setScenarioIllustration(null);
     setScenarioMechanics(null);
@@ -2001,18 +2225,25 @@ export const ProductWorkspacePage: React.FC<{
       </section>
 
       <section className="card home-card">
-        <h2>Mechanics explanation / order of operations</h2>
+        <h2>Projection logic graph</h2>
         {mechanicsExplanation && mechanicsExplanation.steps && mechanicsExplanation.steps.length > 0 ? (
           <>
-            <p className="muted">Year 1 order-of-operations trace for the current Promise UL projection.</p>
-            <ol>
-              {mechanicsExplanation.steps.map((step) => (
-                <li key={step.id ?? step.order}>
-                  <strong>{step.title || "Step"}</strong>
-                  {step.formulaText && <p className="muted">{step.formulaText}</p>}
-                </li>
-              ))}
-            </ol>
+            <p className="muted">
+              Follow projection inputs into the rules they drive. Missing inputs are red; calculations using defaults
+              or placeholders are amber. Select a node to inspect its value, source, and logic.
+            </p>
+            <ProjectionLogicGraph inputs={illustration?.inputs ?? []} steps={mechanicsExplanation.steps} />
+            <details className="logic-graph__ordered-steps">
+              <summary>View ordered calculation steps</summary>
+              <ol>
+                {mechanicsExplanation.steps.map((step) => (
+                  <li key={step.id ?? step.order}>
+                    <strong>{step.title || "Step"}</strong>
+                    {step.formulaText && <p className="muted">{step.formulaText}</p>}
+                  </li>
+                ))}
+              </ol>
+            </details>
           </>
         ) : (
           <p className="muted">
