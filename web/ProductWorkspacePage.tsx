@@ -48,6 +48,7 @@ export interface MechanicsStep {
 
 export interface GraphInputConfig {
   kind: "number" | "select" | "text";
+  enteredStatus?: "ready" | "provisional";
   min?: number;
   max?: number;
   step?: number;
@@ -288,8 +289,22 @@ interface LogicGraphNode {
   unit?: string;
   source?: string;
   formula?: string;
+  capability?: CapabilityAlignmentItem;
   dependencies: string[];
   level: number;
+}
+
+export interface CapabilityAlignmentItem {
+  capabilityId: string;
+  name?: string;
+  status?: string;
+  impact?: string;
+  reason?: string;
+  sourceRequirementId?: string | null;
+  sourceRequirementText?: string | null;
+  sourceDocument?: string | null;
+  sourceReference?: string | null;
+  recommendedAction?: string | null;
 }
 
 const normaliseLogicLabel = (value?: string): string =>
@@ -301,7 +316,7 @@ const normaliseLogicLabel = (value?: string): string =>
 const inputStatus = (status?: string): LogicNodeStatus => {
   const value = String(status || "").toLowerCase();
   if (["missing", "not_available"].includes(value)) return "missing";
-  if (["placeholder", "derived_placeholder", "default", "diagnostic", "not_supplied"].includes(value)) return "provisional";
+  if (["placeholder", "derived_placeholder", "default", "diagnostic", "not_supplied", "scenario_assumption"].includes(value)) return "provisional";
   return "ready";
 };
 
@@ -311,24 +326,38 @@ export const ProjectionLogicGraph: React.FC<{
   editableValues?: Record<string, string | number>;
   onInputChange?: (inputId: string, value: string) => void;
   inputConfigs?: Record<string, GraphInputConfig>;
-}> = ({ inputs, steps, editableValues, onInputChange, inputConfigs }) => {
+  capabilities?: CapabilityAlignmentItem[];
+}> = ({ inputs, steps, editableValues, onInputChange, inputConfigs, capabilities = [] }) => {
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
   const [problemsOnly, setProblemsOnly] = React.useState(false);
 
   const graph = React.useMemo(() => {
+    const capabilityByRequirement = new Map(
+      capabilities.map((capability) => [String(capability.sourceRequirementId || ""), capability]),
+    );
+    const inputCapabilityRequirements: Record<string, string> = {
+      coi_rate: "coi_table",
+      policy_fee: "policy_admin_fees",
+      surrender_schedule: "surrender_schedule",
+    };
+    const ruleCapabilityRequirements: Record<string, string> = {
+      coi_charge_deducted: "coi_table",
+      policy_admin_fee_deducted: "policy_admin_fees",
+      surrender_charge: "surrender_schedule",
+    };
     const nodes: LogicGraphNode[] = inputs.map((input, index) => ({
       id: `input:${input.id || index}`,
       inputId: input.id || String(index),
       kind: "input",
       label: input.label || input.id || "Input",
-      status:
-        editableValues && input.id && String(editableValues[input.id] ?? "").trim()
-          ? "ready"
-          : inputStatus(input.status),
+      status: editableValues && input.id && String(editableValues[input.id] ?? "").trim()
+        ? (inputConfigs?.[input.id]?.enteredStatus || "ready")
+        : inputStatus(input.status),
       detail: input.status,
       value: input.value,
       unit: input.unit,
       source: input.source,
+      capability: capabilityByRequirement.get(inputCapabilityRequirements[input.id || ""]),
       dependencies: [],
       level: 0,
     }));
@@ -386,17 +415,18 @@ export const ProjectionLogicGraph: React.FC<{
           unit: step.result?.unit,
           source: step.result?.source,
           formula: step.formulaText,
+          capability: capabilityByRequirement.get(ruleCapabilityRequirements[stepId]),
           dependencies: [...dependencies],
           level,
         });
       });
 
     return [...inputNodes, ...ruleNodes];
-  }, [editableValues, inputs, steps]);
+  }, [capabilities, editableValues, inputConfigs, inputs, steps]);
 
   const visibleIds = React.useMemo(() => {
     if (!problemsOnly) return new Set(graph.map((node) => node.id));
-    const ids = new Set(graph.filter((node) => node.status !== "ready").map((node) => node.id));
+    const ids = new Set(graph.filter((node) => node.status !== "ready" || ["partial", "unsupported"].includes(String(node.capability?.status || "").toLowerCase())).map((node) => node.id));
     let changed = true;
     while (changed) {
       changed = false;
@@ -417,9 +447,9 @@ export const ProjectionLogicGraph: React.FC<{
   const visibleNodes = graph.filter((node) => visibleIds.has(node.id));
   const levels = [...new Set(visibleNodes.map((node) => node.level))].sort((a, b) => a - b);
   const columnWidth = 250;
-  const rowHeight = 112;
+  const rowHeight = 124;
   const nodeWidth = 190;
-  const nodeHeight = 76;
+  const nodeHeight = 90;
   const padding = 34;
   const maxRows = Math.max(1, ...levels.map((level) => visibleNodes.filter((node) => node.level === level).length));
   const width = Math.max(720, levels.length * columnWidth + padding * 2);
@@ -432,7 +462,9 @@ export const ProjectionLogicGraph: React.FC<{
   });
 
   const selected = graph.find((node) => node.id === selectedId) || null;
-  const problemCount = graph.filter((node) => node.status !== "ready").length;
+  const problemCount = graph.filter((node) => node.status !== "ready" || ["partial", "unsupported"].includes(String(node.capability?.status || "").toLowerCase())).length;
+  const unsupportedCapabilities = capabilities.filter((item) => String(item.status || "").toLowerCase() === "unsupported").length;
+  const partialCapabilities = capabilities.filter((item) => String(item.status || "").toLowerCase() === "partial").length;
 
   return (
     <div className="logic-graph">
@@ -441,6 +473,9 @@ export const ProjectionLogicGraph: React.FC<{
           <span><i className="logic-graph__dot logic-graph__dot--ready" />Ready</span>
           <span><i className="logic-graph__dot logic-graph__dot--provisional" />Placeholder / default</span>
           <span><i className="logic-graph__dot logic-graph__dot--missing" />Missing input</span>
+          {(unsupportedCapabilities > 0 || partialCapabilities > 0) && (
+            <span className="logic-graph__platform-summary">Platform gaps: {unsupportedCapabilities} unsupported · {partialCapabilities} partial</span>
+          )}
         </div>
         <button type="button" className="button button-ghost" onClick={() => setProblemsOnly((value) => !value)}>
           {problemsOnly ? "Show all logic" : `Show problems only (${problemCount})`}
@@ -477,7 +512,7 @@ export const ProjectionLogicGraph: React.FC<{
               <g key={node.id} className={`logic-graph__node logic-graph__node--${node.status}${selectedId === node.id ? " is-selected" : ""}`} onClick={() => setSelectedId(node.id)} role="button" tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") setSelectedId(node.id); }}>
                 <rect x={position.x} y={position.y} width={nodeWidth} height={nodeHeight} rx="10" />
                 {canEdit ? (
-                  <foreignObject x={position.x + 10} y={position.y + 6} width={nodeWidth - 20} height={nodeHeight - 10}>
+                  <foreignObject x={position.x + 10} y={position.y + 6} width={nodeWidth - 20} height={nodeHeight - (node.capability ? 24 : 10)}>
                     <label className="logic-graph__input" onClick={(event) => event.stopPropagation()}>
                       <span>{node.label === "Annual premium" ? "Modal premium" : node.label}</span>
                       {config?.kind === "select" ? (
@@ -511,6 +546,11 @@ export const ProjectionLogicGraph: React.FC<{
                     <text x={position.x + 14} y={position.y + 64} className="logic-graph__status">{node.detail || node.status}</text>
                   </>
                 )}
+                {node.capability && ["partial", "unsupported"].includes(String(node.capability.status || "").toLowerCase()) && (
+                  <text x={position.x + 12} y={position.y + 82} className={`logic-graph__capability logic-graph__capability--${String(node.capability.status).toLowerCase()}`}>
+                    PLATFORM: {String(node.capability.status).toUpperCase()}
+                  </text>
+                )}
               </g>
             );
           })}
@@ -524,9 +564,25 @@ export const ProjectionLogicGraph: React.FC<{
             <p className="muted">{selected.detail}</p>
           </div>
           <div>
-            {selected.value !== undefined && <p><strong>Current value:</strong> {formatProjectionInputValue(selected.value, selected.unit)}</p>}
+            {selected.kind === "input" && selected.inputId && editableValues && selected.inputId in editableValues ? (
+              <p><strong>Current value:</strong> {String(editableValues[selected.inputId] ?? "").trim()
+                ? formatProjectionInputValue(editableValues[selected.inputId], selected.unit)
+                : "No value or assumption supplied"}</p>
+            ) : selected.value !== undefined && <p><strong>Current value:</strong> {formatProjectionInputValue(selected.value, selected.unit)}</p>}
             {selected.formula && <p><strong>Logic:</strong> {selected.formula}</p>}
             {selected.source && <p><strong>Source:</strong> {selected.source}</p>}
+            {selected.capability && (
+              <div className={`logic-graph__capability-detail logic-graph__capability-detail--${String(selected.capability.status || "unknown").toLowerCase()}`}>
+                <p><strong>Platform capability:</strong> {selected.capability.name || selected.capability.capabilityId}</p>
+                <p><strong>Status:</strong> {selected.capability.status || "Unknown"} · <strong>Impact:</strong> {selected.capability.impact || "Unknown"}</p>
+                {selected.capability.reason && <p>{selected.capability.reason}</p>}
+                {selected.capability.sourceRequirementText && <p><strong>Product requirement:</strong> {selected.capability.sourceRequirementText}</p>}
+                {(selected.capability.sourceDocument || selected.capability.sourceReference) && (
+                  <p><strong>Evidence:</strong> {selected.capability.sourceDocument || "Source document not recorded"}{selected.capability.sourceReference ? ` · Reference ${selected.capability.sourceReference}` : ""}</p>
+                )}
+                {selected.capability.recommendedAction && <p><strong>Next action:</strong> {selected.capability.recommendedAction}</p>}
+              </div>
+            )}
           </div>
         </aside>
       )}
