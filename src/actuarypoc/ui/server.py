@@ -1838,6 +1838,7 @@ class WorkspaceProjectionRequest(BaseModel):  # type: ignore[misc]
     sex: Optional[str] = None
     riskClass: Optional[str] = None
     tobaccoStatus: Optional[str] = None
+    policyFeeAnnual: Optional[float] = None
 
 
 @app.post("/api/workspaces/{workspace_id}/projection")
@@ -1859,6 +1860,10 @@ def api_workspace_projection(
         raise HTTPException(status_code=400, detail="Face amount must be greater than zero")
     if payload.modalPremium is not None and payload.modalPremium <= 0:
         raise HTTPException(status_code=400, detail="Modal premium must be greater than zero")
+    if payload.policyFeeAnnual is not None and (
+        not math.isfinite(payload.policyFeeAnnual) or payload.policyFeeAnnual < 0
+    ):
+        raise HTTPException(status_code=400, detail="Annual policy/admin fee must be zero or greater")
 
     request = {
         "age": payload.issueAge,
@@ -1868,6 +1873,7 @@ def api_workspace_projection(
         "sex": payload.sex,
         "riskClass": payload.riskClass,
         "tobaccoStatus": payload.tobaccoStatus,
+        "policyFeeAnnual": payload.policyFeeAnnual,
     }
     artifact = load_workspace_executable_mechanics(workspace_id) or {}
     request["_workspaceExecutableMechanics"] = artifact.get("usable") or {}
@@ -9815,6 +9821,7 @@ def _run_ul_projection(
         "sex": request.get("sex"),
         "riskClass": request.get("riskClass"),
         "tobaccoStatus": request.get("tobaccoStatus"),
+        "policyFeeAnnual": request.get("policyFeeAnnual"),
     }
 
     return projection, normalised_request
@@ -9833,6 +9840,19 @@ def build_ul_illustration_for_product(product_code: str, request: Dict[str, Any]
 
     cfg = load_ul_runtime_config(product_code)
     cfg.executable_mechanics = request.get("_workspaceExecutableMechanics") or None
+    scenario_policy_fee = request.get("policyFeeAnnual")
+    if scenario_policy_fee is not None and not (cfg.executable_mechanics or {}).get("fees"):
+        cfg.policy_fee_annual = float(scenario_policy_fee)
+        if cfg.fees is not None:
+            cfg.fees.policy_fee_annual = [float(scenario_policy_fee) for _ in range(30)]
+        cfg.assumption_provenance = [
+            item for item in (cfg.assumption_provenance or [])
+            if "policy fee" not in str(item.get("name") or "").lower()
+        ] + [{
+            "name": "Policy fee",
+            "value": float(scenario_policy_fee),
+            "source": "User-entered scenario assumption",
+        }]
 
     horizon_years = 30
     projection, normalised_request = _run_ul_projection(request=request, config=cfg, horizon_years=horizon_years)
@@ -9887,9 +9907,13 @@ def build_ul_illustration_for_product(product_code: str, request: Dict[str, Any]
             "The loaded surrender schedule did not match every scenario selector; "
             "the simplified surrender placeholder was retained for unmatched years."
         )
-    if not executable.get("fees"):
+    if not executable.get("fees") and scenario_policy_fee is None:
         warnings.append(
             "No policy or admin fees are applied because no complete evidenced fee schedule is loaded."
+        )
+    elif not executable.get("fees"):
+        warnings.append(
+            "Policy/admin fees use a user-entered scenario assumption because no complete evidenced fee schedule is loaded."
         )
     elif (execution.get("fees") or {}).get("fallbackYears"):
         warnings.append(
@@ -10022,8 +10046,12 @@ def build_ul_illustration_for_product(product_code: str, request: Dict[str, Any]
             "label": "Annual policy/admin fee",
             "value": f"{len(executable.get('fees') or [])} executable rows" if executable.get("fees") else cfg.policy_fee_annual,
             "unit": "USD",
-            "status": "evidenced" if executable.get("fees") else "missing",
-            "source": _mechanics_source(executable.get("fees")) if executable.get("fees") else "No evidenced fee schedule; current configured amount is $0",
+            "status": "evidenced" if executable.get("fees") else ("scenario_assumption" if scenario_policy_fee is not None else "missing"),
+            "source": _mechanics_source(executable.get("fees")) if executable.get("fees") else (
+                "User-entered scenario assumption; no evidenced fee schedule"
+                if scenario_policy_fee is not None
+                else "No evidenced fee schedule; projection requires an explicit assumption"
+            ),
         },
         {
             "id": "surrender_schedule",

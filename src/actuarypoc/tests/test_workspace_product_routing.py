@@ -51,6 +51,28 @@ def test_promise_ul_workspace_snapshot_builds_without_review_storage(monkeypatch
     assert "endingPolicyValue" in first_row
 
 
+def test_user_policy_fee_assumption_is_applied_and_remains_provisional(monkeypatch) -> None:
+    monkeypatch.setattr(server, "get_product_review", lambda product_code: None)
+
+    result = server.build_ul_illustration_for_product(
+        "ICC18 P18PR UL",
+        {
+            "age": 45,
+            "faceAmount": 100_000,
+            "premiumMode": "ANNUAL",
+            "modalPremium": 3_000,
+            "policyFeeAnnual": 125.50,
+        },
+    )
+
+    fee_input = next(item for item in result["projectionInputs"] if item["id"] == "policy_fee")
+    assert fee_input["value"] == 125.50
+    assert fee_input["status"] == "scenario_assumption"
+    assert "no evidenced fee schedule" in fee_input["source"].lower()
+    assert result["projection"]["rows"][0]["policyFee"] == 125.50
+    assert any("user-entered scenario assumption" in warning for warning in result["warnings"])
+
+
 def test_workspace_evidence_replaces_generic_citation(monkeypatch) -> None:
     snapshot = server.build_product_workspace_snapshot("ICC18 P18PR UL")
     documents = [

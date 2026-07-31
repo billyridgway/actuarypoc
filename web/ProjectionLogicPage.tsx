@@ -1,5 +1,5 @@
 import React from "react";
-import { GraphInputConfig, MechanicsStep, ProjectionInput, ProjectionLogicGraph } from "./ProductWorkspacePage";
+import { CapabilityAlignmentItem, GraphInputConfig, MechanicsStep, ProjectionInput, ProjectionLogicGraph } from "./ProductWorkspacePage";
 
 interface ProjectionLogicPageProps {
   snapshot: any;
@@ -9,7 +9,9 @@ interface ProjectionLogicPageProps {
 const initialGraphInputs = (snapshot: any) => {
   const request = snapshot?.illustration?.request || {};
   const firstRow = snapshot?.illustration?.rows?.[0] || {};
-  return {
+  const inputs = Array.isArray(snapshot?.illustration?.inputs) ? snapshot.illustration.inputs : [];
+  const policyFee = inputs.find((input: any) => input?.id === "policy_fee");
+  const values: Record<string, string | number> = {
     issue_age: Number(request.age ?? 45),
     face_amount: Number(request.faceAmount ?? 100000),
     premium: Number(firstRow.modalPremium ?? firstRow.annualPremium ?? 3000),
@@ -18,6 +20,10 @@ const initialGraphInputs = (snapshot: any) => {
     risk_class: String(request.riskClass ?? ""),
     tobacco_status: String(request.tobaccoStatus ?? ""),
   };
+  if (["missing", "not_available", "scenario_assumption"].includes(String(policyFee?.status || "").toLowerCase())) {
+    values.policy_fee = request.policyFeeAnnual ?? (policyFee?.status === "scenario_assumption" ? policyFee?.value : "");
+  }
+  return values;
 };
 
 const uniqueOptions = (values: unknown[]): string[] => {
@@ -43,6 +49,14 @@ const graphInputConfigs = (snapshot: any, values: Record<string, string | number
     issue_age: { kind: "number", min: 0, max: 120, step: 1, help: "Whole number from 0 to 120" },
     face_amount: { kind: "number", min: 1, step: 1000, help: "Must be greater than $0" },
     premium: { kind: "number", min: 1, step: 100, help: "Must be greater than $0" },
+    policy_fee: {
+      kind: "number",
+      min: 0,
+      step: 0.01,
+      enteredStatus: "provisional",
+      placeholder: "Enter annual fee",
+      help: "Scenario assumption; $0 must be entered explicitly",
+    },
     premium_mode: {
       kind: "select",
       options: [
@@ -82,8 +96,9 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
   const inputs = (illustration?.inputs ?? []) as ProjectionInput[];
   const steps = (mechanics?.steps ?? []) as MechanicsStep[];
   const inputConfigs = React.useMemo(() => graphInputConfigs(snapshot, values), [snapshot, values]);
+  const capabilities = (snapshot?.capabilityAssessment?.items ?? []) as CapabilityAlignmentItem[];
   const missingCount = inputs.filter((input) => ["missing", "not_available"].includes(String(input.status || "").toLowerCase())).length;
-  const provisionalCount = inputs.filter((input) => ["placeholder", "derived_placeholder", "default", "diagnostic", "not_supplied"].includes(String(input.status || "").toLowerCase())).length;
+  const provisionalCount = inputs.filter((input) => ["placeholder", "derived_placeholder", "default", "diagnostic", "not_supplied", "scenario_assumption"].includes(String(input.status || "").toLowerCase())).length;
 
   const updateInput = (inputId: string, value: string) => {
     setValues((current) => ({ ...current, [inputId]: value }));
@@ -94,6 +109,8 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
     const issueAge = Number(values.issue_age);
     const faceAmount = Number(values.face_amount);
     const modalPremium = Number(values.premium);
+    const policyFeeText = String(values.policy_fee ?? "").trim();
+    const policyFeeAnnual = policyFeeText === "" ? undefined : Number(policyFeeText);
     if (!Number.isInteger(issueAge) || issueAge < 0 || issueAge > 120) {
       setError("Issue age must be a whole number from 0 to 120.");
       return;
@@ -104,6 +121,10 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
     }
     if (!Number.isFinite(modalPremium) || modalPremium <= 0) {
       setError("Modal premium must be greater than $0.");
+      return;
+    }
+    if (policyFeeAnnual !== undefined && (!Number.isFinite(policyFeeAnnual) || policyFeeAnnual < 0)) {
+      setError("Annual policy/admin fee must be $0 or greater.");
       return;
     }
     setRunning(true);
@@ -120,6 +141,7 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
           sex: String(values.sex || ""),
           riskClass: String(values.risk_class || ""),
           tobaccoStatus: String(values.tobacco_status || ""),
+          policyFeeAnnual,
         }),
       });
       if (!response.ok) throw new Error((await response.text()) || `Projection failed (HTTP ${response.status})`);
@@ -166,6 +188,7 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
           editableValues={values}
           onInputChange={updateInput}
           inputConfigs={inputConfigs}
+          capabilities={capabilities}
         />
       ) : (
         <section className="card"><p className="muted">No projection mechanics are available for this workspace yet.</p></section>
