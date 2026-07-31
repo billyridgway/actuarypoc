@@ -28,7 +28,7 @@ interface WorkspaceRow {
   status?: string | null;
 }
 
-interface ProjectionInput {
+export interface ProjectionInput {
   id?: string;
   label?: string;
   value?: any;
@@ -37,7 +37,7 @@ interface ProjectionInput {
   source?: string;
 }
 
-interface MechanicsStep {
+export interface MechanicsStep {
   id?: string;
   order?: number;
   title?: string;
@@ -269,6 +269,7 @@ type LogicNodeStatus = "ready" | "provisional" | "missing";
 
 interface LogicGraphNode {
   id: string;
+  inputId?: string;
   kind: "input" | "rule";
   label: string;
   status: LogicNodeStatus;
@@ -294,19 +295,25 @@ const inputStatus = (status?: string): LogicNodeStatus => {
   return "ready";
 };
 
-const ProjectionLogicGraph: React.FC<{
+export const ProjectionLogicGraph: React.FC<{
   inputs: ProjectionInput[];
   steps: MechanicsStep[];
-}> = ({ inputs, steps }) => {
+  editableValues?: Record<string, string | number>;
+  onInputChange?: (inputId: string, value: string) => void;
+}> = ({ inputs, steps, editableValues, onInputChange }) => {
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
   const [problemsOnly, setProblemsOnly] = React.useState(false);
 
   const graph = React.useMemo(() => {
     const nodes: LogicGraphNode[] = inputs.map((input, index) => ({
       id: `input:${input.id || index}`,
+      inputId: input.id || String(index),
       kind: "input",
       label: input.label || input.id || "Input",
-      status: inputStatus(input.status),
+      status:
+        editableValues && input.id && String(editableValues[input.id] ?? "").trim()
+          ? "ready"
+          : inputStatus(input.status),
       detail: input.status,
       value: input.value,
       unit: input.unit,
@@ -374,7 +381,7 @@ const ProjectionLogicGraph: React.FC<{
       });
 
     return [...inputNodes, ...ruleNodes];
-  }, [inputs, steps]);
+  }, [editableValues, inputs, steps]);
 
   const visibleIds = React.useMemo(() => {
     if (!problemsOnly) return new Set(graph.map((node) => node.id));
@@ -453,12 +460,41 @@ const ProjectionLogicGraph: React.FC<{
           })}
           {visibleNodes.map((node) => {
             const position = positions.get(node.id)!;
+            const canEdit = node.kind === "input" && node.inputId && editableValues && node.inputId in editableValues;
             return (
               <g key={node.id} className={`logic-graph__node logic-graph__node--${node.status}${selectedId === node.id ? " is-selected" : ""}`} onClick={() => setSelectedId(node.id)} role="button" tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") setSelectedId(node.id); }}>
                 <rect x={position.x} y={position.y} width={nodeWidth} height={nodeHeight} rx="10" />
-                <text x={position.x + 14} y={position.y + 20} className="logic-graph__kind">{node.kind === "input" ? "INPUT" : "RULE"}</text>
-                <text x={position.x + 14} y={position.y + 43} className="logic-graph__label">{node.label.length > 24 ? `${node.label.slice(0, 24)}…` : node.label}</text>
-                <text x={position.x + 14} y={position.y + 59} className="logic-graph__status">{node.detail || node.status}</text>
+                {canEdit ? (
+                  <foreignObject x={position.x + 10} y={position.y + 7} width={nodeWidth - 20} height={nodeHeight - 12}>
+                    <label className="logic-graph__input" onClick={(event) => event.stopPropagation()}>
+                      <span>{node.label === "Annual premium" ? "Modal premium" : node.label}</span>
+                      {node.inputId === "premium_mode" ? (
+                        <select
+                          value={String(editableValues[node.inputId] ?? "")}
+                          onChange={(event) => onInputChange?.(node.inputId!, event.target.value)}
+                        >
+                          <option value="ANNUAL">Annual</option>
+                          <option value="SEMIANNUAL">Semiannual</option>
+                          <option value="QUARTERLY">Quarterly</option>
+                          <option value="MONTHLY">Monthly</option>
+                        </select>
+                      ) : (
+                        <input
+                          type={["issue_age", "face_amount", "premium"].includes(node.inputId) ? "number" : "text"}
+                          value={editableValues[node.inputId] ?? ""}
+                          placeholder={node.inputId === "sex" ? "e.g. F" : node.inputId === "risk_class" ? "e.g. Standard" : node.inputId === "tobacco_status" ? "e.g. Non-Tobacco" : undefined}
+                          onChange={(event) => onInputChange?.(node.inputId!, event.target.value)}
+                        />
+                      )}
+                    </label>
+                  </foreignObject>
+                ) : (
+                  <>
+                    <text x={position.x + 14} y={position.y + 20} className="logic-graph__kind">{node.kind === "input" ? "INPUT" : "RULE"}</text>
+                    <text x={position.x + 14} y={position.y + 43} className="logic-graph__label">{node.label.length > 24 ? `${node.label.slice(0, 24)}…` : node.label}</text>
+                    <text x={position.x + 14} y={position.y + 59} className="logic-graph__status">{node.detail || node.status}</text>
+                  </>
+                )}
               </g>
             );
           })}
@@ -2232,18 +2268,11 @@ export const ProductWorkspacePage: React.FC<{
               Follow projection inputs into the rules they drive. Missing inputs are red; calculations using defaults
               or placeholders are amber. Select a node to inspect its value, source, and logic.
             </p>
-            <ProjectionLogicGraph inputs={illustration?.inputs ?? []} steps={mechanicsExplanation.steps} />
-            <details className="logic-graph__ordered-steps">
-              <summary>View ordered calculation steps</summary>
-              <ol>
-                {mechanicsExplanation.steps.map((step) => (
-                  <li key={step.id ?? step.order}>
-                    <strong>{step.title || "Step"}</strong>
-                    {step.formulaText && <p className="muted">{step.formulaText}</p>}
-                  </li>
-                ))}
-              </ol>
-            </details>
+            <p>
+              <a className="button" href={`/web?workspace=${encodeURIComponent(workspaceId || "")}&view=logic`}>
+                Open graph workspace
+              </a>
+            </p>
           </>
         ) : (
           <p className="muted">

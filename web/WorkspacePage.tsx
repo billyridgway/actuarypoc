@@ -1,5 +1,6 @@
 import React from "react";
 import { ProductWorkspacePage } from "./ProductWorkspacePage";
+import { ProjectionLogicPage } from "./ProjectionLogicPage";
 
 interface WorkspaceMeta {
   id: string;
@@ -46,7 +47,7 @@ const formatWorkspaceStatus = (value?: string | null): string => {
   }
 };
 
-export const WorkspacePage: React.FC<{ workspaceId: string }> = ({ workspaceId }) => {
+export const WorkspacePage: React.FC<{ workspaceId: string; view?: string }> = ({ workspaceId, view }) => {
   const [data, setData] = React.useState<WorkspaceResponse | null>(null);
   const [loading, setLoading] = React.useState<boolean>(true);
   const [error, setError] = React.useState<string | null>(null);
@@ -86,7 +87,11 @@ export const WorkspacePage: React.FC<{ workspaceId: string }> = ({ workspaceId }
     // Once analysis has populated the snapshot and the workspace has
     // reached the analyzed state, reuse the existing Product
     // Understanding Workspace view directly from the snapshot.
-    return <ProductWorkspacePage snapshot={snapshot} workspaceId={workspaceId} />;
+    return view === "logic" ? (
+      <ProjectionLogicPage snapshot={snapshot} workspaceId={workspaceId} />
+    ) : (
+      <ProductWorkspacePage snapshot={snapshot} workspaceId={workspaceId} />
+    );
   }
 
   const statusLabel = formatWorkspaceStatus(workspace?.status);
