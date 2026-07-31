@@ -284,6 +284,165 @@ details > summary {
   color: var(--text-muted);
 }
 
+/* Projection dependency graph */
+
+.logic-graph {
+  margin-top: 1rem;
+}
+
+.logic-graph__toolbar,
+.logic-graph__legend {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem 1rem;
+}
+
+.logic-graph__toolbar {
+  justify-content: space-between;
+  margin-bottom: 0.75rem;
+}
+
+.logic-graph__legend {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.logic-graph__legend span {
+  align-items: center;
+  display: inline-flex;
+  gap: 0.35rem;
+}
+
+.logic-graph__dot {
+  border-radius: 999px;
+  display: inline-block;
+  height: 0.65rem;
+  width: 0.65rem;
+}
+
+.logic-graph__dot--ready { background: var(--success); }
+.logic-graph__dot--provisional { background: var(--warning); }
+.logic-graph__dot--missing { background: var(--danger); }
+
+.logic-graph__viewport {
+  background: linear-gradient(#f8fafc 1px, transparent 1px), linear-gradient(90deg, #f8fafc 1px, transparent 1px);
+  background-size: 24px 24px;
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  max-height: 42rem;
+  overflow: auto;
+}
+
+.logic-graph__viewport svg {
+  display: block;
+}
+
+.logic-graph__edge {
+  fill: none;
+  marker-end: url(#logic-arrow);
+  stroke: #94a3b8;
+  stroke-width: 1.5;
+}
+
+.logic-graph__edge--missing {
+  stroke: var(--danger);
+  stroke-dasharray: 5 4;
+}
+
+.logic-graph__arrowhead { fill: #94a3b8; }
+
+.logic-graph__node {
+  cursor: pointer;
+  outline: none;
+}
+
+.logic-graph__node rect {
+  fill: white;
+  stroke: var(--success);
+  stroke-width: 1.5;
+  transition: filter 120ms ease, stroke-width 120ms ease;
+}
+
+.logic-graph__node:hover rect,
+.logic-graph__node:focus rect,
+.logic-graph__node.is-selected rect {
+  filter: drop-shadow(0 5px 8px rgba(15, 23, 42, 0.16));
+  stroke-width: 3;
+}
+
+.logic-graph__node--provisional rect {
+  fill: var(--warning-soft);
+  stroke: var(--warning);
+}
+
+.logic-graph__node--missing rect {
+  fill: var(--danger-soft);
+  stroke: var(--danger);
+}
+
+.logic-graph__kind {
+  fill: var(--text-muted);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.logic-graph__label {
+  fill: var(--text-main);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.logic-graph__status {
+  fill: var(--text-muted);
+  font-size: 9px;
+}
+
+.logic-graph__detail {
+  background: var(--success-soft);
+  border: 1px solid color-mix(in srgb, var(--success) 45%, var(--border));
+  border-radius: 0.7rem;
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: minmax(12rem, 0.8fr) minmax(16rem, 1.4fr);
+  margin-top: 0.75rem;
+  padding: 0.9rem 1rem;
+}
+
+.logic-graph__detail--provisional {
+  background: var(--warning-soft);
+  border-color: color-mix(in srgb, var(--warning) 45%, var(--border));
+}
+
+.logic-graph__detail--missing {
+  background: var(--danger-soft);
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+}
+
+.logic-graph__detail h3,
+.logic-graph__detail p {
+  margin: 0.25rem 0;
+}
+
+.logic-graph__eyebrow {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.logic-graph__ordered-steps {
+  margin-top: 0.75rem;
+}
+
+@media (max-width: 640px) {
+  .logic-graph__detail {
+    grid-template-columns: 1fr;
+  }
+}
+
 .fact-source {
   color: var(--text-muted);
   display: block;
