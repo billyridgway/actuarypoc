@@ -1352,28 +1352,25 @@ def _build_capability_assessment(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             "coi_table": {
                 "capabilityId": "UL_CAP_COI_TABLE_AGE_GENDER_CLASS",
                 "name": "COI rate tables",
-                "nonImplementedStatus": "unsupported",
                 "reason": (
-                    "The current engine uses a flat placeholder COI rate and does not "
-                    "implement the filed age/gender/class tables."
+                    "The engine executes validated COI tables selected by duration or attained age, "
+                    "sex, risk class, and tobacco status, with explicit rate units."
                 ),
             },
             "surrender_schedule": {
                 "capabilityId": "UL_CAP_SURRENDER_FIXED_SCHEDULE",
                 "name": "Surrender charge schedule",
-                "nonImplementedStatus": "partial",
                 "reason": (
-                    "The current engine uses a simplified declining surrender pattern "
-                    "instead of the complete filed schedule."
+                    "The engine executes validated fixed surrender charge schedules by duration, "
+                    "including issue-age and sex selectors and explicit charge units."
                 ),
             },
             "policy_admin_fees": {
                 "capabilityId": "UL_CAP_LEVEL_POLICY_FEE",
                 "name": "Policy / admin fees",
-                "nonImplementedStatus": "partial",
                 "reason": (
-                    "The engine supports a level policy fee, but no evidenced fee schedule "
-                    "is loaded; the current projection applies a $0 fee."
+                    "The engine executes validated level and duration-specific policy fees, "
+                    "including annual, modal, and per-$1,000 face amount units."
                 ),
             },
         }
@@ -1383,21 +1380,14 @@ def _build_capability_assessment(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             if isinstance(item, dict)
         }
         product_code = ((snapshot.get("product") or {}).get("code") or None)
-        executable_status = (snapshot.get("executableMechanics") or {}).get("status") or {}
-        requirement_mechanic = {
-            "coi_table": "coi",
-            "surrender_schedule": "surrender",
-            "policy_admin_fees": "fees",
+        engine_capabilities = {
+            capability.capability_id: capability
+            for capability in get_ul_capabilities()
         }
         for requirement_id, definition in canonical_capabilities.items():
             requirement = requirements.get(requirement_id) or {}
-            requirement_status = str(requirement.get("status") or "missing").lower()
-            mechanic_status = executable_status.get(requirement_mechanic[requirement_id])
-            capability_status = (
-                "supported"
-                if mechanic_status == "executable"
-                else str(definition["nonImplementedStatus"])
-            )
+            engine_capability = engine_capabilities.get(str(definition["capabilityId"]))
+            capability_status = engine_capability.implementation_status if engine_capability else "unsupported"
             source = None
             evidence = requirement.get("evidence") or []
             if evidence and isinstance(evidence[0], dict):
@@ -1410,9 +1400,9 @@ def _build_capability_assessment(snapshot: Dict[str, Any]) -> Dict[str, Any]:
                 "status": capability_status,
                 "impact": requirement.get("impact") or "medium",
                 "reason": (
-                    "A validated workspace schedule is loaded and executed with recorded provenance."
+                    definition["reason"]
                     if capability_status == "supported"
-                    else definition["reason"]
+                    else "No executable engine capability is registered for this product mechanic."
                 ),
                 "productCode": product_code,
                 "sourceRequirementId": requirement_id,
