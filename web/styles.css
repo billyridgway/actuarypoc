@@ -407,6 +407,16 @@ details > summary {
   gap: 3px;
 }
 
+.logic-graph__input small {
+  color: var(--text-muted);
+  font-size: 8px;
+  font-weight: 500;
+  line-height: 1.1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .logic-graph__input input,
 .logic-graph__input select {
   background: rgba(255, 255, 255, 0.88);

@@ -1,5 +1,5 @@
 import React from "react";
-import { MechanicsStep, ProjectionInput, ProjectionLogicGraph } from "./ProductWorkspacePage";
+import { GraphInputConfig, MechanicsStep, ProjectionInput, ProjectionLogicGraph } from "./ProductWorkspacePage";
 
 interface ProjectionLogicPageProps {
   snapshot: any;
@@ -20,6 +20,57 @@ const initialGraphInputs = (snapshot: any) => {
   };
 };
 
+const uniqueOptions = (values: unknown[]): string[] => {
+  const seen = new Set<string>();
+  for (const value of values) {
+    const label = String(value ?? "").trim();
+    if (label) seen.add(label);
+  }
+  return [...seen];
+};
+
+const graphInputConfigs = (snapshot: any, values: Record<string, string | number>): Record<string, GraphInputConfig> => {
+  const configuredRiskClasses = Array.isArray(snapshot?.productUnderstanding?.riskClasses)
+    ? snapshot.productUnderstanding.riskClasses
+    : [];
+  const riskClasses = configuredRiskClasses.length
+    ? uniqueOptions(configuredRiskClasses)
+    : uniqueOptions([values.risk_class]);
+  const sexValues = ["F", "M"];
+  const tobaccoValues = ["Non-Tobacco", "Tobacco"];
+
+  return {
+    issue_age: { kind: "number", min: 0, max: 120, step: 1, help: "Whole number from 0 to 120" },
+    face_amount: { kind: "number", min: 1, step: 1000, help: "Must be greater than $0" },
+    premium: { kind: "number", min: 1, step: 100, help: "Must be greater than $0" },
+    premium_mode: {
+      kind: "select",
+      options: [
+        { value: "ANNUAL", label: "Annual" },
+        { value: "SEMIANNUAL", label: "Semiannual" },
+        { value: "QUARTERLY", label: "Quarterly" },
+        { value: "MONTHLY", label: "Monthly" },
+      ],
+    },
+    sex: {
+      kind: "select",
+      placeholder: "Select sex",
+      options: sexValues.map((value) => ({ value, label: value === "F" ? "Female (F)" : value === "M" ? "Male (M)" : value })),
+    },
+    risk_class: {
+      kind: "select",
+      placeholder: riskClasses.length ? "Select risk class" : "No risk classes available",
+      options: riskClasses.map((value) => ({ value, label: value })),
+      help: riskClasses.length ? "From this product's configured risk classes" : "Upload evidence defining valid risk classes",
+    },
+    tobacco_status: {
+      kind: "select",
+      placeholder: "Select tobacco status",
+      options: tobaccoValues.map((value) => ({ value, label: value })),
+    },
+  };
+};
+
 export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapshot, workspaceId }) => {
   const [illustration, setIllustration] = React.useState(snapshot?.illustration ?? null);
   const [mechanics, setMechanics] = React.useState(snapshot?.mechanicsExplanation ?? null);
@@ -30,6 +81,7 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
 
   const inputs = (illustration?.inputs ?? []) as ProjectionInput[];
   const steps = (mechanics?.steps ?? []) as MechanicsStep[];
+  const inputConfigs = React.useMemo(() => graphInputConfigs(snapshot, values), [snapshot, values]);
   const missingCount = inputs.filter((input) => ["missing", "not_available"].includes(String(input.status || "").toLowerCase())).length;
   const provisionalCount = inputs.filter((input) => ["placeholder", "derived_placeholder", "default", "diagnostic", "not_supplied"].includes(String(input.status || "").toLowerCase())).length;
 
@@ -39,6 +91,21 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
   };
 
   const runProjection = async () => {
+    const issueAge = Number(values.issue_age);
+    const faceAmount = Number(values.face_amount);
+    const modalPremium = Number(values.premium);
+    if (!Number.isInteger(issueAge) || issueAge < 0 || issueAge > 120) {
+      setError("Issue age must be a whole number from 0 to 120.");
+      return;
+    }
+    if (!Number.isFinite(faceAmount) || faceAmount <= 0) {
+      setError("Face amount must be greater than $0.");
+      return;
+    }
+    if (!Number.isFinite(modalPremium) || modalPremium <= 0) {
+      setError("Modal premium must be greater than $0.");
+      return;
+    }
     setRunning(true);
     setError(null);
     try {
@@ -46,9 +113,9 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          issueAge: Number(values.issue_age),
-          faceAmount: Number(values.face_amount),
-          modalPremium: Number(values.premium),
+          issueAge,
+          faceAmount,
+          modalPremium,
           premiumMode: String(values.premium_mode),
           sex: String(values.sex || ""),
           riskClass: String(values.risk_class || ""),
@@ -93,7 +160,13 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
 
       {error && <p className="error">{error}</p>}
       {steps.length ? (
-        <ProjectionLogicGraph inputs={inputs} steps={steps} editableValues={values} onInputChange={updateInput} />
+        <ProjectionLogicGraph
+          inputs={inputs}
+          steps={steps}
+          editableValues={values}
+          onInputChange={updateInput}
+          inputConfigs={inputConfigs}
+        />
       ) : (
         <section className="card"><p className="muted">No projection mechanics are available for this workspace yet.</p></section>
       )}

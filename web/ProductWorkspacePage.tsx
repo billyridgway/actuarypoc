@@ -46,6 +46,16 @@ export interface MechanicsStep {
   result?: { label?: string; value?: any; unit?: string; source?: string };
 }
 
+export interface GraphInputConfig {
+  kind: "number" | "select" | "text";
+  min?: number;
+  max?: number;
+  step?: number;
+  help?: string;
+  placeholder?: string;
+  options?: Array<{ value: string; label: string }>;
+}
+
 interface WorkspacePayload {
   product?: {
     code?: string;
@@ -300,7 +310,8 @@ export const ProjectionLogicGraph: React.FC<{
   steps: MechanicsStep[];
   editableValues?: Record<string, string | number>;
   onInputChange?: (inputId: string, value: string) => void;
-}> = ({ inputs, steps, editableValues, onInputChange }) => {
+  inputConfigs?: Record<string, GraphInputConfig>;
+}> = ({ inputs, steps, editableValues, onInputChange, inputConfigs }) => {
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
   const [problemsOnly, setProblemsOnly] = React.useState(false);
 
@@ -406,9 +417,9 @@ export const ProjectionLogicGraph: React.FC<{
   const visibleNodes = graph.filter((node) => visibleIds.has(node.id));
   const levels = [...new Set(visibleNodes.map((node) => node.level))].sort((a, b) => a - b);
   const columnWidth = 250;
-  const rowHeight = 104;
+  const rowHeight = 112;
   const nodeWidth = 190;
-  const nodeHeight = 68;
+  const nodeHeight = 76;
   const padding = 34;
   const maxRows = Math.max(1, ...levels.map((level) => visibleNodes.filter((node) => node.level === level).length));
   const width = Math.max(720, levels.length * columnWidth + padding * 2);
@@ -461,38 +472,43 @@ export const ProjectionLogicGraph: React.FC<{
           {visibleNodes.map((node) => {
             const position = positions.get(node.id)!;
             const canEdit = node.kind === "input" && node.inputId && editableValues && node.inputId in editableValues;
+            const config = node.inputId ? inputConfigs?.[node.inputId] : undefined;
             return (
               <g key={node.id} className={`logic-graph__node logic-graph__node--${node.status}${selectedId === node.id ? " is-selected" : ""}`} onClick={() => setSelectedId(node.id)} role="button" tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") setSelectedId(node.id); }}>
                 <rect x={position.x} y={position.y} width={nodeWidth} height={nodeHeight} rx="10" />
                 {canEdit ? (
-                  <foreignObject x={position.x + 10} y={position.y + 7} width={nodeWidth - 20} height={nodeHeight - 12}>
+                  <foreignObject x={position.x + 10} y={position.y + 6} width={nodeWidth - 20} height={nodeHeight - 10}>
                     <label className="logic-graph__input" onClick={(event) => event.stopPropagation()}>
                       <span>{node.label === "Annual premium" ? "Modal premium" : node.label}</span>
-                      {node.inputId === "premium_mode" ? (
+                      {config?.kind === "select" ? (
                         <select
                           value={String(editableValues[node.inputId] ?? "")}
                           onChange={(event) => onInputChange?.(node.inputId!, event.target.value)}
                         >
-                          <option value="ANNUAL">Annual</option>
-                          <option value="SEMIANNUAL">Semiannual</option>
-                          <option value="QUARTERLY">Quarterly</option>
-                          <option value="MONTHLY">Monthly</option>
+                          {config.placeholder && <option value="">{config.placeholder}</option>}
+                          {(config.options ?? []).map((option) => (
+                            <option key={option.value} value={option.value}>{option.label}</option>
+                          ))}
                         </select>
                       ) : (
                         <input
-                          type={["issue_age", "face_amount", "premium"].includes(node.inputId) ? "number" : "text"}
+                          type={config?.kind === "number" ? "number" : "text"}
+                          min={config?.min}
+                          max={config?.max}
+                          step={config?.step}
                           value={editableValues[node.inputId] ?? ""}
-                          placeholder={node.inputId === "sex" ? "e.g. F" : node.inputId === "risk_class" ? "e.g. Standard" : node.inputId === "tobacco_status" ? "e.g. Non-Tobacco" : undefined}
+                          placeholder={config?.placeholder}
                           onChange={(event) => onInputChange?.(node.inputId!, event.target.value)}
                         />
                       )}
+                      {config?.help && <small>{config.help}</small>}
                     </label>
                   </foreignObject>
                 ) : (
                   <>
                     <text x={position.x + 14} y={position.y + 20} className="logic-graph__kind">{node.kind === "input" ? "INPUT" : "RULE"}</text>
                     <text x={position.x + 14} y={position.y + 43} className="logic-graph__label">{node.label.length > 24 ? `${node.label.slice(0, 24)}…` : node.label}</text>
-                    <text x={position.x + 14} y={position.y + 59} className="logic-graph__status">{node.detail || node.status}</text>
+                    <text x={position.x + 14} y={position.y + 64} className="logic-graph__status">{node.detail || node.status}</text>
                   </>
                 )}
               </g>
