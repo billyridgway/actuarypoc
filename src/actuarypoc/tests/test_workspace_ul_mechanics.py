@@ -112,8 +112,19 @@ def test_projection_retains_placeholder_for_unmatched_coi_selector() -> None:
     assert projection["mechanicsExecution"]["coi"]["fallbackYears"] == [1]
 
 
-def test_capability_reconciliation_requires_executable_status() -> None:
-    snapshot = server.build_product_workspace_snapshot("ICC18 P18PR UL")
+def test_engine_capabilities_do_not_depend_on_workspace_schedule_availability() -> None:
+    snapshot = {
+        "product": {"code": "ICC18 P18PR UL"},
+        "productModel": {
+            "type": "ul",
+            "universalLife": {
+                "product_code": "ICC18 P18PR UL",
+                "product_type": "ul",
+                "field_evidence": {},
+            },
+        },
+        "complianceMatrix": {"requirements": []},
+    }
     snapshot["executableMechanics"] = {
         "status": {"coi": "partial_fallback", "surrender": "executable", "fees": "executable"}
     }
@@ -121,6 +132,50 @@ def test_capability_reconciliation_requires_executable_status() -> None:
     result = server._build_capability_assessment(snapshot)
     statuses = {item["capabilityId"]: item["status"] for item in result["items"]}
 
-    assert statuses["UL_CAP_COI_TABLE_AGE_GENDER_CLASS"] != "supported"
+    assert statuses["UL_CAP_COI_TABLE_AGE_GENDER_CLASS"] == "supported"
     assert statuses["UL_CAP_SURRENDER_FIXED_SCHEDULE"] == "supported"
     assert statuses["UL_CAP_LEVEL_POLICY_FEE"] == "supported"
+
+
+def test_projection_selects_attained_age_sex_and_class_coi_row() -> None:
+    config = server.load_ul_runtime_config("ICC18 P18PR UL")
+    config.executable_mechanics = {
+        "coi": [
+            {"duration": None, "attained_age": 45, "sex": "M", "risk_class": "Standard", "tobacco_status": "Non-Tobacco", "rate": 1.0, "rate_unit": "per_1000_annual"},
+            {"duration": None, "attained_age": 45, "sex": "F", "risk_class": "Preferred", "tobacco_status": "Non-Tobacco", "rate": 2.0, "rate_unit": "per_1000_annual"},
+        ]
+    }
+
+    projection, _ = server._run_ul_projection(
+        request={"age": 45, "faceAmount": 100_000, "modalPremium": 3_000, "sex": "F", "riskClass": "Preferred", "tobaccoStatus": "Non-Tobacco"},
+        config=config,
+        horizon_years=1,
+    )
+
+    assert projection["rows"][0]["coiCharge"] == 193.88
+    assert projection["mechanicsExecution"]["coi"]["fullyApplied"] is True
+
+
+def test_projection_executes_fixed_surrender_schedule_and_modal_fee() -> None:
+    config = server.load_ul_runtime_config("ICC18 P18PR UL")
+    config.executable_mechanics = {
+        "surrender": [
+            {"duration": 1, "issue_age": None, "sex": None, "charge": 750.0, "charge_unit": "fixed"},
+        ],
+        "fees": [
+            {"duration": None, "premium_mode": "MONTHLY", "amount": 10.0, "fee_unit": "modal_fixed"},
+        ],
+    }
+
+    projection, _ = server._run_ul_projection(
+        request={"age": 45, "faceAmount": 100_000, "modalPremium": 250, "premiumMode": "MONTHLY"},
+        config=config,
+        horizon_years=2,
+    )
+
+    assert projection["rows"][0]["surrenderCharge"] == 750.0
+    assert projection["rows"][1]["surrenderCharge"] == 0.0
+    assert projection["rows"][0]["policyFee"] == 120.0
+    assert projection["rows"][1]["policyFee"] == 120.0
+    assert projection["mechanicsExecution"]["surrender"]["fullyApplied"] is True
+    assert projection["mechanicsExecution"]["fees"]["fullyApplied"] is True
