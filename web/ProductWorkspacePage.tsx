@@ -281,7 +281,7 @@ type LogicNodeStatus = "ready" | "provisional" | "missing";
 interface LogicGraphNode {
   id: string;
   inputId?: string;
-  kind: "input" | "rule";
+  kind: "input" | "rule" | "unmodeled";
   label: string;
   status: LogicNodeStatus;
   detail?: string;
@@ -289,9 +289,36 @@ interface LogicGraphNode {
   unit?: string;
   source?: string;
   formula?: string;
+  editable?: boolean;
+  inputConfig?: GraphInputConfig;
   capability?: CapabilityAlignmentItem;
   dependencies: string[];
   level: number;
+}
+
+export interface ProjectionGraphDefinition {
+  graphVersion: number;
+  productCode?: string;
+  productType?: string;
+  nodes: Array<{
+    id: string;
+    mechanicId: string;
+    inputId?: string;
+    kind: "input" | "rule" | "unmodeled";
+    label: string;
+    status: LogicNodeStatus;
+    detail?: string;
+    value?: any;
+    unit?: string;
+    source?: string;
+    formula?: string;
+    editable?: boolean;
+    inputConfig?: GraphInputConfig;
+    capability?: CapabilityAlignmentItem;
+  }>;
+  edges: Array<{ id: string; source: string; target: string; kind?: string; status?: string }>;
+  unmodeledMechanics?: string[];
+  diagnostics?: Array<{ code: string; nodeId?: string; message: string }>;
 }
 
 export interface CapabilityAlignmentItem {
@@ -307,122 +334,43 @@ export interface CapabilityAlignmentItem {
   recommendedAction?: string | null;
 }
 
-const normaliseLogicLabel = (value?: string): string =>
-  String(value || "")
-    .toLowerCase()
-    .replace(/annual|flat|deducted|added|closing|ending/g, "")
-    .replace(/[^a-z0-9]/g, "");
-
-const inputStatus = (status?: string): LogicNodeStatus => {
-  const value = String(status || "").toLowerCase();
-  if (["missing", "not_available"].includes(value)) return "missing";
-  if (["placeholder", "derived_placeholder", "default", "diagnostic", "not_supplied", "scenario_assumption"].includes(value)) return "provisional";
-  return "ready";
-};
-
 export const ProjectionLogicGraph: React.FC<{
-  inputs: ProjectionInput[];
-  steps: MechanicsStep[];
+  definition: ProjectionGraphDefinition;
   editableValues?: Record<string, string | number>;
   onInputChange?: (inputId: string, value: string) => void;
-  inputConfigs?: Record<string, GraphInputConfig>;
-  capabilities?: CapabilityAlignmentItem[];
-}> = ({ inputs, steps, editableValues, onInputChange, inputConfigs, capabilities = [] }) => {
+}> = ({ definition, editableValues, onInputChange }) => {
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
   const [problemsOnly, setProblemsOnly] = React.useState(false);
 
   const graph = React.useMemo(() => {
-    const capabilityByRequirement = new Map(
-      capabilities.map((capability) => [String(capability.sourceRequirementId || ""), capability]),
-    );
-    const inputCapabilityRequirements: Record<string, string> = {
-      coi_rate: "coi_table",
-      policy_fee: "policy_admin_fees",
-      surrender_schedule: "surrender_schedule",
-    };
-    const ruleCapabilityRequirements: Record<string, string> = {
-      coi_charge_deducted: "coi_table",
-      policy_admin_fee_deducted: "policy_admin_fees",
-      surrender_charge: "surrender_schedule",
-    };
-    const nodes: LogicGraphNode[] = inputs.map((input, index) => ({
-      id: `input:${input.id || index}`,
-      inputId: input.id || String(index),
-      kind: "input",
-      label: input.label || input.id || "Input",
-      status: editableValues && input.id && String(editableValues[input.id] ?? "").trim()
-        ? (inputConfigs?.[input.id]?.enteredStatus || "ready")
-        : inputStatus(input.status),
-      detail: input.status,
-      value: input.value,
-      unit: input.unit,
-      source: input.source,
-      capability: capabilityByRequirement.get(inputCapabilityRequirements[input.id || ""]),
-      dependencies: [],
+    const dependencies = new Map<string, string[]>();
+    for (const edge of definition.edges || []) {
+      dependencies.set(edge.target, [...(dependencies.get(edge.target) || []), edge.source]);
+    }
+    const nodes: LogicGraphNode[] = (definition.nodes || []).map((node) => ({
+      ...node,
+      status: editableValues && node.inputId && String(editableValues[node.inputId] ?? "").trim()
+        ? (node.inputConfig?.enteredStatus || "ready")
+        : node.status,
+      dependencies: dependencies.get(node.id) || [],
       level: 0,
     }));
-    const inputNodes = [...nodes];
-    const ruleNodes: LogicGraphNode[] = [];
-
-    const explicitInputIds: Record<string, string[]> = {
-      premium_added: ["premium", "premium_mode"],
-      coi_charge_deducted: ["face_amount", "coi_rate"],
-      policy_admin_fee_deducted: ["policy_fee"],
-      interest_credited: ["guaranteed_rate", "premium"],
-      surrender_charge: ["face_amount", "surrender_schedule"],
-      death_benefit: ["face_amount", "death_benefit_option"],
-    };
-
-    [...steps]
-      .sort((a, b) => Number(a.order || 0) - Number(b.order || 0))
-      .forEach((step, index) => {
-        const stepId = step.id || `step-${index}`;
-        const requestedLabels = (step.inputs || []).map((input) => normaliseLogicLabel(input.label));
-        const dependencies = new Set<string>();
-
-        for (const prior of ruleNodes) {
-          const resultLabel = normaliseLogicLabel(
-            steps.find((candidate) => `rule:${candidate.id || `step-${steps.indexOf(candidate)}`}` === prior.id)?.result?.label,
-          );
-          if (resultLabel && requestedLabels.some((label) => label === resultLabel || label.includes(resultLabel))) {
-            dependencies.add(prior.id);
-          }
+    const byId = new Map(nodes.map((node) => [node.id, node]));
+    for (let pass = 0; pass < nodes.length; pass += 1) {
+      let changed = false;
+      for (const node of nodes) {
+        const nextLevel = node.dependencies.length
+          ? Math.max(...node.dependencies.map((id) => (byId.get(id)?.level ?? -1) + 1))
+          : 0;
+        if (nextLevel > node.level) {
+          node.level = nextLevel;
+          changed = true;
         }
-        for (const input of inputNodes) {
-          const inputId = input.id.replace("input:", "");
-          const label = normaliseLogicLabel(input.label);
-          if (
-            (explicitInputIds[stepId] || []).includes(inputId) ||
-            (label && requestedLabels.some((requested) => requested === label || requested.includes(label)))
-          ) {
-            dependencies.add(input.id);
-          }
-        }
-
-        const dependencyNodes = [...dependencies]
-          .map((id) => [...inputNodes, ...ruleNodes].find((node) => node.id === id))
-          .filter((node): node is LogicGraphNode => Boolean(node));
-        const hasMissing = dependencyNodes.some((node) => node.status === "missing");
-        const hasProvisional = dependencyNodes.some((node) => node.status === "provisional");
-        const level = Math.max(1, ...dependencyNodes.map((node) => node.level + 1));
-        ruleNodes.push({
-          id: `rule:${stepId}`,
-          kind: "rule",
-          label: step.title || step.result?.label || `Step ${index + 1}`,
-          status: hasMissing || hasProvisional ? "provisional" : "ready",
-          detail: hasMissing ? "Uses a fallback because required data is missing" : hasProvisional ? "Uses a placeholder or default" : "Ready",
-          value: step.result?.value,
-          unit: step.result?.unit,
-          source: step.result?.source,
-          formula: step.formulaText,
-          capability: capabilityByRequirement.get(ruleCapabilityRequirements[stepId]),
-          dependencies: [...dependencies],
-          level,
-        });
-      });
-
-    return [...inputNodes, ...ruleNodes];
-  }, [capabilities, editableValues, inputConfigs, inputs, steps]);
+      }
+      if (!changed) break;
+    }
+    return nodes;
+  }, [definition, editableValues]);
 
   const visibleIds = React.useMemo(() => {
     if (!problemsOnly) return new Set(graph.map((node) => node.id));
@@ -463,8 +411,9 @@ export const ProjectionLogicGraph: React.FC<{
 
   const selected = graph.find((node) => node.id === selectedId) || null;
   const problemCount = graph.filter((node) => node.status !== "ready" || ["partial", "unsupported"].includes(String(node.capability?.status || "").toLowerCase())).length;
-  const unsupportedCapabilities = capabilities.filter((item) => String(item.status || "").toLowerCase() === "unsupported").length;
-  const partialCapabilities = capabilities.filter((item) => String(item.status || "").toLowerCase() === "partial").length;
+  const uniqueCapabilities = new Map(graph.filter((node) => node.capability).map((node) => [node.capability!.capabilityId, node.capability!]));
+  const unsupportedCapabilities = [...uniqueCapabilities.values()].filter((item) => String(item.status || "").toLowerCase() === "unsupported").length;
+  const partialCapabilities = [...uniqueCapabilities.values()].filter((item) => String(item.status || "").toLowerCase() === "partial").length;
 
   return (
     <div className="logic-graph">
@@ -506,8 +455,8 @@ export const ProjectionLogicGraph: React.FC<{
           })}
           {visibleNodes.map((node) => {
             const position = positions.get(node.id)!;
-            const canEdit = node.kind === "input" && node.inputId && editableValues && node.inputId in editableValues;
-            const config = node.inputId ? inputConfigs?.[node.inputId] : undefined;
+            const canEdit = node.kind === "input" && node.inputId && node.editable && editableValues && node.inputId in editableValues;
+            const config = node.inputConfig;
             return (
               <g key={node.id} className={`logic-graph__node logic-graph__node--${node.status}${selectedId === node.id ? " is-selected" : ""}`} onClick={() => setSelectedId(node.id)} role="button" tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") setSelectedId(node.id); }}>
                 <rect x={position.x} y={position.y} width={nodeWidth} height={nodeHeight} rx="10" />
@@ -541,7 +490,7 @@ export const ProjectionLogicGraph: React.FC<{
                   </foreignObject>
                 ) : (
                   <>
-                    <text x={position.x + 14} y={position.y + 20} className="logic-graph__kind">{node.kind === "input" ? "INPUT" : "RULE"}</text>
+                    <text x={position.x + 14} y={position.y + 20} className="logic-graph__kind">{node.kind === "unmodeled" ? "UNMODELED" : node.kind === "input" ? "INPUT" : "RULE"}</text>
                     <text x={position.x + 14} y={position.y + 43} className="logic-graph__label">{node.label.length > 24 ? `${node.label.slice(0, 24)}…` : node.label}</text>
                     <text x={position.x + 14} y={position.y + 64} className="logic-graph__status">{node.detail || node.status}</text>
                   </>
@@ -559,7 +508,7 @@ export const ProjectionLogicGraph: React.FC<{
       {selected && (
         <aside className={`logic-graph__detail logic-graph__detail--${selected.status}`}>
           <div>
-            <span className="logic-graph__eyebrow">{selected.kind === "input" ? "Projection input" : "Calculation rule"}</span>
+            <span className="logic-graph__eyebrow">{selected.kind === "unmodeled" ? "Unmodeled product mechanic" : selected.kind === "input" ? "Projection input" : "Calculation rule"}</span>
             <h3>{selected.label}</h3>
             <p className="muted">{selected.detail}</p>
           </div>
