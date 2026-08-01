@@ -6,7 +6,7 @@ interface WorkspaceAssumption {
   source?: string;
 }
 
-interface WorkspaceRow {
+export interface WorkspaceRow {
   year?: number;
   attainedAge?: number;
   premiumMode?: string;
@@ -257,7 +257,7 @@ interface FeatureRequest {
   updatedAt?: string | null;
 }
 
-const formatCurrency = (value: any): string => {
+export const formatCurrency = (value: any): string => {
   if (value == null || value === "") return "";
   const n = Number(value);
   if (!Number.isFinite(n)) return String(value);
@@ -590,7 +590,7 @@ export const ProjectionLogicGraph: React.FC<{
   );
 };
 
-const ProjectionChart: React.FC<{ rows: WorkspaceRow[] }> = ({ rows }) => {
+export const ProjectionChart: React.FC<{ rows: WorkspaceRow[] }> = ({ rows }) => {
   const width = 720;
   const height = 280;
   const left = 58;
@@ -1135,8 +1135,8 @@ export const ProductWorkspacePage: React.FC<{
           and record workspace actions for any unsupported capabilities.
         </p>
         <p>
-          <a href="/web" className="button">
-            Back to Workspaces
+          <a href={`/web?workspace=${encodeURIComponent(workspaceId || "")}`} className="button">
+            Back to graph workspace
           </a>
         </p>
         {loading && <p className="muted">Loading product workspace…</p>}
@@ -2341,8 +2341,8 @@ export const ProductWorkspacePage: React.FC<{
               or placeholders are amber. Select a node to inspect its value, source, and logic.
             </p>
             <p>
-              <a className="button" href={`/web?workspace=${encodeURIComponent(workspaceId || "")}&view=logic`}>
-                Open graph workspace
+              <a className="button" href={`/web?workspace=${encodeURIComponent(workspaceId || "")}`}>
+                Back to graph workspace
               </a>
             </p>
           </>
