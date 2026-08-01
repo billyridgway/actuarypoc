@@ -48,6 +48,7 @@ from actuarypoc.domain.life_product_models import (
 )
 from actuarypoc.domain.ul_requirements import get_ul_requirement_definitions
 from actuarypoc.domain.capabilities import CapabilityAssessmentItem, get_ul_capabilities
+from actuarypoc.domain.projection_graph import compile_projection_graph
 from actuarypoc.domain.requirements_classification import (
     Applicability as ReqApplicability,
     Evidence as ReqEvidence,
@@ -1535,6 +1536,72 @@ def _build_capability_assessment(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _projection_graph_input_configs(snapshot: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Return backend-owned edit contracts for graph scenario inputs."""
+
+    understanding = snapshot.get("productUnderstanding") or {}
+    risk_classes = [
+        str(value).strip()
+        for value in (understanding.get("riskClasses") or [])
+        if str(value).strip()
+    ]
+    configs: Dict[str, Dict[str, Any]] = {
+        "issue_age": {"kind": "number", "min": 0, "max": 120, "step": 1, "help": "Whole number from 0 to 120"},
+        "face_amount": {"kind": "number", "min": 1, "step": 1000, "help": "Must be greater than $0"},
+        "premium": {"kind": "number", "min": 1, "step": 100, "help": "Must be greater than $0"},
+        "premium_mode": {
+            "kind": "select",
+            "options": [
+                {"value": "ANNUAL", "label": "Annual"},
+                {"value": "SEMIANNUAL", "label": "Semiannual"},
+                {"value": "QUARTERLY", "label": "Quarterly"},
+                {"value": "MONTHLY", "label": "Monthly"},
+            ],
+        },
+        "sex": {
+            "kind": "select", "placeholder": "Select sex",
+            "options": [{"value": "F", "label": "Female (F)"}, {"value": "M", "label": "Male (M)"}],
+        },
+        "risk_class": {
+            "kind": "select",
+            "placeholder": "Select risk class" if risk_classes else "No risk classes available",
+            "options": [{"value": value, "label": value} for value in risk_classes],
+            "help": "From this product's configured risk classes" if risk_classes else "Upload evidence defining valid risk classes",
+        },
+        "tobacco_status": {
+            "kind": "select", "placeholder": "Select tobacco status",
+            "options": [
+                {"value": "Non-Tobacco", "label": "Non-Tobacco"},
+                {"value": "Tobacco", "label": "Tobacco"},
+            ],
+        },
+    }
+    inputs = ((snapshot.get("illustration") or {}).get("inputs") or [])
+    policy_fee = next((item for item in inputs if item.get("id") == "policy_fee"), None)
+    if str((policy_fee or {}).get("status") or "").lower() in {"missing", "not_available", "scenario_assumption"}:
+        configs["policy_fee"] = {
+            "kind": "number", "min": 0, "step": 0.01,
+            "enteredStatus": "provisional", "placeholder": "Enter annual fee",
+            "help": "Scenario assumption; $0 must be entered explicitly",
+        }
+    return configs
+
+
+def _compile_snapshot_projection_graph(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    product = snapshot.get("product") or {}
+    illustration = snapshot.get("illustration") or {}
+    mechanics = snapshot.get("mechanicsExplanation") or {}
+    capabilities = (snapshot.get("capabilityAssessment") or {}).get("items") or []
+    return compile_projection_graph(
+        product_code=str(product.get("code") or "unknown"),
+        product_type=str(product.get("type") or "unknown"),
+        inputs=illustration.get("inputs") or [],
+        steps=mechanics.get("steps") or [],
+        capabilities=capabilities,
+        input_configs=_projection_graph_input_configs(snapshot),
+    )
+
+
 @app.get("/api/workspaces/{workspace_id}")
 def api_get_workspace(workspace_id: str) -> Dict[str, Any]:
     """Return workspace metadata, documents, and latest snapshot (if any)."""
@@ -1573,12 +1640,22 @@ def api_get_workspace(workspace_id: str) -> Dict[str, Any]:
     snapshot.setdefault("requirementsCandidates", _build_requirements_candidates(raw_snapshot))
     snapshot.setdefault("productUnderstanding", _build_product_understanding(snapshot))
     snapshot.setdefault("capabilityAssessment", _build_capability_assessment(snapshot))
+    snapshot["projectionGraph"] = _compile_snapshot_projection_graph(snapshot)
 
     return {
         "workspace": _workspace_to_api(ws),
         "documents": documents_payload,
         "snapshot": snapshot,
     }
+
+
+@app.get("/api/workspaces/{workspace_id}/projection-graph")
+def api_workspace_projection_graph(workspace_id: str) -> Dict[str, Any]:
+    """Return the compiled, product-specific projection graph contract."""
+
+    workspace_payload = api_get_workspace(workspace_id)
+    snapshot = workspace_payload.get("snapshot") or {}
+    return {"projectionGraph": snapshot.get("projectionGraph") or _compile_snapshot_projection_graph(snapshot)}
 
 
 @app.delete("/api/workspaces/{workspace_id}")
@@ -1788,6 +1865,7 @@ def api_workspace_analyze(workspace_id: str) -> Dict[str, Any]:
     snapshot["requirementsCandidates"] = _build_requirements_candidates(snapshot)
     snapshot["productUnderstanding"] = _build_product_understanding(snapshot)
     snapshot["capabilityAssessment"] = _build_capability_assessment(snapshot)
+    snapshot["projectionGraph"] = _compile_snapshot_projection_graph(snapshot)
 
     product_block = snapshot.get("product") or {}
     compliance = (snapshot.get("complianceMatrix") or {}).get("summary") or {}
@@ -1870,10 +1948,21 @@ def api_workspace_projection(
     projection, mechanics, warnings, notes, gaps = _build_ul_projection_view(product_code, request)
     if projection is None:
         raise HTTPException(status_code=503, detail="Diagnostic projection is not available")
+    graph_snapshot = dict(ws.get("latest_snapshot_json") or {})
+    graph_snapshot["product"] = {
+        **(graph_snapshot.get("product") or {}),
+        "code": product_code,
+        "type": product_type,
+    }
+    graph_snapshot["illustration"] = projection
+    graph_snapshot["mechanicsExplanation"] = mechanics
+    graph_snapshot.setdefault("productUnderstanding", _build_product_understanding(graph_snapshot))
+    graph_snapshot.setdefault("capabilityAssessment", _build_capability_assessment(graph_snapshot))
     return {
         "illustration": projection,
         "mechanicsExplanation": mechanics,
         "gaps": {"items": gaps, "warnings": warnings, "notes": notes},
+        "projectionGraph": _compile_snapshot_projection_graph(graph_snapshot),
     }
 
 

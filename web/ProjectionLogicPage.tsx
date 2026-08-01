@@ -1,5 +1,5 @@
 import React from "react";
-import { CapabilityAlignmentItem, formatCurrency, GraphInputConfig, MechanicsStep, ProjectionChart, ProjectionInput, ProjectionLogicGraph, WorkspaceRow } from "./ProductWorkspacePage";
+import { formatCurrency, ProjectionChart, ProjectionGraphDefinition, ProjectionLogicGraph, WorkspaceRow } from "./ProductWorkspacePage";
 
 interface ProjectionLogicPageProps {
   snapshot: any;
@@ -26,82 +26,22 @@ const initialGraphInputs = (snapshot: any) => {
   return values;
 };
 
-const uniqueOptions = (values: unknown[]): string[] => {
-  const seen = new Set<string>();
-  for (const value of values) {
-    const label = String(value ?? "").trim();
-    if (label) seen.add(label);
-  }
-  return [...seen];
-};
-
-const graphInputConfigs = (snapshot: any, values: Record<string, string | number>): Record<string, GraphInputConfig> => {
-  const configuredRiskClasses = Array.isArray(snapshot?.productUnderstanding?.riskClasses)
-    ? snapshot.productUnderstanding.riskClasses
-    : [];
-  const riskClasses = configuredRiskClasses.length
-    ? uniqueOptions(configuredRiskClasses)
-    : uniqueOptions([values.risk_class]);
-  const sexValues = ["F", "M"];
-  const tobaccoValues = ["Non-Tobacco", "Tobacco"];
-
-  return {
-    issue_age: { kind: "number", min: 0, max: 120, step: 1, help: "Whole number from 0 to 120" },
-    face_amount: { kind: "number", min: 1, step: 1000, help: "Must be greater than $0" },
-    premium: { kind: "number", min: 1, step: 100, help: "Must be greater than $0" },
-    policy_fee: {
-      kind: "number",
-      min: 0,
-      step: 0.01,
-      enteredStatus: "provisional",
-      placeholder: "Enter annual fee",
-      help: "Scenario assumption; $0 must be entered explicitly",
-    },
-    premium_mode: {
-      kind: "select",
-      options: [
-        { value: "ANNUAL", label: "Annual" },
-        { value: "SEMIANNUAL", label: "Semiannual" },
-        { value: "QUARTERLY", label: "Quarterly" },
-        { value: "MONTHLY", label: "Monthly" },
-      ],
-    },
-    sex: {
-      kind: "select",
-      placeholder: "Select sex",
-      options: sexValues.map((value) => ({ value, label: value === "F" ? "Female (F)" : value === "M" ? "Male (M)" : value })),
-    },
-    risk_class: {
-      kind: "select",
-      placeholder: riskClasses.length ? "Select risk class" : "No risk classes available",
-      options: riskClasses.map((value) => ({ value, label: value })),
-      help: riskClasses.length ? "From this product's configured risk classes" : "Upload evidence defining valid risk classes",
-    },
-    tobacco_status: {
-      kind: "select",
-      placeholder: "Select tobacco status",
-      options: tobaccoValues.map((value) => ({ value, label: value })),
-    },
-  };
-};
-
 export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapshot, workspaceId }) => {
   const [illustration, setIllustration] = React.useState(snapshot?.illustration ?? null);
-  const [mechanics, setMechanics] = React.useState(snapshot?.mechanicsExplanation ?? null);
+  const [projectionGraph, setProjectionGraph] = React.useState<ProjectionGraphDefinition | null>(snapshot?.projectionGraph ?? null);
   const [values, setValues] = React.useState<Record<string, string | number>>(() => initialGraphInputs(snapshot));
   const [dirty, setDirty] = React.useState(false);
   const [running, setRunning] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [runMessage, setRunMessage] = React.useState<string | null>(null);
 
-  const inputs = (illustration?.inputs ?? []) as ProjectionInput[];
-  const steps = (mechanics?.steps ?? []) as MechanicsStep[];
-  const inputConfigs = React.useMemo(() => graphInputConfigs(snapshot, values), [snapshot, values]);
-  const capabilities = (snapshot?.capabilityAssessment?.items ?? []) as CapabilityAlignmentItem[];
+  const graphNodes = projectionGraph?.nodes ?? [];
+  const inputNodes = graphNodes.filter((node) => node.kind === "input" || (node.kind === "unmodeled" && Boolean(node.inputId)));
+  const ruleNodes = graphNodes.filter((node) => node.kind === "rule" || (node.kind === "unmodeled" && !node.inputId));
   const rows = (illustration?.rows ?? []) as WorkspaceRow[];
   const metrics = illustration?.metrics ?? {};
-  const missingCount = inputs.filter((input) => ["missing", "not_available"].includes(String(input.status || "").toLowerCase())).length;
-  const provisionalCount = inputs.filter((input) => ["placeholder", "derived_placeholder", "default", "diagnostic", "not_supplied", "scenario_assumption"].includes(String(input.status || "").toLowerCase())).length;
+  const missingCount = graphNodes.filter((node) => node.status === "missing").length;
+  const provisionalCount = graphNodes.filter((node) => node.status === "provisional").length;
 
   const updateInput = (inputId: string, value: string) => {
     setValues((current) => ({ ...current, [inputId]: value }));
@@ -151,7 +91,7 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
       if (!response.ok) throw new Error((await response.text()) || `Projection failed (HTTP ${response.status})`);
       const body = await response.json();
       setIllustration(body.illustration ?? null);
-      setMechanics(body.mechanicsExplanation ?? null);
+      setProjectionGraph(body.projectionGraph ?? null);
       setDirty(false);
       setRunMessage("Projection complete. Results updated below.");
       window.setTimeout(() => document.getElementById("projection-results")?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
@@ -201,22 +141,19 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
       </header>
 
       <div className="logic-workspace__summary" aria-label="Projection logic status">
-        <span><strong>{inputs.length}</strong> inputs</span>
-        <span><strong>{steps.length}</strong> rules</span>
+        <span><strong>{inputNodes.length}</strong> inputs</span>
+        <span><strong>{ruleNodes.length}</strong> rules</span>
         <span className={provisionalCount ? "is-warning" : ""}><strong>{provisionalCount}</strong> provisional</span>
         <span className={missingCount ? "is-danger" : ""}><strong>{missingCount}</strong> missing</span>
       </div>
 
       {error && <p className="error">{error}</p>}
       {runMessage && <p className="logic-workspace__success" role="status">{runMessage}</p>}
-      {steps.length ? (
+      {projectionGraph?.nodes?.length ? (
         <ProjectionLogicGraph
-          inputs={inputs}
-          steps={steps}
+          definition={projectionGraph}
           editableValues={values}
           onInputChange={updateInput}
-          inputConfigs={inputConfigs}
-          capabilities={capabilities}
         />
       ) : (
         <section className="card"><p className="muted">No projection mechanics are available for this workspace yet.</p></section>
