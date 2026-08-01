@@ -298,6 +298,31 @@ details > summary {
   gap: 0.65rem 1rem;
 }
 
+.logic-graph__relationship-legend {
+  color: var(--text-muted);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 0.72rem;
+  gap: 0.45rem 1rem;
+  margin: -0.25rem 0 0.65rem;
+}
+
+.logic-graph__relationship-legend span {
+  align-items: center;
+  display: inline-flex;
+  gap: 0.35rem;
+}
+
+.logic-graph__line {
+  border-top: 2px solid #64748b;
+  display: inline-block;
+  width: 1.5rem;
+}
+
+.logic-graph__line--conditional { border-color: #2563eb; border-top-style: dashed; }
+.logic-graph__line--control { border-color: #7c3aed; border-top-style: dotted; }
+.logic-graph__line--context { border-color: #64748b; border-top-style: dashed; opacity: 0.65; }
+
 .logic-graph__toolbar {
   justify-content: space-between;
   margin-bottom: 0.75rem;
@@ -357,12 +382,41 @@ details > summary {
   stroke-width: 1.5;
 }
 
-.logic-graph__edge--missing {
+.logic-graph__edge--conditional_lookup {
+  stroke: #2563eb;
+  stroke-dasharray: 7 4;
+}
+
+.logic-graph__edge--execution_control {
+  stroke: #7c3aed;
+  stroke-dasharray: 2 4;
+}
+
+.logic-graph__edge--scenario_context {
+  opacity: 0.65;
+  stroke: #64748b;
+  stroke-dasharray: 10 5;
+}
+
+.logic-graph__edge.logic-graph__edge--missing {
   stroke: var(--danger);
-  stroke-dasharray: 5 4;
+}
+
+.logic-graph__edge--inactive {
+  opacity: 0.2;
 }
 
 .logic-graph__arrowhead { fill: #94a3b8; }
+.logic-graph__arrowhead--conditional { fill: #2563eb; }
+.logic-graph__arrowhead--control { fill: #7c3aed; }
+.logic-graph__arrowhead--context { fill: #64748b; opacity: 0.65; }
+
+.logic-graph__fallback-label {
+  fill: #b45309;
+  font-size: 7px;
+  font-weight: 800;
+  letter-spacing: 0.035em;
+}
 
 .logic-graph__node {
   cursor: pointer;
@@ -500,6 +554,61 @@ details > summary {
   margin-top: 0.65rem;
   padding: 0.55rem 0.7rem;
 }
+
+.logic-graph__fallback-detail {
+  background: var(--warning-soft);
+  border: 1px solid color-mix(in srgb, var(--warning) 55%, var(--border));
+  border-radius: 0.55rem;
+  margin-top: 0.65rem;
+  padding: 0.55rem 0.7rem;
+}
+
+.logic-graph__fallback-detail p {
+  margin: 0.2rem 0;
+}
+
+.logic-graph__fallback-detail .button {
+  margin-top: 0.55rem;
+}
+
+.synthetic-coi-review {
+  border: 2px solid color-mix(in srgb, var(--warning) 60%, var(--border));
+}
+
+.synthetic-coi-review__header,
+.synthetic-coi-review__actions {
+  align-items: center;
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+}
+
+.synthetic-coi-review__header h2 { margin: 0.15rem 0 0.35rem; }
+.synthetic-coi-review__warning { color: #92400e; font-weight: 700; margin: 0; }
+.synthetic-coi-review__metrics {
+  display: grid;
+  gap: 0.65rem;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  margin: 1rem 0;
+}
+.synthetic-coi-review__metrics article {
+  background: var(--warning-soft);
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  display: grid;
+  gap: 0.25rem;
+  padding: 0.65rem;
+}
+.synthetic-coi-review__metrics span { color: var(--text-muted); font-size: 0.72rem; }
+.synthetic-coi-review__parameters {
+  background: #0f172a;
+  border-radius: 0.5rem;
+  color: #e2e8f0;
+  max-height: 18rem;
+  overflow: auto;
+  padding: 0.75rem;
+}
+.synthetic-coi-review__actions { margin-top: 1rem; }
 
 .logic-graph__capability-detail--unsupported {
   background: color-mix(in srgb, var(--danger-soft) 72%, white);

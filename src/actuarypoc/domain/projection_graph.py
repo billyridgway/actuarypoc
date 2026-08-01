@@ -31,6 +31,7 @@ class RuleDefinition:
 
 UL_MECHANICS: Sequence[MechanicDefinition] = (
     MechanicDefinition("scenario", ("issue_age", "sex", "risk_class", "tobacco_status", "face_amount")),
+    MechanicDefinition("projection_controls", ("scenario_basis", "projection_horizon", "premium_timing", "charge_timing")),
     MechanicDefinition("premium", ("premium", "premium_mode"), ("premium_added",)),
     MechanicDefinition("coi", ("coi_rate",), ("coi_charge_deducted",), "coi_table"),
     MechanicDefinition("policy_fee", ("policy_fee",), ("policy_admin_fee_deducted",), "policy_admin_fees"),
@@ -42,11 +43,29 @@ UL_MECHANICS: Sequence[MechanicDefinition] = (
 
 
 UL_RULES: Sequence[RuleDefinition] = (
-    RuleDefinition("opening_policy_value", "account_value"),
-    RuleDefinition("premium_added", "premium", ("input:premium", "input:premium_mode")),
-    RuleDefinition("coi_charge_deducted", "coi", ("input:face_amount", "input:coi_rate")),
-    RuleDefinition("policy_admin_fee_deducted", "policy_fee", ("input:policy_fee",)),
-    RuleDefinition("interest_credited", "crediting", ("rule:opening_policy_value", "input:guaranteed_rate", "input:premium")),
+    RuleDefinition("opening_policy_value", "account_value", ("input:projection_horizon",)),
+    RuleDefinition("premium_added", "premium", ("input:premium", "input:premium_mode", "input:premium_timing")),
+    RuleDefinition(
+        "coi_charge_deducted",
+        "coi",
+        (
+            "input:face_amount", "input:coi_rate", "input:issue_age", "input:sex",
+            "input:risk_class", "input:tobacco_status", "input:charge_timing", "input:scenario_basis",
+        ),
+    ),
+    RuleDefinition(
+        "policy_admin_fee_deducted",
+        "policy_fee",
+        ("input:policy_fee", "input:charge_timing", "input:scenario_basis"),
+    ),
+    RuleDefinition(
+        "interest_credited",
+        "crediting",
+        (
+            "rule:opening_policy_value", "input:guaranteed_rate", "input:premium",
+            "input:premium_timing", "input:charge_timing", "input:scenario_basis",
+        ),
+    ),
     RuleDefinition(
         "closing_policy_value",
         "account_value",
@@ -55,18 +74,78 @@ UL_RULES: Sequence[RuleDefinition] = (
             "rule:policy_admin_fee_deducted", "rule:interest_credited",
         ),
     ),
-    RuleDefinition("surrender_charge", "surrender", ("input:face_amount", "input:surrender_schedule")),
+    RuleDefinition(
+        "surrender_charge",
+        "surrender",
+        ("input:face_amount", "input:surrender_schedule", "input:scenario_basis"),
+    ),
     RuleDefinition("surrender_value", "surrender", ("rule:closing_policy_value", "rule:surrender_charge")),
     RuleDefinition("death_benefit", "death_benefit", ("input:face_amount", "input:death_benefit_option")),
     RuleDefinition("net_amount_at_risk", "death_benefit", ("rule:death_benefit", "rule:closing_policy_value")),
 )
 
 
+CONDITIONAL_SELECTOR_IDS = {"issue_age", "sex", "risk_class", "tobacco_status"}
+EXECUTION_SETTING_IDS = {"projection_horizon", "premium_timing", "charge_timing"}
+SCENARIO_CONTEXT_IDS = {"scenario_basis"}
+
+
+def _contribution(input_id: str) -> tuple[str, str]:
+    if input_id in CONDITIONAL_SELECTOR_IDS:
+        return (
+            "conditional_selector",
+            "Selects an evidenced schedule row when the loaded table supports this dimension; may not change a placeholder-rate projection.",
+        )
+    if input_id in EXECUTION_SETTING_IDS:
+        return "execution_setting", "Controls projection duration or the sequence in which transactions are applied."
+    if input_id in SCENARIO_CONTEXT_IDS:
+        return "scenario_context", "Describes the scenario basis and qualifies the result; it is not a numeric formula input."
+    return "calculation_input", "Its value is consumed directly by one or more projection calculations."
+
+
+def _edge_kind(dependency_id: str) -> str:
+    input_id = dependency_id.removeprefix("input:")
+    if input_id in CONDITIONAL_SELECTOR_IDS:
+        return "conditional_lookup"
+    if input_id in EXECUTION_SETTING_IDS:
+        return "execution_control"
+    if input_id in SCENARIO_CONTEXT_IDS:
+        return "scenario_context"
+    return "value_dependency"
+
+
+def _fallback_disclosure(input_id: str, status: Any) -> Optional[Dict[str, str]]:
+    if _status(status) != "provisional":
+        return None
+    if input_id == "coi_rate":
+        if str(status or "").lower() == "synthetic_assumption":
+            return {
+                "mode": "synthetic_active",
+                "missingEvidence": "Filed COI rate table",
+                "fallback": "Reviewed AI-generated synthetic COI table",
+                "impact": "Demographic selectors are active, but results remain scenario-only and must not be treated as filed values.",
+            }
+        return {
+            "mode": "flat_fallback",
+            "missingEvidence": "Filed COI rate table",
+            "fallback": "Flat placeholder COI rate",
+            "impact": "Age, sex, risk class, and tobacco selectors cannot change COI rates until an evidenced table is loaded.",
+        }
+    if input_id == "surrender_schedule":
+        return {
+            "mode": "simplified_fallback",
+            "missingEvidence": "Filed surrender charge schedule",
+            "fallback": "Simplified declining surrender pattern",
+            "impact": "Projected surrender values may differ from filed duration-specific values.",
+        }
+    return None
+
+
 def _status(value: Any) -> str:
     raw = str(value or "").lower()
     if raw in {"missing", "not_available"}:
         return "missing"
-    if raw in {"placeholder", "derived_placeholder", "default", "diagnostic", "not_supplied", "scenario_assumption"}:
+    if raw in {"placeholder", "derived_placeholder", "default", "diagnostic", "not_supplied", "scenario_assumption", "synthetic_assumption"}:
         return "provisional"
     return "ready"
 
@@ -113,6 +192,8 @@ def compile_projection_graph(
     for index, raw in enumerate(inputs):
         input_id = str(raw.get("id") or f"input-{index}")
         mechanic_id = input_mechanic.get(input_id, "unmodeled")
+        contribution_type, contribution_detail = _contribution(input_id)
+        fallback = _fallback_disclosure(input_id, raw.get("status"))
         if mechanic_id == "unmodeled":
             diagnostics.append({
                 "code": "unregistered_input",
@@ -126,10 +207,15 @@ def compile_projection_graph(
             "kind": "input" if mechanic_id != "unmodeled" else "unmodeled",
             "label": raw.get("label") or input_id,
             "status": "missing" if mechanic_id == "unmodeled" else _status(raw.get("status")),
-            "detail": "Unmodeled product mechanic" if mechanic_id == "unmodeled" else raw.get("status"),
+            "detail": "Unmodeled product mechanic" if mechanic_id == "unmodeled" else (
+                "Missing evidenced table; fallback active" if fallback else raw.get("status")
+            ),
             "value": raw.get("value"),
             "unit": raw.get("unit"),
             "source": raw.get("source"),
+            "contributionType": contribution_type,
+            "contributionDetail": contribution_detail,
+            "fallbackDisclosure": fallback,
             "editable": input_id in configs,
             "inputConfig": dict(configs[input_id]) if input_id in configs else None,
             "capability": capability_by_mechanic.get(mechanic_id),
@@ -168,12 +254,23 @@ def compile_projection_graph(
             "capability": capability_by_mechanic.get(mechanic_id),
         })
         for dependency in dependencies:
+            edge_kind = _edge_kind(dependency)
+            inactive_lookup = (
+                edge_kind == "conditional_lookup"
+                and rule_id == "coi_charge_deducted"
+                and any(
+                    node["id"] == "input:coi_rate"
+                    and (node.get("fallbackDisclosure") or {}).get("mode") == "flat_fallback"
+                    for node in nodes
+                )
+            )
             edges.append({
                 "id": f"{dependency}->{node_id}",
                 "source": dependency,
                 "target": node_id,
-                "kind": "value_dependency",
-                "status": "active" if dependency in known_node_ids else "unresolved",
+                "kind": edge_kind,
+                "status": "inactive_fallback" if inactive_lookup else "active" if dependency in known_node_ids else "unresolved",
+                "detail": "Inactive while the projection uses a flat COI fallback" if inactive_lookup else None,
             })
         known_node_ids.add(node_id)
 

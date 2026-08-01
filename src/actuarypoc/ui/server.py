@@ -70,6 +70,11 @@ from actuarypoc.extract.mechanic_assumptions_extractor import extract_mechanic_a
 from actuarypoc.extract.workspace_ul_mechanics import extract_ul_mechanics, usable_mechanics
 from actuarypoc.agents.pmr_ai import summarise_pmr, propose_decision
 from actuarypoc.agents.scenario_ai import generate_scenarios_for_product
+from actuarypoc.agents.synthetic_coi_ai import (
+    build_synthetic_coi_table,
+    propose_synthetic_coi_parameters,
+    synthetic_coi_preview,
+)
 from actuarypoc.storage.postgres_client import (
     get_last_product_model_review_decision,
     list_product_model_review_decisions,
@@ -1602,6 +1607,24 @@ def _compile_snapshot_projection_graph(snapshot: Dict[str, Any]) -> Dict[str, An
     )
 
 
+def _apply_active_synthetic_mechanics(snapshot: Dict[str, Any], workspace_id: str) -> Dict[str, Any]:
+    """Rebuild the diagnostic view after reload when reviewed synthetic mechanics are active."""
+
+    artifact = load_workspace_executable_mechanics(workspace_id) or {}
+    if not (artifact.get("synthetic") or {}).get("coi"):
+        return snapshot
+    request = dict((snapshot.get("illustration") or {}).get("request") or {})
+    request["_workspaceExecutableMechanics"] = artifact.get("usable") or {}
+    product_code = str((snapshot.get("product") or {}).get("code") or "ICC18 P18PR UL")
+    projection, mechanics, warnings, notes, gaps = _build_ul_projection_view(product_code, request)
+    if projection is not None:
+        snapshot["illustration"] = projection
+        snapshot["mechanicsExplanation"] = mechanics
+        snapshot["gaps"] = {"items": gaps, "warnings": warnings, "notes": notes}
+        snapshot["executableMechanics"] = artifact
+    return snapshot
+
+
 @app.get("/api/workspaces/{workspace_id}")
 def api_get_workspace(workspace_id: str) -> Dict[str, Any]:
     """Return workspace metadata, documents, and latest snapshot (if any)."""
@@ -1640,6 +1663,7 @@ def api_get_workspace(workspace_id: str) -> Dict[str, Any]:
     snapshot.setdefault("requirementsCandidates", _build_requirements_candidates(raw_snapshot))
     snapshot.setdefault("productUnderstanding", _build_product_understanding(snapshot))
     snapshot.setdefault("capabilityAssessment", _build_capability_assessment(snapshot))
+    snapshot = _apply_active_synthetic_mechanics(snapshot, workspace_id)
     snapshot["projectionGraph"] = _compile_snapshot_projection_graph(snapshot)
 
     return {
@@ -1907,6 +1931,103 @@ class WorkspaceProjectionRequest(BaseModel):  # type: ignore[misc]
     riskClass: Optional[str] = None
     tobaccoStatus: Optional[str] = None
     policyFeeAnnual: Optional[float] = None
+
+
+class SyntheticCoiAcceptRequest(BaseModel):  # type: ignore[misc]
+    parameters: Dict[str, Any]
+    model: Optional[str] = None
+    generatedAt: Optional[str] = None
+
+
+def _workspace_synthetic_coi_context(ws: Dict[str, Any]) -> tuple[str, List[str]]:
+    snapshot = ws.get("latest_snapshot_json") or {}
+    understanding = snapshot.get("productUnderstanding") or _build_product_understanding(snapshot)
+    risk_classes = [
+        str(value).strip()
+        for value in (understanding.get("riskClasses") or [])
+        if str(value).strip() and str(value).strip().lower() not in {"tobacco", "smoker", "non-tobacco", "nonsmoker"}
+    ]
+    if not risk_classes:
+        risk_classes = ["Preferred", "Standard"]
+    facts = snapshot.get("extractedFacts") or []
+    context = json.dumps({
+        "product": snapshot.get("product") or {},
+        "productUnderstanding": understanding,
+        "extractedFacts": facts,
+        "capabilityAssessment": snapshot.get("capabilityAssessment") or {},
+    }, default=str)
+    return context, risk_classes
+
+
+@app.post("/api/workspaces/{workspace_id}/synthetic-coi/preview")
+def api_preview_synthetic_coi(workspace_id: str) -> Dict[str, Any]:
+    """Ask the agent for bounded parameters and return a deterministic preview."""
+
+    ws = get_workspace(workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    context, risk_classes = _workspace_synthetic_coi_context(ws)
+    try:
+        parameters = propose_synthetic_coi_parameters(
+            product_code=str(ws.get("inferred_product_code") or "ICC18 P18PR UL"),
+            product_context=context,
+            risk_classes=risk_classes,
+        )
+        preview = synthetic_coi_preview(parameters=parameters, risk_classes=risk_classes)
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail=f"Synthetic COI generation failed: {exc}") from exc
+    preview["riskClasses"] = risk_classes
+    preview["model"] = parameters.get("model")
+    return {"preview": preview}
+
+
+@app.post("/api/workspaces/{workspace_id}/synthetic-coi/accept")
+def api_accept_synthetic_coi(workspace_id: str, payload: SyntheticCoiAcceptRequest) -> Dict[str, Any]:
+    """Validate and persist a reviewed synthetic table as a scenario mechanic."""
+
+    ws = get_workspace(workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    _, risk_classes = _workspace_synthetic_coi_context(ws)
+    try:
+        rows = build_synthetic_coi_table(parameters=payload.parameters, risk_classes=risk_classes)
+        preview = synthetic_coi_preview(parameters=payload.parameters, risk_classes=risk_classes)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    artifact = load_workspace_executable_mechanics(workspace_id) or {"usable": {}, "status": {}, "warnings": []}
+    if (artifact.get("usable") or {}).get("coi") and not (artifact.get("synthetic") or {}).get("coi"):
+        raise HTTPException(status_code=409, detail="An evidenced COI table is already loaded and cannot be replaced by synthetic data")
+    artifact.setdefault("usable", {})["coi"] = rows
+    artifact.setdefault("status", {})["coi"] = "synthetic_scenario"
+    artifact.setdefault("synthetic", {})["coi"] = {
+        "sourceType": "ai_synthetic",
+        "model": payload.model,
+        "generatedAt": payload.generatedAt or preview["generatedAt"],
+        "acceptedAt": datetime.utcnow().isoformat() + "Z",
+        "parameters": preview["parameters"],
+        "rowCount": len(rows),
+        "disclaimer": preview["disclaimer"],
+    }
+    artifact["objectKey"] = store_workspace_executable_mechanics(workspace_id, artifact)
+    return {"accepted": True, "syntheticCoi": artifact["synthetic"]["coi"]}
+
+
+@app.delete("/api/workspaces/{workspace_id}/synthetic-coi")
+def api_remove_synthetic_coi(workspace_id: str) -> Dict[str, Any]:
+    """Remove only an AI-synthetic COI table, preserving evidenced mechanics."""
+
+    ws = get_workspace(workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    artifact = load_workspace_executable_mechanics(workspace_id) or {}
+    synthetic = artifact.get("synthetic") or {}
+    if "coi" not in synthetic:
+        raise HTTPException(status_code=404, detail="No synthetic COI table is active")
+    (artifact.get("usable") or {}).pop("coi", None)
+    (artifact.get("status") or {}).pop("coi", None)
+    synthetic.pop("coi", None)
+    store_workspace_executable_mechanics(workspace_id, artifact)
+    return {"removed": True}
 
 
 @app.post("/api/workspaces/{workspace_id}/projection")
@@ -10117,7 +10238,11 @@ def build_ul_illustration_for_product(product_code: str, request: Dict[str, Any]
             "label": "COI schedule",
             "value": f"{len(executable.get('coi') or [])} executable rows" if executable.get("coi") else cfg.coi_rate_flat,
             "unit": None if executable.get("coi") else "rate",
-            "status": "evidenced" if executable.get("coi") else "placeholder",
+            "status": (
+                "synthetic_assumption"
+                if any((row.get("provenance") or {}).get("sourceType") == "ai_synthetic" for row in (executable.get("coi") or []))
+                else "evidenced" if executable.get("coi") else "placeholder"
+            ),
             "source": _mechanics_source(executable.get("coi")) if executable.get("coi") else "Flat rate applied to face amount; filed COI table not loaded",
         },
         {
