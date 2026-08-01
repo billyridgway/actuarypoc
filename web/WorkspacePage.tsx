@@ -87,10 +87,10 @@ export const WorkspacePage: React.FC<{ workspaceId: string; view?: string }> = (
     // Once analysis has populated the snapshot and the workspace has
     // reached the analyzed state, reuse the existing Product
     // Understanding Workspace view directly from the snapshot.
-    return view === "logic" ? (
-      <ProjectionLogicPage snapshot={snapshot} workspaceId={workspaceId} />
-    ) : (
+    return view === "details" ? (
       <ProductWorkspacePage snapshot={snapshot} workspaceId={workspaceId} />
+    ) : (
+      <ProjectionLogicPage snapshot={snapshot} workspaceId={workspaceId} />
     );
   }
 
