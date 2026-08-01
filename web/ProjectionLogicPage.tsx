@@ -34,6 +34,10 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
   const [running, setRunning] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [runMessage, setRunMessage] = React.useState<string | null>(null);
+  const [syntheticPreview, setSyntheticPreview] = React.useState<any>(null);
+  const [generatingSynthetic, setGeneratingSynthetic] = React.useState(false);
+  const [acceptingSynthetic, setAcceptingSynthetic] = React.useState(false);
+  const [removingSynthetic, setRemovingSynthetic] = React.useState(false);
 
   const graphNodes = projectionGraph?.nodes ?? [];
   const inputNodes = graphNodes.filter((node) => node.kind === "input" || (node.kind === "unmodeled" && Boolean(node.inputId)));
@@ -102,6 +106,75 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
     }
   };
 
+  const generateSyntheticCoi = async () => {
+    setGeneratingSynthetic(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/synthetic-coi/preview`, { method: "POST" });
+      if (!response.ok) throw new Error((await response.text()) || `Generation failed (HTTP ${response.status})`);
+      const body = await response.json();
+      setSyntheticPreview(body.preview ?? null);
+      window.setTimeout(() => document.getElementById("synthetic-coi-review")?.scrollIntoView({ behavior: "smooth", block: "center" }), 0);
+    } catch (err: any) {
+      setError(err?.message || "Synthetic COI generation failed.");
+    } finally {
+      setGeneratingSynthetic(false);
+    }
+  };
+
+  const acceptSyntheticCoi = async () => {
+    if (!syntheticPreview) return;
+    setAcceptingSynthetic(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/synthetic-coi/accept`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          parameters: syntheticPreview.parameters,
+          model: syntheticPreview.model,
+          generatedAt: syntheticPreview.generatedAt,
+        }),
+      });
+      if (!response.ok) throw new Error((await response.text()) || `Acceptance failed (HTTP ${response.status})`);
+      setSyntheticPreview(null);
+      await runProjection();
+      setRunMessage("Synthetic COI table accepted and applied to the projection.");
+    } catch (err: any) {
+      setError(err?.message || "Synthetic COI table could not be accepted.");
+    } finally {
+      setAcceptingSynthetic(false);
+    }
+  };
+
+  const removeSyntheticCoi = async () => {
+    setRemovingSynthetic(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/synthetic-coi`, { method: "DELETE" });
+      if (!response.ok) throw new Error((await response.text()) || `Removal failed (HTTP ${response.status})`);
+      await runProjection();
+      setRunMessage("Synthetic COI table removed. The flat fallback is active again.");
+    } catch (err: any) {
+      setError(err?.message || "Synthetic COI table could not be removed.");
+    } finally {
+      setRemovingSynthetic(false);
+    }
+  };
+
+  const downloadSyntheticCoiCsv = () => {
+    const syntheticRows = syntheticPreview?.rows ?? [];
+    if (!syntheticRows.length) return;
+    const fields = ["attained_age", "sex", "risk_class", "tobacco_status", "rate", "rate_unit"];
+    const csv = [fields.join(","), ...syntheticRows.map((row: any) => fields.map((field) => `"${String(row[field] ?? "").replace(/"/g, '""')}"`).join(","))].join("\n");
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "synthetic-coi-table.csv";
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
+
   const downloadProjectionCsv = () => {
     if (!rows.length) return;
     const columns: Array<[keyof WorkspaceRow, string]> = [
@@ -154,9 +227,53 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
           definition={projectionGraph}
           editableValues={values}
           onInputChange={updateInput}
+          onGenerateSyntheticCoi={generateSyntheticCoi}
+          generatingSyntheticCoi={generatingSynthetic}
+          onRemoveSyntheticCoi={removeSyntheticCoi}
+          removingSyntheticCoi={removingSynthetic}
         />
       ) : (
         <section className="card"><p className="muted">No projection mechanics are available for this workspace yet.</p></section>
+      )}
+
+      {syntheticPreview && (
+        <section id="synthetic-coi-review" className="card synthetic-coi-review">
+          <div className="synthetic-coi-review__header">
+            <div>
+              <p className="logic-workspace__eyebrow">AI agent proposal</p>
+              <h2>Review synthetic COI table</h2>
+              <p className="synthetic-coi-review__warning">{syntheticPreview.disclaimer}</p>
+            </div>
+            <button type="button" className="button button-secondary" onClick={() => setSyntheticPreview(null)}>Discard</button>
+          </div>
+          <div className="synthetic-coi-review__metrics">
+            <article><span>Rows</span><strong>{syntheticPreview.rowCount}</strong></article>
+            <article><span>Minimum rate</span><strong>{syntheticPreview.minimumRate} / $1,000</strong></article>
+            <article><span>Maximum rate</span><strong>{syntheticPreview.maximumRate} / $1,000</strong></article>
+            <article><span>Model</span><strong>{syntheticPreview.model || "Not recorded"}</strong></article>
+          </div>
+          <details open>
+            <summary>Agent assumptions</summary>
+            <pre className="synthetic-coi-review__parameters">{JSON.stringify(syntheticPreview.parameters, null, 2)}</pre>
+          </details>
+          <div className="table-scroll">
+            <table>
+              <thead><tr><th>Attained age</th><th>Sex</th><th>Risk class</th><th>Tobacco</th><th>Annual rate / $1,000</th></tr></thead>
+              <tbody>{(syntheticPreview.sampleRows ?? []).map((row: any, index: number) => (
+                <tr key={`${row.attained_age}-${row.sex}-${row.risk_class}-${index}`}>
+                  <td>{row.attained_age}</td><td>{row.sex}</td><td>{row.risk_class}</td><td>{row.tobacco_status}</td><td>{row.rate}</td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+          <div className="synthetic-coi-review__actions">
+            <button type="button" className="button" disabled={acceptingSynthetic} onClick={acceptSyntheticCoi}>
+              {acceptingSynthetic ? "Accepting…" : "Accept synthetic table"}
+            </button>
+            <button type="button" className="button button-secondary" onClick={downloadSyntheticCoiCsv}>Download CSV</button>
+            <span className="muted">Acceptance records synthetic provenance; it never becomes filed evidence.</span>
+          </div>
+        </section>
       )}
 
       <section id="projection-results" className="card logic-results">

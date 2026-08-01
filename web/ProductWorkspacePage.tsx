@@ -289,6 +289,9 @@ interface LogicGraphNode {
   unit?: string;
   source?: string;
   formula?: string;
+  contributionType?: "calculation_input" | "conditional_selector" | "execution_setting" | "scenario_context";
+  contributionDetail?: string;
+  fallbackDisclosure?: { mode?: string; missingEvidence: string; fallback: string; impact: string };
   editable?: boolean;
   inputConfig?: GraphInputConfig;
   capability?: CapabilityAlignmentItem;
@@ -312,11 +315,14 @@ export interface ProjectionGraphDefinition {
     unit?: string;
     source?: string;
     formula?: string;
+    contributionType?: "calculation_input" | "conditional_selector" | "execution_setting" | "scenario_context";
+    contributionDetail?: string;
+    fallbackDisclosure?: { mode?: string; missingEvidence: string; fallback: string; impact: string };
     editable?: boolean;
     inputConfig?: GraphInputConfig;
     capability?: CapabilityAlignmentItem;
   }>;
-  edges: Array<{ id: string; source: string; target: string; kind?: string; status?: string }>;
+  edges: Array<{ id: string; source: string; target: string; kind?: "value_dependency" | "conditional_lookup" | "execution_control" | "scenario_context"; status?: string; detail?: string }>;
   unmodeledMechanics?: string[];
   diagnostics?: Array<{ code: string; nodeId?: string; message: string }>;
 }
@@ -338,7 +344,11 @@ export const ProjectionLogicGraph: React.FC<{
   definition: ProjectionGraphDefinition;
   editableValues?: Record<string, string | number>;
   onInputChange?: (inputId: string, value: string) => void;
-}> = ({ definition, editableValues, onInputChange }) => {
+  onGenerateSyntheticCoi?: () => void;
+  generatingSyntheticCoi?: boolean;
+  onRemoveSyntheticCoi?: () => void;
+  removingSyntheticCoi?: boolean;
+}> = ({ definition, editableValues, onInputChange, onGenerateSyntheticCoi, generatingSyntheticCoi, onRemoveSyntheticCoi, removingSyntheticCoi }) => {
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
   const [problemsOnly, setProblemsOnly] = React.useState(false);
   const [zoom, setZoom] = React.useState(1);
@@ -467,6 +477,12 @@ export const ProjectionLogicGraph: React.FC<{
           </button>
         </div>
       </div>
+      <div className="logic-graph__relationship-legend" aria-label="Graph relationship legend">
+        <span><i className="logic-graph__line logic-graph__line--value" />Direct calculation</span>
+        <span><i className="logic-graph__line logic-graph__line--conditional" />Conditional table lookup</span>
+        <span><i className="logic-graph__line logic-graph__line--control" />Execution setting</span>
+        <span><i className="logic-graph__line logic-graph__line--context" />Scenario context</span>
+      </div>
       <div
         className="logic-graph__viewport"
         ref={viewportRef}
@@ -481,6 +497,15 @@ export const ProjectionLogicGraph: React.FC<{
             <marker id="logic-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
               <path d="M0,0 L8,4 L0,8 Z" className="logic-graph__arrowhead" />
             </marker>
+            <marker id="logic-arrow-conditional" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+              <path d="M0,0 L8,4 L0,8 Z" className="logic-graph__arrowhead logic-graph__arrowhead--conditional" />
+            </marker>
+            <marker id="logic-arrow-control" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+              <path d="M0,0 L8,4 L0,8 Z" className="logic-graph__arrowhead logic-graph__arrowhead--control" />
+            </marker>
+            <marker id="logic-arrow-context" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+              <path d="M0,0 L8,4 L0,8 Z" className="logic-graph__arrowhead logic-graph__arrowhead--context" />
+            </marker>
           </defs>
           {visibleNodes.flatMap((node) => {
             const end = positions.get(node.id);
@@ -489,13 +514,16 @@ export const ProjectionLogicGraph: React.FC<{
               const start = positions.get(dependency);
               if (!start || !visibleIds.has(dependency)) return null;
               const sourceNode = graph.find((candidate) => candidate.id === dependency);
+              const edge = definition.edges.find((candidate) => candidate.source === dependency && candidate.target === node.id);
+              const relationship = edge?.kind || "value_dependency";
               const affected = sourceNode?.status === "missing" || node.status === "missing";
               const x1 = start.x + nodeWidth;
               const y1 = start.y + nodeHeight / 2;
               const x2 = end.x;
               const y2 = end.y + nodeHeight / 2;
               const bend = Math.max(28, (x2 - x1) / 2);
-              return <path key={`${dependency}-${node.id}`} d={`M${x1},${y1} C${x1 + bend},${y1} ${x2 - bend},${y2} ${x2},${y2}`} className={`logic-graph__edge${affected ? " logic-graph__edge--missing" : ""}`} markerEnd="url(#logic-arrow)" />;
+              const marker = relationship === "conditional_lookup" ? "logic-arrow-conditional" : relationship === "execution_control" ? "logic-arrow-control" : relationship === "scenario_context" ? "logic-arrow-context" : "logic-arrow";
+              return <path key={`${dependency}-${node.id}`} d={`M${x1},${y1} C${x1 + bend},${y1} ${x2 - bend},${y2} ${x2},${y2}`} className={`logic-graph__edge logic-graph__edge--${relationship}${edge?.status === "inactive_fallback" ? " logic-graph__edge--inactive" : ""}${affected ? " logic-graph__edge--missing" : ""}`} markerEnd={`url(#${marker})`} />;
             });
           })}
           {visibleNodes.map((node) => {
@@ -540,9 +568,14 @@ export const ProjectionLogicGraph: React.FC<{
                     <text x={position.x + 14} y={position.y + 64} className="logic-graph__status">{node.detail || node.status}</text>
                   </>
                 )}
-                {node.capability && ["partial", "unsupported"].includes(String(node.capability.status || "").toLowerCase()) && (
+                {node.capability && !node.fallbackDisclosure && ["partial", "unsupported"].includes(String(node.capability.status || "").toLowerCase()) && (
                   <text x={position.x + 12} y={position.y + 82} className={`logic-graph__capability logic-graph__capability--${String(node.capability.status).toLowerCase()}`}>
                     PLATFORM: {String(node.capability.status).toUpperCase()}
+                  </text>
+                )}
+                {node.fallbackDisclosure && (
+                  <text x={position.x + 12} y={position.y + 82} className="logic-graph__fallback-label">
+                    {node.fallbackDisclosure.mode === "synthetic_active" ? "SYNTHETIC TABLE ACTIVE" : "MISSING TABLE · FALLBACK ACTIVE"}
                   </text>
                 )}
               </g>
@@ -564,6 +597,31 @@ export const ProjectionLogicGraph: React.FC<{
                 : "No value or assumption supplied"}</p>
             ) : selected.value !== undefined && <p><strong>Current value:</strong> {formatProjectionInputValue(selected.value, selected.unit)}</p>}
             {selected.formula && <p><strong>Logic:</strong> {selected.formula}</p>}
+            {selected.contributionType && (
+              <p><strong>Projection contribution:</strong> {{
+                calculation_input: "Direct calculation input",
+                conditional_selector: "Conditional table selector",
+                execution_setting: "Execution setting",
+                scenario_context: "Scenario context",
+              }[selected.contributionType]}{selected.contributionDetail ? ` — ${selected.contributionDetail}` : ""}</p>
+            )}
+            {selected.fallbackDisclosure && (
+              <div className="logic-graph__fallback-detail">
+                <p><strong>Missing evidence:</strong> {selected.fallbackDisclosure.missingEvidence}</p>
+                <p><strong>Projection fallback:</strong> {selected.fallbackDisclosure.fallback}</p>
+                <p><strong>Effect:</strong> {selected.fallbackDisclosure.impact}</p>
+                {selected.inputId === "coi_rate" && selected.fallbackDisclosure.mode === "flat_fallback" && onGenerateSyntheticCoi && (
+                  <button type="button" className="button" disabled={generatingSyntheticCoi} onClick={onGenerateSyntheticCoi}>
+                    {generatingSyntheticCoi ? "AI agent generating…" : "Generate synthetic COI table"}
+                  </button>
+                )}
+                {selected.inputId === "coi_rate" && selected.fallbackDisclosure.mode === "synthetic_active" && onRemoveSyntheticCoi && (
+                  <button type="button" className="button button-secondary" disabled={removingSyntheticCoi} onClick={onRemoveSyntheticCoi}>
+                    {removingSyntheticCoi ? "Removing…" : "Remove synthetic table"}
+                  </button>
+                )}
+              </div>
+            )}
             {selected.source && <p><strong>Source:</strong> {selected.source}</p>}
             {selected.capability && (
               <div className={`logic-graph__capability-detail logic-graph__capability-detail--${String(selected.capability.status || "unknown").toLowerCase()}`}>
