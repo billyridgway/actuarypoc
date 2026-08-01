@@ -303,6 +303,17 @@ details > summary {
   margin-bottom: 0.75rem;
 }
 
+.logic-graph__toolbar-actions,
+.logic-graph__zoom {
+  align-items: center;
+  display: flex;
+  gap: 0.4rem;
+}
+
+.logic-graph__zoom-level {
+  min-width: 3.8rem;
+}
+
 .logic-graph__legend {
   color: var(--text-muted);
   font-size: 0.78rem;
@@ -336,6 +347,7 @@ details > summary {
 
 .logic-graph__viewport svg {
   display: block;
+  transform-origin: top left;
 }
 
 .logic-graph__edge {
@@ -597,6 +609,11 @@ details > summary {
   font-weight: 650;
   padding: 0.5rem 0.8rem;
   text-decoration: none;
+}
+
+.logic-graph__toolbar .button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .logic-graph__toolbar .button {

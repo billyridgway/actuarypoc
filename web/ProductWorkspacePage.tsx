@@ -341,6 +341,8 @@ export const ProjectionLogicGraph: React.FC<{
 }> = ({ definition, editableValues, onInputChange }) => {
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
   const [problemsOnly, setProblemsOnly] = React.useState(false);
+  const [zoom, setZoom] = React.useState(1);
+  const viewportRef = React.useRef<HTMLDivElement | null>(null);
 
   const graph = React.useMemo(() => {
     const dependencies = new Map<string, string[]>();
@@ -414,6 +416,33 @@ export const ProjectionLogicGraph: React.FC<{
   const uniqueCapabilities = new Map(graph.filter((node) => node.capability).map((node) => [node.capability!.capabilityId, node.capability!]));
   const unsupportedCapabilities = [...uniqueCapabilities.values()].filter((item) => String(item.status || "").toLowerCase() === "unsupported").length;
   const partialCapabilities = [...uniqueCapabilities.values()].filter((item) => String(item.status || "").toLowerCase() === "partial").length;
+  const clampZoom = (value: number) => Math.min(2, Math.max(0.25, Math.round(value * 100) / 100));
+  const changeZoom = (nextZoom: number) => {
+    const viewport = viewportRef.current;
+    const clamped = clampZoom(nextZoom);
+    if (!viewport || clamped === zoom) {
+      setZoom(clamped);
+      return;
+    }
+    const centerX = viewport.scrollLeft + viewport.clientWidth / 2;
+    const centerY = viewport.scrollTop + viewport.clientHeight / 2;
+    const ratio = clamped / zoom;
+    setZoom(clamped);
+    window.requestAnimationFrame(() => {
+      viewport.scrollLeft = centerX * ratio - viewport.clientWidth / 2;
+      viewport.scrollTop = centerY * ratio - viewport.clientHeight / 2;
+    });
+  };
+  const fitGraph = () => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const fitted = clampZoom(Math.min((viewport.clientWidth - 24) / width, (viewport.clientHeight - 24) / height));
+    setZoom(fitted);
+    window.requestAnimationFrame(() => {
+      viewport.scrollLeft = 0;
+      viewport.scrollTop = 0;
+    });
+  };
 
   return (
     <div className="logic-graph">
@@ -426,12 +455,28 @@ export const ProjectionLogicGraph: React.FC<{
             <span className="logic-graph__platform-summary">Platform gaps: {unsupportedCapabilities} unsupported · {partialCapabilities} partial</span>
           )}
         </div>
-        <button type="button" className="button button-ghost" onClick={() => setProblemsOnly((value) => !value)}>
-          {problemsOnly ? "Show all logic" : `Show problems only (${problemCount})`}
-        </button>
+        <div className="logic-graph__toolbar-actions">
+          <div className="logic-graph__zoom" role="group" aria-label="Graph zoom controls">
+            <button type="button" className="button button-ghost" onClick={() => changeZoom(zoom - 0.15)} disabled={zoom <= 0.25} aria-label="Zoom out">−</button>
+            <button type="button" className="button button-ghost logic-graph__zoom-level" onClick={() => changeZoom(1)} aria-label="Reset zoom to 100%">{Math.round(zoom * 100)}%</button>
+            <button type="button" className="button button-ghost" onClick={() => changeZoom(zoom + 0.15)} disabled={zoom >= 2} aria-label="Zoom in">+</button>
+            <button type="button" className="button button-ghost" onClick={fitGraph}>Fit all</button>
+          </div>
+          <button type="button" className="button button-ghost" onClick={() => setProblemsOnly((value) => !value)}>
+            {problemsOnly ? "Show all logic" : `Show problems only (${problemCount})`}
+          </button>
+        </div>
       </div>
-      <div className="logic-graph__viewport">
-        <svg width={width} height={height} role="img" aria-label="Directed graph of projection inputs and calculation rules">
+      <div
+        className="logic-graph__viewport"
+        ref={viewportRef}
+        onWheel={(event) => {
+          if (!event.ctrlKey && !event.metaKey) return;
+          event.preventDefault();
+          changeZoom(zoom + (event.deltaY < 0 ? 0.1 : -0.1));
+        }}
+      >
+        <svg width={width * zoom} height={height * zoom} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`Directed graph of projection inputs and calculation rules at ${Math.round(zoom * 100)}% zoom`}>
           <defs>
             <marker id="logic-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
               <path d="M0,0 L8,4 L0,8 Z" className="logic-graph__arrowhead" />
