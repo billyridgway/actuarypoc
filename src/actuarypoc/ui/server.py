@@ -67,7 +67,7 @@ from actuarypoc.extract.assumptions_for_product import (
 )
 from actuarypoc.extract.mechanics_for_product import generate_mechanics_for_product
 from actuarypoc.extract.mechanic_assumptions_extractor import extract_mechanic_assumptions
-from actuarypoc.extract.workspace_ul_mechanics import extract_ul_mechanics, usable_mechanics
+from actuarypoc.extract.workspace_ul_mechanics import accept_filed_mechanic, extract_ul_mechanics, usable_mechanics
 from actuarypoc.agents.pmr_ai import summarise_pmr, propose_decision
 from actuarypoc.agents.scenario_ai import generate_scenarios_for_product
 from actuarypoc.agents.synthetic_coi_ai import (
@@ -316,7 +316,7 @@ def _extract_workspace_executable_mechanics(
     }
     for document in workspace_documents:
         filename = str(document.get("description") or "")
-        if Path(filename).suffix.lower() not in {".csv", ".tsv", ".xlsx", ".xlsm"}:
+        if Path(filename).suffix.lower() not in {".csv", ".tsv", ".xlsx", ".xlsm", ".pdf"}:
             continue
         response = None
         try:
@@ -332,10 +332,20 @@ def _extract_workspace_executable_mechanics(
                 response.close()
                 response.release_conn()
     combined["usable"] = usable_mechanics(combined)
-    combined["status"] = {
-        mechanic: ("executable" if mechanic in combined["usable"] else "missing_or_incomplete")
-        for mechanic in ("coi", "surrender", "fees")
-    }
+    combined["status"] = {}
+    for mechanic in ("coi", "surrender", "fees"):
+        candidates = list((combined.get("mechanics") or {}).get(mechanic) or [])
+        review_required = any(
+            (row.get("provenance") or {}).get("reviewStatus") == "review_required"
+            for row in candidates
+        )
+        combined["status"][mechanic] = (
+            "executable"
+            if mechanic in combined["usable"]
+            else "filed_evidence_review_required"
+            if review_required
+            else "missing_or_incomplete"
+        )
     return combined
 
 
@@ -1613,10 +1623,10 @@ def _compile_snapshot_projection_graph(snapshot: Dict[str, Any]) -> Dict[str, An
 
 
 def _apply_active_synthetic_mechanics(snapshot: Dict[str, Any], workspace_id: str) -> Dict[str, Any]:
-    """Rebuild the diagnostic view after reload when reviewed synthetic mechanics are active."""
+    """Rebuild the view after reload when reviewed filed or synthetic mechanics are active."""
 
     artifact = load_workspace_executable_mechanics(workspace_id) or {}
-    if not (artifact.get("synthetic") or {}):
+    if not ((artifact.get("synthetic") or {}) or (artifact.get("reviews") or {})):
         return snapshot
     request = dict((snapshot.get("illustration") or {}).get("request") or {})
     request["_workspaceExecutableMechanics"] = artifact.get("usable") or {}
@@ -1944,6 +1954,11 @@ class SyntheticCoiAcceptRequest(BaseModel):  # type: ignore[misc]
     generatedAt: Optional[str] = None
 
 
+class FiledMechanicReviewRequest(BaseModel):  # type: ignore[misc]
+    mechanic: str
+    reviewedBy: Optional[str] = None
+
+
 def _workspace_synthetic_coi_context(ws: Dict[str, Any]) -> tuple[str, List[str]]:
     snapshot = ws.get("latest_snapshot_json") or {}
     understanding = snapshot.get("productUnderstanding") or _build_product_understanding(snapshot)
@@ -1962,6 +1977,33 @@ def _workspace_synthetic_coi_context(ws: Dict[str, Any]) -> tuple[str, List[str]
         "capabilityAssessment": snapshot.get("capabilityAssessment") or {},
     }, default=str)
     return context, risk_classes
+
+
+@app.post("/api/workspaces/{workspace_id}/filed-mechanics/accept")
+def api_accept_filed_mechanic(
+    workspace_id: str, payload: FiledMechanicReviewRequest,
+) -> Dict[str, Any]:
+    """Accept a complete reviewed PDF table; specimen candidates are never auto-accepted."""
+
+    if get_workspace(workspace_id) is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    artifact = load_workspace_executable_mechanics(workspace_id) or {}
+    mechanic = str(payload.mechanic or "").strip().lower()
+    try:
+        reviewed = accept_filed_mechanic(
+            artifact,
+            mechanic,
+            reviewed_by=str(payload.reviewedBy or "workspace_user"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    reviewed["objectKey"] = store_workspace_executable_mechanics(workspace_id, reviewed)
+    return {
+        "accepted": True,
+        "mechanic": mechanic,
+        "review": (reviewed.get("reviews") or {}).get(mechanic),
+        "status": (reviewed.get("status") or {}).get(mechanic),
+    }
 
 
 @app.post("/api/workspaces/{workspace_id}/synthetic-coi/preview")
