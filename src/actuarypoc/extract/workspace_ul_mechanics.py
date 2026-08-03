@@ -10,6 +10,8 @@ from __future__ import annotations
 import io
 import math
 import re
+from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -315,3 +317,47 @@ def usable_mechanics(extracted: Dict[str, Any]) -> Dict[str, Any]:
     ):
         usable["fees"] = fees
     return usable
+
+
+def accept_filed_mechanic(
+    artifact: Dict[str, Any], mechanic: str, *, reviewed_by: str = "workspace_user",
+) -> Dict[str, Any]:
+    """Accept one complete filed-PDF candidate set and make only that mechanic executable."""
+
+    if mechanic not in {"coi", "surrender", "fees"}:
+        raise ValueError("mechanic must be coi, surrender, or fees")
+    result = deepcopy(artifact)
+    rows = list((result.get("mechanics") or {}).get(mechanic) or [])
+    if not rows:
+        raise ValueError(f"No filed {mechanic} candidate is available")
+    if any((row.get("provenance") or {}).get("sourceType") != "filed_pdf" for row in rows):
+        raise ValueError("Only filed-PDF candidates can be accepted by this workflow")
+    if any((row.get("provenance") or {}).get("reviewStatus") != PDF_REVIEW_REQUIRED for row in rows):
+        raise ValueError(f"Filed {mechanic} candidate is not awaiting review")
+    durations = sorted({row.get("duration") for row in rows if row.get("duration") is not None})
+    if mechanic in {"coi", "surrender"} and durations:
+        expected = list(range(1, max(durations) + 1))
+        if durations != expected:
+            raise ValueError(f"Filed {mechanic} candidate has gaps in its duration schedule")
+
+    accepted_at = datetime.now(timezone.utc).isoformat()
+    for row in rows:
+        row["provenance"] = {
+            **(row.get("provenance") or {}),
+            "reviewStatus": "accepted",
+            "reviewedBy": reviewed_by,
+            "reviewedAt": accepted_at,
+        }
+    result.setdefault("mechanics", {})[mechanic] = rows
+    result["usable"] = usable_mechanics(result)
+    if mechanic not in result["usable"]:
+        raise ValueError(f"Filed {mechanic} candidate is incomplete and cannot be executed")
+    result.setdefault("status", {})[mechanic] = "executable"
+    result.setdefault("reviews", {})[mechanic] = {
+        "status": "accepted",
+        "reviewedBy": reviewed_by,
+        "reviewedAt": accepted_at,
+        "rowCount": len(rows),
+        "sourceType": "filed_pdf",
+    }
+    return result

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from actuarypoc.extract.workspace_ul_mechanics import _extract_pdf_page, extract_ul_mechanics, usable_mechanics
+import pytest
+
+from actuarypoc.extract.workspace_ul_mechanics import _extract_pdf_page, accept_filed_mechanic, extract_ul_mechanics, usable_mechanics
 from actuarypoc.ui import server
 
 
@@ -92,6 +94,84 @@ def test_extracts_complete_pdf_coi_candidate_and_expands_explicit_terminal_age()
     assert coi[-1]["provenance"]["expandedFrom"] == "87+"
     assert coi[0]["rate_unit"] == "per_1000_monthly"
     assert "coi" not in usable_mechanics({"mechanics": mechanics})
+
+
+def test_accepts_complete_filed_schedule_and_records_review_provenance() -> None:
+    provenance = {
+        "filename": "ICC18 S18PRUL.pdf", "page": 3, "sourceType": "filed_pdf",
+        "reviewStatus": "review_required", "valueBasis": "guaranteed_maximum",
+    }
+    mechanics = {"coi": [], "fees": [], "surrender": [
+        {"duration": duration, "charge": charge, "charge_unit": "per_1000_face", "provenance": provenance}
+        for duration, charge in [(1, 17.94130), (2, 16.99702), (3, 0.0)]
+    ]}
+    artifact = {"mechanics": mechanics, "status": {"surrender": "filed_evidence_review_required"}}
+
+    accepted = accept_filed_mechanic(artifact, "surrender", reviewed_by="actuary@example.com")
+
+    assert accepted["status"]["surrender"] == "executable"
+    assert len(accepted["usable"]["surrender"]) == 3
+    assert accepted["reviews"]["surrender"]["reviewedBy"] == "actuary@example.com"
+    assert accepted["mechanics"]["surrender"][0]["provenance"]["reviewStatus"] == "accepted"
+    assert artifact["mechanics"]["surrender"][0]["provenance"]["reviewStatus"] == "review_required"
+
+
+def test_rejects_incomplete_or_non_filed_review_candidates() -> None:
+    provenance = {"sourceType": "filed_pdf", "reviewStatus": "review_required"}
+    incomplete = {"mechanics": {"surrender": [
+        {"duration": 1, "charge": 1.0, "charge_unit": "fixed", "provenance": provenance},
+        {"duration": 3, "charge": 0.0, "charge_unit": "fixed", "provenance": provenance},
+    ]}}
+    with pytest.raises(ValueError, match="gaps"):
+        accept_filed_mechanic(incomplete, "surrender")
+
+    synthetic = {"mechanics": {"coi": [{
+        "duration": 1, "rate": 0.1, "rate_unit": "per_1000_monthly",
+        "provenance": {"sourceType": "synthetic", "reviewStatus": "review_required"},
+    }]}}
+    with pytest.raises(ValueError, match="filed-PDF"):
+        accept_filed_mechanic(synthetic, "coi")
+
+
+def test_filed_mechanic_accept_endpoint_persists_reviewed_artifact(monkeypatch) -> None:
+    provenance = {"sourceType": "filed_pdf", "reviewStatus": "review_required"}
+    artifact = {"mechanics": {"surrender": [
+        {"duration": 1, "charge": 1.0, "charge_unit": "fixed", "provenance": provenance},
+        {"duration": 2, "charge": 0.0, "charge_unit": "fixed", "provenance": provenance},
+    ]}, "status": {"surrender": "filed_evidence_review_required"}}
+    stored = {}
+    monkeypatch.setattr(server, "get_workspace", lambda workspace_id: {"id": workspace_id})
+    monkeypatch.setattr(server, "load_workspace_executable_mechanics", lambda workspace_id: artifact)
+    monkeypatch.setattr(
+        server, "store_workspace_executable_mechanics",
+        lambda workspace_id, value: stored.update(value) or "workspaces/demo/executable-mechanics.json",
+    )
+
+    response = server.api_accept_filed_mechanic(
+        "demo", server.FiledMechanicReviewRequest(mechanic="surrender", reviewedBy="reviewer"),
+    )
+
+    assert response["accepted"] is True
+    assert response["status"] == "executable"
+    assert stored["reviews"]["surrender"]["reviewedBy"] == "reviewer"
+    assert len(stored["usable"]["surrender"]) == 2
+
+
+def test_reload_reapplies_accepted_filed_mechanics(monkeypatch) -> None:
+    artifact = {
+        "usable": {"surrender": [{"duration": 1, "charge": 0.05, "charge_unit": "percent_face"}]},
+        "reviews": {"surrender": {"status": "accepted"}},
+    }
+    monkeypatch.setattr(server, "load_workspace_executable_mechanics", lambda workspace_id: artifact)
+    monkeypatch.setattr(server, "_build_ul_projection_view", lambda product_code, request: (
+        {"request": request, "rows": []}, {"steps": []}, [], [], [],
+    ))
+    snapshot = {"product": {"code": "ICC18 P18PR UL"}, "illustration": {"request": {"age": 45}}}
+
+    result = server._apply_active_synthetic_mechanics(snapshot, "demo")
+
+    assert result["illustration"]["request"]["_workspaceExecutableMechanics"] == artifact["usable"]
+    assert result["executableMechanics"] == artifact
 
 
 def test_pdf_extraction_does_not_promote_specimen_policyholder_inputs() -> None:

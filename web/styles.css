@@ -686,6 +686,38 @@ details > summary {
 }
 .synthetic-coi-review__actions { margin-top: 1rem; }
 
+.filed-mechanics-review h2 { margin: 0.15rem 0 0.35rem; }
+.filed-mechanics-review__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1rem;
+  margin-top: 1rem;
+}
+.filed-mechanics-review__candidate {
+  border: 1px solid #f0b429;
+  border-radius: 12px;
+  padding: 1rem;
+  background: #fffbeb;
+}
+.filed-mechanics-review__candidate h3 { margin: 0.35rem 0 0.8rem; }
+.filed-mechanics-review__badge {
+  color: #92400e;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.filed-mechanics-review__candidate dl { margin: 0 0 1rem; }
+.filed-mechanics-review__candidate dl div {
+  display: grid;
+  grid-template-columns: 90px 1fr;
+  gap: 0.5rem;
+  padding: 0.35rem 0;
+  border-bottom: 1px solid #fde68a;
+}
+.filed-mechanics-review__candidate dt { color: var(--text-muted); }
+.filed-mechanics-review__candidate dd { margin: 0; overflow-wrap: anywhere; }
+
 .logic-graph__capability-detail--unsupported {
   background: color-mix(in srgb, var(--danger-soft) 72%, white);
   border-color: color-mix(in srgb, var(--danger) 50%, var(--border));

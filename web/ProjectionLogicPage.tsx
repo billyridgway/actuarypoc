@@ -29,6 +29,7 @@ const initialGraphInputs = (snapshot: any) => {
 export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapshot, workspaceId }) => {
   const [illustration, setIllustration] = React.useState(snapshot?.illustration ?? null);
   const [projectionGraph, setProjectionGraph] = React.useState<ProjectionGraphDefinition | null>(snapshot?.projectionGraph ?? null);
+  const [executableMechanics, setExecutableMechanics] = React.useState<any>(snapshot?.executableMechanics ?? null);
   const [values, setValues] = React.useState<Record<string, string | number>>(() => initialGraphInputs(snapshot));
   const [dirty, setDirty] = React.useState(false);
   const [running, setRunning] = React.useState(false);
@@ -40,6 +41,7 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
   const [removingSynthetic, setRemovingSynthetic] = React.useState(false);
   const [generatingSyntheticSurrender, setGeneratingSyntheticSurrender] = React.useState(false);
   const [removingSyntheticSurrender, setRemovingSyntheticSurrender] = React.useState(false);
+  const [acceptingFiledMechanic, setAcceptingFiledMechanic] = React.useState<string | null>(null);
 
   const graphNodes = projectionGraph?.nodes ?? [];
   const inputNodes = graphNodes.filter((node) => node.kind === "input" || (node.kind === "unmodeled" && Boolean(node.inputId)));
@@ -48,6 +50,10 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
   const metrics = illustration?.metrics ?? {};
   const missingCount = graphNodes.filter((node) => node.status === "missing").length;
   const provisionalCount = graphNodes.filter((node) => node.status === "provisional").length;
+  const filedCandidates = ["coi", "surrender", "fees"].filter(
+    (mechanic) => executableMechanics?.status?.[mechanic] === "filed_evidence_review_required"
+      && executableMechanics?.mechanics?.[mechanic]?.length,
+  );
 
   const updateInput = (inputId: string, value: string) => {
     setValues((current) => ({ ...current, [inputId]: value }));
@@ -121,6 +127,31 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
       setError(err?.message || "Synthetic COI generation failed.");
     } finally {
       setGeneratingSynthetic(false);
+    }
+  };
+
+  const acceptFiledMechanic = async (mechanic: string) => {
+    setAcceptingFiledMechanic(mechanic);
+    setError(null);
+    try {
+      const response = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/filed-mechanics/accept`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mechanic }),
+      });
+      if (!response.ok) throw new Error((await response.text()) || `Acceptance failed (HTTP ${response.status})`);
+      const body = await response.json();
+      setExecutableMechanics((current: any) => ({
+        ...(current || {}),
+        status: { ...(current?.status || {}), [mechanic]: body.status },
+        reviews: { ...(current?.reviews || {}), [mechanic]: body.review },
+      }));
+      await runProjection();
+      setRunMessage(`Filed ${mechanic === "coi" ? "COI table" : mechanic === "surrender" ? "surrender schedule" : "fee schedule"} accepted and applied.`);
+    } catch (err: any) {
+      setError(err?.message || "The filed table could not be accepted.");
+    } finally {
+      setAcceptingFiledMechanic(null);
     }
   };
 
@@ -274,6 +305,43 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
         />
       ) : (
         <section className="card"><p className="muted">No projection mechanics are available for this workspace yet.</p></section>
+      )}
+
+      {filedCandidates.length > 0 && (
+        <section className="card filed-mechanics-review">
+          <div>
+            <p className="logic-workspace__eyebrow">Uploaded document evidence</p>
+            <h2>Review filed PDF mechanics</h2>
+            <p className="muted">These tables were read from uploaded filed-form PDFs. Review the source and values before allowing them to drive the projection.</p>
+          </div>
+          <div className="filed-mechanics-review__grid">
+            {filedCandidates.map((mechanic) => {
+              const candidateRows = executableMechanics.mechanics[mechanic] || [];
+              const first = candidateRows[0] || {};
+              const last = candidateRows[candidateRows.length - 1] || {};
+              const provenance = first.provenance || {};
+              const value = (row: any) => mechanic === "coi" ? row.rate : mechanic === "surrender" ? row.charge : row.amount;
+              return (
+                <article key={mechanic} className="filed-mechanics-review__candidate">
+                  <div>
+                    <span className="filed-mechanics-review__badge">Review required</span>
+                    <h3>{mechanic === "coi" ? "COI rate table" : mechanic === "surrender" ? "Surrender charge schedule" : "Policy fee schedule"}</h3>
+                  </div>
+                  <dl>
+                    <div><dt>Rows</dt><dd>{candidateRows.length}</dd></div>
+                    <div><dt>Source</dt><dd>{provenance.filename || "Uploaded PDF"}{provenance.page ? ` · page ${provenance.page}` : ""}</dd></div>
+                    <div><dt>Table</dt><dd>{provenance.tableHeading || "Filed table"}</dd></div>
+                    <div><dt>Value basis</dt><dd>{String(provenance.valueBasis || "filed").replaceAll("_", " ")}</dd></div>
+                    <div><dt>Range</dt><dd>Duration {first.duration ?? "—"}: {value(first) ?? "—"} → duration {last.duration ?? "—"}: {value(last) ?? "—"}</dd></div>
+                  </dl>
+                  <button type="button" className="button" disabled={acceptingFiledMechanic !== null} onClick={() => acceptFiledMechanic(mechanic)}>
+                    {acceptingFiledMechanic === mechanic ? "Accepting…" : "Accept and use in projection"}
+                  </button>
+                </article>
+              );
+            })}
+          </div>
+        </section>
       )}
 
       {syntheticPreview && (
