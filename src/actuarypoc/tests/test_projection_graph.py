@@ -190,3 +190,15 @@ def test_synthetic_coi_table_remains_provisional_but_activates_selector_lookups(
     selector_edges = [edge for edge in graph["edges"] if edge["kind"] == "conditional_lookup"]
     assert selector_edges
     assert all(edge["status"] == "active" for edge in selector_edges)
+
+
+def test_synthetic_surrender_schedule_is_provisional_and_disclosed() -> None:
+    graph = compile_projection_graph(
+        product_code="UL-1",
+        product_type="UL",
+        inputs=[_input("face_amount"), _input("surrender_schedule", "synthetic_assumption"), _input("scenario_basis", "diagnostic")],
+        steps=[_step("surrender_charge", 1)],
+    )
+    nodes = {node["id"]: node for node in graph["nodes"]}
+    assert nodes["input:surrender_schedule"]["status"] == "provisional"
+    assert nodes["input:surrender_schedule"]["fallbackDisclosure"]["mode"] == "synthetic_active"

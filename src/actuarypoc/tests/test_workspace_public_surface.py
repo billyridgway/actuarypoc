@@ -43,6 +43,9 @@ def test_workspace_supports_additional_documents_and_analysis_reruns() -> None:
     assert ("/api/workspaces/{workspace_id}/synthetic-coi/preview", "POST") in route_methods
     assert ("/api/workspaces/{workspace_id}/synthetic-coi/accept", "POST") in route_methods
     assert ("/api/workspaces/{workspace_id}/synthetic-coi", "DELETE") in route_methods
+    assert ("/api/workspaces/{workspace_id}/synthetic-surrender/preview", "POST") in route_methods
+    assert ("/api/workspaces/{workspace_id}/synthetic-surrender/accept", "POST") in route_methods
+    assert ("/api/workspaces/{workspace_id}/synthetic-surrender", "DELETE") in route_methods
 
 
 def test_root_redirects_to_workspace_ui() -> None:
