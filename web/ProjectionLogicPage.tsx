@@ -345,6 +345,9 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
                     <div><dt>Source</dt><dd>{candidate.filename || provenance.filename || "Uploaded PDF"}{candidate.page || provenance.page ? ` · page ${candidate.page || provenance.page}` : ""}</dd></div>
                     <div><dt>Table</dt><dd>{candidate.tableHeading || provenance.tableHeading || "Filed table"}</dd></div>
                     <div><dt>Value basis</dt><dd>{String(candidate.valueBasis || provenance.valueBasis || "filed").replaceAll("_", " ")}</dd></div>
+                    {candidate.selectors && Object.keys(candidate.selectors).length > 0 && (
+                      <div><dt>Applies to</dt><dd>{Object.entries(candidate.selectors).map(([key, value]) => `${key.replaceAll("_", " ")}: ${value}`).join(" · ")}</dd></div>
+                    )}
                     <div><dt>Range</dt><dd>Duration {first.duration ?? "—"}: {value(first) ?? "—"} → duration {last.duration ?? "—"}: {value(last) ?? "—"}</dd></div>
                   </dl>
                   <button type="button" className="button" disabled={acceptingFiledMechanic !== null} onClick={() => acceptFiledMechanic(candidate)}>
