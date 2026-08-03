@@ -75,6 +75,11 @@ from actuarypoc.agents.synthetic_coi_ai import (
     propose_synthetic_coi_parameters,
     synthetic_coi_preview,
 )
+from actuarypoc.agents.synthetic_surrender_ai import (
+    build_synthetic_surrender_schedule,
+    propose_synthetic_surrender_parameters,
+    synthetic_surrender_preview,
+)
 from actuarypoc.storage.postgres_client import (
     get_last_product_model_review_decision,
     list_product_model_review_decisions,
@@ -1611,7 +1616,7 @@ def _apply_active_synthetic_mechanics(snapshot: Dict[str, Any], workspace_id: st
     """Rebuild the diagnostic view after reload when reviewed synthetic mechanics are active."""
 
     artifact = load_workspace_executable_mechanics(workspace_id) or {}
-    if not (artifact.get("synthetic") or {}).get("coi"):
+    if not (artifact.get("synthetic") or {}):
         return snapshot
     request = dict((snapshot.get("illustration") or {}).get("request") or {})
     request["_workspaceExecutableMechanics"] = artifact.get("usable") or {}
@@ -1978,6 +1983,7 @@ def api_preview_synthetic_coi(workspace_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=503, detail=f"Synthetic COI generation failed: {exc}") from exc
     preview["riskClasses"] = risk_classes
     preview["model"] = parameters.get("model")
+    preview["mechanic"] = "coi"
     return {"preview": preview}
 
 
@@ -2029,6 +2035,71 @@ def api_remove_synthetic_coi(workspace_id: str) -> Dict[str, Any]:
     store_workspace_executable_mechanics(workspace_id, artifact)
     return {"removed": True}
 
+
+@app.post("/api/workspaces/{workspace_id}/synthetic-surrender/preview")
+def api_preview_synthetic_surrender(workspace_id: str) -> Dict[str, Any]:
+    """Ask the agent for a bounded surrender shape and return its deterministic schedule."""
+
+    ws = get_workspace(workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    context, _ = _workspace_synthetic_coi_context(ws)
+    try:
+        parameters = propose_synthetic_surrender_parameters(
+            product_code=str(ws.get("inferred_product_code") or "ICC18 P18PR UL"),
+            product_context=context,
+        )
+        preview = synthetic_surrender_preview(parameters=parameters)
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail=f"Synthetic surrender generation failed: {exc}") from exc
+    preview["model"] = parameters.get("model")
+    return {"preview": preview}
+
+
+@app.post("/api/workspaces/{workspace_id}/synthetic-surrender/accept")
+def api_accept_synthetic_surrender(workspace_id: str, payload: SyntheticCoiAcceptRequest) -> Dict[str, Any]:
+    """Validate and persist a reviewed synthetic surrender schedule."""
+
+    ws = get_workspace(workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    try:
+        rows = build_synthetic_surrender_schedule(parameters=payload.parameters)
+        preview = synthetic_surrender_preview(parameters=payload.parameters)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    artifact = load_workspace_executable_mechanics(workspace_id) or {"usable": {}, "status": {}, "warnings": []}
+    if (artifact.get("usable") or {}).get("surrender") and not (artifact.get("synthetic") or {}).get("surrender"):
+        raise HTTPException(status_code=409, detail="An evidenced surrender schedule is already loaded and cannot be replaced by synthetic data")
+    artifact.setdefault("usable", {})["surrender"] = rows
+    artifact.setdefault("status", {})["surrender"] = "synthetic_scenario"
+    artifact.setdefault("synthetic", {})["surrender"] = {
+        "sourceType": "ai_synthetic",
+        "model": payload.model,
+        "generatedAt": payload.generatedAt or preview["generatedAt"],
+        "acceptedAt": datetime.utcnow().isoformat() + "Z",
+        "parameters": preview["parameters"],
+        "rowCount": len(rows),
+        "disclaimer": preview["disclaimer"],
+    }
+    artifact["objectKey"] = store_workspace_executable_mechanics(workspace_id, artifact)
+    return {"accepted": True, "syntheticSurrender": artifact["synthetic"]["surrender"]}
+
+
+@app.delete("/api/workspaces/{workspace_id}/synthetic-surrender")
+def api_remove_synthetic_surrender(workspace_id: str) -> Dict[str, Any]:
+    ws = get_workspace(workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    artifact = load_workspace_executable_mechanics(workspace_id) or {}
+    synthetic = artifact.get("synthetic") or {}
+    if "surrender" not in synthetic:
+        raise HTTPException(status_code=404, detail="No synthetic surrender schedule is active")
+    (artifact.get("usable") or {}).pop("surrender", None)
+    (artifact.get("status") or {}).pop("surrender", None)
+    synthetic.pop("surrender", None)
+    store_workspace_executable_mechanics(workspace_id, artifact)
+    return {"removed": True}
 
 @app.post("/api/workspaces/{workspace_id}/projection")
 def api_workspace_projection(
@@ -10261,7 +10332,11 @@ def build_ul_illustration_for_product(product_code: str, request: Dict[str, Any]
             "id": "surrender_schedule",
             "label": "Surrender charge schedule",
             "value": f"{len(executable.get('surrender') or [])} executable rows" if executable.get("surrender") else f"{cfg.max_surrender_pct:.2%} of face declining over {cfg.surrender_period_years} years",
-            "status": "evidenced" if executable.get("surrender") else "placeholder",
+            "status": (
+                "synthetic_assumption"
+                if any((row.get("provenance") or {}).get("sourceType") == "ai_synthetic" for row in (executable.get("surrender") or []))
+                else "evidenced" if executable.get("surrender") else "placeholder"
+            ),
             "source": _mechanics_source(executable.get("surrender")) if executable.get("surrender") else "Simplified runtime schedule; filed schedule not loaded",
         },
         {

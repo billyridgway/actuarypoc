@@ -132,6 +132,13 @@ def _fallback_disclosure(input_id: str, status: Any) -> Optional[Dict[str, str]]
             "impact": "Age, sex, risk class, and tobacco selectors cannot change COI rates until an evidenced table is loaded.",
         }
     if input_id == "surrender_schedule":
+        if str(status or "").lower() == "synthetic_assumption":
+            return {
+                "mode": "synthetic_active",
+                "missingEvidence": "Filed surrender charge schedule",
+                "fallback": "Reviewed AI-generated synthetic surrender schedule",
+                "impact": "Duration-specific synthetic charges are active, but results remain scenario-only and are not filed values.",
+            }
         return {
             "mode": "simplified_fallback",
             "missingEvidence": "Filed surrender charge schedule",

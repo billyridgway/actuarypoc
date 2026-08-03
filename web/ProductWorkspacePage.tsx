@@ -348,7 +348,11 @@ export const ProjectionLogicGraph: React.FC<{
   generatingSyntheticCoi?: boolean;
   onRemoveSyntheticCoi?: () => void;
   removingSyntheticCoi?: boolean;
-}> = ({ definition, editableValues, onInputChange, onGenerateSyntheticCoi, generatingSyntheticCoi, onRemoveSyntheticCoi, removingSyntheticCoi }) => {
+  onGenerateSyntheticSurrender?: () => void;
+  generatingSyntheticSurrender?: boolean;
+  onRemoveSyntheticSurrender?: () => void;
+  removingSyntheticSurrender?: boolean;
+}> = ({ definition, editableValues, onInputChange, onGenerateSyntheticCoi, generatingSyntheticCoi, onRemoveSyntheticCoi, removingSyntheticCoi, onGenerateSyntheticSurrender, generatingSyntheticSurrender, onRemoveSyntheticSurrender, removingSyntheticSurrender }) => {
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
   const [problemsOnly, setProblemsOnly] = React.useState(false);
   const [zoom, setZoom] = React.useState(1);
@@ -620,6 +624,16 @@ export const ProjectionLogicGraph: React.FC<{
                     {removingSyntheticCoi ? "Removing…" : "Remove synthetic table"}
                   </button>
                 )}
+                {selected.inputId === "surrender_schedule" && selected.fallbackDisclosure.mode === "simplified_fallback" && onGenerateSyntheticSurrender && (
+                  <button type="button" className="button" disabled={generatingSyntheticSurrender} onClick={onGenerateSyntheticSurrender}>
+                    {generatingSyntheticSurrender ? "AI agent generating…" : "Generate synthetic surrender schedule"}
+                  </button>
+                )}
+                {selected.inputId === "surrender_schedule" && selected.fallbackDisclosure.mode === "synthetic_active" && onRemoveSyntheticSurrender && (
+                  <button type="button" className="button button-secondary" disabled={removingSyntheticSurrender} onClick={onRemoveSyntheticSurrender}>
+                    {removingSyntheticSurrender ? "Removing…" : "Remove synthetic schedule"}
+                  </button>
+                )}
               </div>
             )}
             {selected.source && <p><strong>Source:</strong> {selected.source}</p>}
@@ -642,6 +656,66 @@ export const ProjectionLogicGraph: React.FC<{
   );
 };
 
+type ProjectionSeriesKey = "cumulativePremium" | "cashValue" | "surrenderValue" | "deathBenefit";
+interface ProjectionSeriesSpec { key: ProjectionSeriesKey; label: string; color: string }
+export interface ProjectionCrossover {
+  kind: "crossing" | "touch" | "overlap_range";
+  first: ProjectionSeriesSpec;
+  second: ProjectionSeriesSpec;
+  year: number;
+  endYear?: number;
+  value: number;
+}
+
+export const findProjectionCrossovers = (
+  rows: WorkspaceRow[], series: ProjectionSeriesSpec[],
+): ProjectionCrossover[] => {
+  const events: ProjectionCrossover[] = [];
+  for (let firstIndex = 0; firstIndex < series.length; firstIndex += 1) {
+    for (let secondIndex = firstIndex + 1; secondIndex < series.length; secondIndex += 1) {
+      const first = series[firstIndex];
+      const second = series[secondIndex];
+      const differences = rows.map((row) => Number(row[first.key] ?? 0) - Number(row[second.key] ?? 0));
+      const isNear = (index: number) => {
+        const scale = Math.max(Math.abs(Number(rows[index]?.[first.key] ?? 0)), Math.abs(Number(rows[index]?.[second.key] ?? 0)), 1);
+        return Math.abs(differences[index]) <= Math.max(1, scale * 0.001);
+      };
+      const inRange = new Set<number>();
+      for (let index = 1; index < rows.length;) {
+        if (!isNear(index)) { index += 1; continue; }
+        const start = index;
+        while (index + 1 < rows.length && isNear(index + 1)) index += 1;
+        if (index > start) {
+          for (let member = start; member <= index; member += 1) inRange.add(member);
+          events.push({
+            kind: "overlap_range", first, second,
+            year: Number(rows[start].year ?? start + 1),
+            endYear: Number(rows[index].year ?? index + 1),
+            value: (Number(rows[start][first.key] ?? 0) + Number(rows[start][second.key] ?? 0)) / 2,
+          });
+        }
+        index += 1;
+      }
+      for (let index = 1; index < rows.length; index += 1) {
+        if (inRange.has(index) || inRange.has(index - 1)) continue;
+        const previous = differences[index - 1];
+        const current = differences[index];
+        if (previous * current < 0) {
+          const fraction = Math.abs(previous) / (Math.abs(previous) + Math.abs(current));
+          const previousYear = Number(rows[index - 1].year ?? index);
+          const currentYear = Number(rows[index].year ?? index + 1);
+          const firstPrevious = Number(rows[index - 1][first.key] ?? 0);
+          const firstCurrent = Number(rows[index][first.key] ?? 0);
+          events.push({ kind: "crossing", first, second, year: previousYear + fraction * (currentYear - previousYear), value: firstPrevious + fraction * (firstCurrent - firstPrevious) });
+        } else if (isNear(index) && Math.max(Math.abs(Number(rows[index][first.key] ?? 0)), Math.abs(Number(rows[index][second.key] ?? 0))) > 1) {
+          events.push({ kind: "touch", first, second, year: Number(rows[index].year ?? index + 1), value: (Number(rows[index][first.key] ?? 0) + Number(rows[index][second.key] ?? 0)) / 2 });
+        }
+      }
+    }
+  }
+  return events.sort((a, b) => a.year - b.year);
+};
+
 export const ProjectionChart: React.FC<{ rows: WorkspaceRow[] }> = ({ rows }) => {
   const width = 720;
   const height = 280;
@@ -649,19 +723,19 @@ export const ProjectionChart: React.FC<{ rows: WorkspaceRow[] }> = ({ rows }) =>
   const right = 16;
   const top = 18;
   const bottom = 42;
-  const series = [
+  const series: ProjectionSeriesSpec[] = [
     { key: "cumulativePremium", label: "Cumulative premium", color: "#7c3aed" },
     { key: "cashValue", label: "Cash value", color: "#2563eb" },
     { key: "surrenderValue", label: "Surrender value", color: "#059669" },
     { key: "deathBenefit", label: "Death benefit", color: "#dc2626" },
-  ] as const;
-  type SeriesKey = (typeof series)[number]["key"];
-  const [visible, setVisible] = React.useState<Record<SeriesKey, boolean>>({
+  ];
+  const [visible, setVisible] = React.useState<Record<ProjectionSeriesKey, boolean>>({
     cumulativePremium: true,
     cashValue: true,
     surrenderValue: true,
     deathBenefit: false,
   });
+  const [hoveredIndex, setHoveredIndex] = React.useState<number | null>(null);
   const visibleSeries = series.filter((item) => visible[item.key]);
   const values = rows.flatMap((row) =>
     visibleSeries.map((item) => Number(row[item.key] ?? 0)).filter((value) => Number.isFinite(value)),
@@ -673,10 +747,32 @@ export const ProjectionChart: React.FC<{ rows: WorkspaceRow[] }> = ({ rows }) =>
     left + ((year - minYear) / Math.max(maxYear - minYear, 1)) * (width - left - right);
   const y = (value: number) => top + (1 - value / maxValue) * (height - top - bottom);
   const ticks = [0, 0.25, 0.5, 0.75, 1];
+  const crossovers = findProjectionCrossovers(rows, visibleSeries).slice(0, 12);
+  const hoveredRow = hoveredIndex == null ? null : rows[hoveredIndex];
+  const hoveredYear = Number(hoveredRow?.year ?? minYear);
+  const hoveredX = x(hoveredYear);
+  const tooltipWidth = 180;
+  const tooltipX = hoveredX > width * 0.64 ? hoveredX - tooltipWidth - 10 : hoveredX + 10;
+  const tooltipHeight = 30 + visibleSeries.length * 18;
 
   return (
     <div className="projection-chart">
-      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Projection values by policy year">
+      <svg
+        viewBox={`0 0 ${width} ${height}`}
+        role="img"
+        aria-label="Interactive projection values by policy year"
+        onMouseLeave={() => setHoveredIndex(null)}
+        onMouseMove={(event) => {
+          const bounds = event.currentTarget.getBoundingClientRect();
+          const svgX = (event.clientX - bounds.left) / bounds.width * width;
+          const year = minYear + ((svgX - left) / (width - left - right)) * Math.max(maxYear - minYear, 1);
+          let nearest = 0;
+          rows.forEach((row, index) => {
+            if (Math.abs(Number(row.year ?? minYear) - year) < Math.abs(Number(rows[nearest]?.year ?? minYear) - year)) nearest = index;
+          });
+          setHoveredIndex(nearest);
+        }}
+      >
         {ticks.map((tick) => (
           <g key={tick}>
             <line
@@ -697,6 +793,23 @@ export const ProjectionChart: React.FC<{ rows: WorkspaceRow[] }> = ({ rows }) =>
             .join(" ");
           return <polyline key={item.key} points={points} fill="none" stroke={item.color} strokeWidth="3" />;
         })}
+        {crossovers.map((event, index) => {
+          const startX = x(event.year);
+          if (event.kind === "overlap_range" && event.endYear != null) {
+            const endX = x(event.endYear);
+            return <line key={`${event.first.key}-${event.second.key}-${event.year}`} x1={startX} x2={endX} y1={y(event.value)} y2={y(Number(rows.find((row) => Number(row.year) === event.endYear)?.[event.first.key] ?? event.value))} className="projection-chart__overlap" />;
+          }
+          return <g key={`${event.first.key}-${event.second.key}-${event.year}`}><circle cx={startX} cy={y(event.value)} r="6" className="projection-chart__crossover-marker" /><text x={startX} y={y(event.value) + 3} textAnchor="middle" className="projection-chart__crossover-number">{index + 1}</text></g>;
+        })}
+        {hoveredRow && (
+          <g className="projection-chart__hover">
+            <line x1={hoveredX} x2={hoveredX} y1={top} y2={height - bottom} className="projection-chart__cursor" />
+            {visibleSeries.map((item) => <circle key={item.key} cx={hoveredX} cy={y(Number(hoveredRow[item.key] ?? 0))} r="4" fill={item.color} stroke="white" strokeWidth="2" />)}
+            <rect x={tooltipX} y={top + 4} width={tooltipWidth} height={tooltipHeight} rx="7" className="projection-chart__tooltip-bg" />
+            <text x={tooltipX + 10} y={top + 21} className="projection-chart__tooltip-title">Policy year {hoveredYear}{hoveredRow.attainedAge ? ` · Age ${hoveredRow.attainedAge}` : ""}</text>
+            {visibleSeries.map((item, index) => <text key={item.key} x={tooltipX + 10} y={top + 41 + index * 18} className="projection-chart__tooltip-value"><tspan fill={item.color}>●</tspan><tspan> {item.label}: {formatCurrency(hoveredRow[item.key])}</tspan></text>)}
+          </g>
+        )}
         <text x={left} y={height - 12} className="projection-chart__label">Year {minYear}</text>
         <text x={width - right} y={height - 12} textAnchor="end" className="projection-chart__label">
           Year {maxYear}
@@ -715,6 +828,19 @@ export const ProjectionChart: React.FC<{ rows: WorkspaceRow[] }> = ({ rows }) =>
           </button>
         ))}
       </div>
+      {crossovers.length > 0 && (
+        <div className="projection-chart__events" aria-label="Important projection intersections">
+          <strong>Important intersections</strong>
+          <div>{crossovers.map((event, index) => (
+            <span key={`${event.first.key}-${event.second.key}-${event.year}`}>
+              <b>{event.kind === "overlap_range" ? "↔" : index + 1}</b>
+              {event.kind === "overlap_range"
+                ? `${event.first.label} and ${event.second.label} overlap from year ${Math.round(event.year)}${event.endYear && event.endYear !== event.year ? ` through ${Math.round(event.endYear)}` : ""}`
+                : `${event.first.label} and ${event.second.label} ${event.kind === "crossing" ? "cross" : "meet"} near year ${event.year.toFixed(1)} at ${formatCurrency(event.value)}`}
+            </span>
+          ))}</div>
+        </div>
+      )}
     </div>
   );
 };
