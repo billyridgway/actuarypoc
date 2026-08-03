@@ -50,10 +50,16 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
   const metrics = illustration?.metrics ?? {};
   const missingCount = graphNodes.filter((node) => node.status === "missing").length;
   const provisionalCount = graphNodes.filter((node) => node.status === "provisional").length;
-  const filedCandidates = ["coi", "surrender", "fees"].filter(
-    (mechanic) => executableMechanics?.status?.[mechanic] === "filed_evidence_review_required"
-      && executableMechanics?.mechanics?.[mechanic]?.length,
-  );
+  const filedCandidates = ["coi", "surrender", "fees"].flatMap((mechanic) => {
+    const grouped = (executableMechanics?.candidates?.[mechanic] || []).filter(
+      (candidate: any) => candidate.reviewStatus === "review_required" && candidate.rows?.length,
+    );
+    if (grouped.length) return grouped;
+    const legacyRows = executableMechanics?.mechanics?.[mechanic] || [];
+    return executableMechanics?.status?.[mechanic] === "filed_evidence_review_required" && legacyRows.length
+      ? [{ id: mechanic, mechanic, rows: legacyRows, rowCount: legacyRows.length }]
+      : [];
+  });
 
   const updateInput = (inputId: string, value: string) => {
     setValues((current) => ({ ...current, [inputId]: value }));
@@ -130,14 +136,15 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
     }
   };
 
-  const acceptFiledMechanic = async (mechanic: string) => {
-    setAcceptingFiledMechanic(mechanic);
+  const acceptFiledMechanic = async (candidate: any) => {
+    const mechanic = candidate.mechanic;
+    setAcceptingFiledMechanic(candidate.id);
     setError(null);
     try {
       const response = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/filed-mechanics/accept`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mechanic }),
+        body: JSON.stringify({ mechanic, candidateId: candidate.id === mechanic ? undefined : candidate.id }),
       });
       if (!response.ok) throw new Error((await response.text()) || `Acceptance failed (HTTP ${response.status})`);
       const body = await response.json();
@@ -145,6 +152,11 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
         ...(current || {}),
         status: { ...(current?.status || {}), [mechanic]: body.status },
         reviews: { ...(current?.reviews || {}), [mechanic]: body.review },
+        candidates: {
+          ...(current?.candidates || {}),
+          [mechanic]: (current?.candidates?.[mechanic] || []).map((item: any) =>
+            item.id === candidate.id ? { ...item, reviewStatus: "accepted" } : item),
+        },
       }));
       await runProjection();
       setRunMessage(`Filed ${mechanic === "coi" ? "COI table" : mechanic === "surrender" ? "surrender schedule" : "fee schedule"} accepted and applied.`);
@@ -315,27 +327,28 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
             <p className="muted">These tables were read from uploaded filed-form PDFs. Review the source and values before allowing them to drive the projection.</p>
           </div>
           <div className="filed-mechanics-review__grid">
-            {filedCandidates.map((mechanic) => {
-              const candidateRows = executableMechanics.mechanics[mechanic] || [];
+            {filedCandidates.map((candidate: any) => {
+              const mechanic = candidate.mechanic;
+              const candidateRows = candidate.rows || [];
               const first = candidateRows[0] || {};
               const last = candidateRows[candidateRows.length - 1] || {};
               const provenance = first.provenance || {};
               const value = (row: any) => mechanic === "coi" ? row.rate : mechanic === "surrender" ? row.charge : row.amount;
               return (
-                <article key={mechanic} className="filed-mechanics-review__candidate">
+                <article key={candidate.id} className="filed-mechanics-review__candidate">
                   <div>
                     <span className="filed-mechanics-review__badge">Review required</span>
                     <h3>{mechanic === "coi" ? "COI rate table" : mechanic === "surrender" ? "Surrender charge schedule" : "Policy fee schedule"}</h3>
                   </div>
                   <dl>
-                    <div><dt>Rows</dt><dd>{candidateRows.length}</dd></div>
-                    <div><dt>Source</dt><dd>{provenance.filename || "Uploaded PDF"}{provenance.page ? ` · page ${provenance.page}` : ""}</dd></div>
-                    <div><dt>Table</dt><dd>{provenance.tableHeading || "Filed table"}</dd></div>
-                    <div><dt>Value basis</dt><dd>{String(provenance.valueBasis || "filed").replaceAll("_", " ")}</dd></div>
+                    <div><dt>Rows</dt><dd>{candidate.rowCount || candidateRows.length}</dd></div>
+                    <div><dt>Source</dt><dd>{candidate.filename || provenance.filename || "Uploaded PDF"}{candidate.page || provenance.page ? ` · page ${candidate.page || provenance.page}` : ""}</dd></div>
+                    <div><dt>Table</dt><dd>{candidate.tableHeading || provenance.tableHeading || "Filed table"}</dd></div>
+                    <div><dt>Value basis</dt><dd>{String(candidate.valueBasis || provenance.valueBasis || "filed").replaceAll("_", " ")}</dd></div>
                     <div><dt>Range</dt><dd>Duration {first.duration ?? "—"}: {value(first) ?? "—"} → duration {last.duration ?? "—"}: {value(last) ?? "—"}</dd></div>
                   </dl>
-                  <button type="button" className="button" disabled={acceptingFiledMechanic !== null} onClick={() => acceptFiledMechanic(mechanic)}>
-                    {acceptingFiledMechanic === mechanic ? "Accepting…" : "Accept and use in projection"}
+                  <button type="button" className="button" disabled={acceptingFiledMechanic !== null} onClick={() => acceptFiledMechanic(candidate)}>
+                    {acceptingFiledMechanic === candidate.id ? "Accepting…" : "Accept and use in projection"}
                   </button>
                 </article>
               );

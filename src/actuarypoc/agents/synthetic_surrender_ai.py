@@ -42,6 +42,43 @@ def _validate_parameters(raw: Mapping[str, Any]) -> Dict[str, Any]:
     return parameters
 
 
+def _repair_agent_parameters(raw: Mapping[str, Any]) -> Dict[str, Any]:
+    """Convert a plausible but invalid agent proposal into safe bounded inputs."""
+
+    repaired = dict(raw)
+    try:
+        initial = float(repaired.get("initial_charge_percent_face", DEFAULT_PARAMETERS["initial_charge_percent_face"]))
+        terminal = float(repaired.get("terminal_charge_percent_face", DEFAULT_PARAMETERS["terminal_charge_percent_face"]))
+    except (TypeError, ValueError):
+        initial = float(DEFAULT_PARAMETERS["initial_charge_percent_face"])
+        terminal = float(DEFAULT_PARAMETERS["terminal_charge_percent_face"])
+    # Models sometimes return whole percentages (10) rather than decimals (.10).
+    if initial > 1.0:
+        initial /= 100.0
+    if terminal > 1.0:
+        terminal /= 100.0
+    initial = min(0.50, max(0.0, initial))
+    terminal = min(0.50, max(0.0, terminal))
+    if terminal > initial:
+        initial, terminal = terminal, initial
+    try:
+        period = min(40, max(1, int(repaired.get("period_years", DEFAULT_PARAMETERS["period_years"]))))
+    except (TypeError, ValueError):
+        period = int(DEFAULT_PARAMETERS["period_years"])
+    shape = str(repaired.get("curve_shape") or "linear").lower().strip()
+    if shape not in {"linear", "front_loaded", "back_loaded"}:
+        shape = "linear"
+    repaired.update({
+        "initial_charge_percent_face": initial,
+        "terminal_charge_percent_face": terminal,
+        "period_years": period,
+        "curve_shape": shape,
+        "rationale": str(repaired.get("rationale") or DEFAULT_PARAMETERS["rationale"]),
+        "agentParametersAdjusted": True,
+    })
+    return _validate_parameters(repaired)
+
+
 def propose_synthetic_surrender_parameters(
     *, product_code: str, product_context: str, model: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -73,7 +110,10 @@ def propose_synthetic_surrender_parameters(
         raise RuntimeError(f"AI surrender proposal was not valid JSON: {exc}") from exc
     if not isinstance(proposed, dict):
         raise RuntimeError("AI surrender proposal must be a JSON object")
-    validated = _validate_parameters(proposed)
+    try:
+        validated = _validate_parameters(proposed)
+    except (TypeError, ValueError):
+        validated = _repair_agent_parameters(proposed)
     validated["model"] = selected_model
     return validated
 

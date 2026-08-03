@@ -174,6 +174,24 @@ def test_reload_reapplies_accepted_filed_mechanics(monkeypatch) -> None:
     assert result["executableMechanics"] == artifact
 
 
+def test_accepts_only_selected_filed_candidate() -> None:
+    def candidate(candidate_id: str, filename: str, rate: float) -> dict:
+        return {
+            "id": candidate_id, "mechanic": "coi", "filename": filename,
+            "reviewStatus": "review_required", "rows": [{
+                "duration": 1, "rate": rate, "rate_unit": "per_1000_monthly",
+                "provenance": {"filename": filename, "sourceType": "filed_pdf", "reviewStatus": "review_required"},
+            }],
+        }
+    artifact = {"candidates": {"coi": [candidate("a", "a.pdf", 0.1), candidate("b", "b.pdf", 0.2)]}, "mechanics": {"coi": []}}
+
+    accepted = accept_filed_mechanic(artifact, "coi", candidate_id="b")
+
+    assert accepted["usable"]["coi"][0]["rate"] == 0.2
+    assert accepted["candidates"]["coi"][0]["reviewStatus"] == "review_required"
+    assert accepted["candidates"]["coi"][1]["reviewStatus"] == "accepted"
+
+
 def test_pdf_extraction_does_not_promote_specimen_policyholder_inputs() -> None:
     page = """
     POLICY SPECIFICATIONS [SPECIMEN]
@@ -242,6 +260,35 @@ def test_workspace_analysis_reads_pdf_candidates_and_marks_them_for_review(monke
         "surrender": "missing_or_incomplete",
         "fees": "missing_or_incomplete",
     }
+    assert len(artifact["candidates"]["coi"]) == 1
+    assert artifact["candidates"]["coi"][0]["rowCount"] == 1
+
+
+def test_workspace_analysis_keeps_duplicate_filed_tables_as_separate_candidates(monkeypatch) -> None:
+    class Response:
+        def read(self) -> bytes: return b"pdf"
+        def close(self) -> None: pass
+        def release_conn(self) -> None: pass
+    class Client:
+        def get_object(self, bucket: str, object_path: str) -> Response: return Response()
+    monkeypatch.setattr(server, "get_minio_client", lambda: Client())
+    monkeypatch.setattr(server, "ensure_bucket", lambda client: None)
+    monkeypatch.setattr(server, "get_bucket_name", lambda: "bucket")
+    monkeypatch.setattr(server, "extract_ul_mechanics", lambda filename, content: {
+        "mechanics": {"coi": [{
+            "duration": 1, "rate": 0.1, "rate_unit": "per_1000_monthly",
+            "provenance": {"filename": filename, "page": 4, "tableHeading": "COI Rates", "sourceType": "filed_pdf", "reviewStatus": "review_required"},
+        }], "surrender": [], "fees": []}, "warnings": [],
+    })
+
+    artifact = server._extract_workspace_executable_mechanics([
+        {"description": "form-a.pdf", "object_path": "a"},
+        {"description": "form-b.pdf", "object_path": "b"},
+    ])
+
+    assert len(artifact["candidates"]["coi"]) == 2
+    assert {item["filename"] for item in artifact["candidates"]["coi"]} == {"form-a.pdf", "form-b.pdf"}
+    assert artifact["candidates"]["coi"][0]["id"] != artifact["candidates"]["coi"][1]["id"]
 
 
 def test_projection_executes_rates_surrender_and_fee_schedules() -> None:
@@ -345,6 +392,19 @@ def test_engine_capabilities_do_not_depend_on_workspace_schedule_availability() 
     assert statuses["UL_CAP_COI_TABLE_AGE_GENDER_CLASS"] == "supported"
     assert statuses["UL_CAP_SURRENDER_FIXED_SCHEDULE"] == "supported"
     assert statuses["UL_CAP_LEVEL_POLICY_FEE"] == "supported"
+
+
+def test_workspace_storage_context_skips_legacy_postgres_product_review(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(server, "get_product_review", lambda code: calls.append(code))
+    monkeypatch.setattr(server, "get_current_assumption_for_product", lambda code: None)
+    token = server._WORKSPACE_MINIO_ONLY.set(True)
+    try:
+        server.load_ul_runtime_config("ICC18 P18PR UL")
+    finally:
+        server._WORKSPACE_MINIO_ONLY.reset(token)
+
+    assert calls == []
 
 
 def test_projection_selects_attained_age_sex_and_class_coi_row() -> None:
