@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from actuarypoc.agents.synthetic_surrender_ai import (
+    _repair_agent_parameters,
     build_synthetic_surrender_schedule,
     synthetic_surrender_preview,
 )
@@ -36,6 +37,21 @@ def test_rejects_invalid_agent_schedule_parameters() -> None:
         )
     with pytest.raises(ValueError, match="curve_shape"):
         build_synthetic_surrender_schedule(parameters={**PARAMETERS, "curve_shape": "random"})
+
+
+def test_repairs_plausible_unbounded_agent_parameters() -> None:
+    repaired = _repair_agent_parameters({
+        "initial_charge_percent_face": 5,
+        "terminal_charge_percent_face": 10,
+        "period_years": 99,
+        "curve_shape": "declining",
+    })
+
+    assert repaired["initial_charge_percent_face"] == 0.10
+    assert repaired["terminal_charge_percent_face"] == 0.05
+    assert repaired["period_years"] == 40
+    assert repaired["curve_shape"] == "linear"
+    assert repaired["agentParametersAdjusted"] is True
 
 
 def test_preview_is_explicitly_synthetic_and_download_ready() -> None:
@@ -75,6 +91,21 @@ def test_accept_remove_and_projection_execution(monkeypatch) -> None:
     assert server.api_remove_synthetic_surrender("workspace-1") == {"removed": True}
     assert "surrender" not in artifact["usable"]
     assert artifact["usable"]["fees"] == [{"amount": 10}]
+
+
+def test_synthetic_schedule_does_not_hide_pending_filed_candidate(monkeypatch) -> None:
+    artifact = {
+        "usable": {}, "status": {"surrender": "filed_evidence_review_required"},
+        "candidates": {"surrender": [{"id": "filed-1", "reviewStatus": "review_required", "rows": [{"duration": 1}]}]},
+    }
+    monkeypatch.setattr(server, "get_workspace", lambda workspace_id: {"id": workspace_id})
+    monkeypatch.setattr(server, "load_workspace_executable_mechanics", lambda workspace_id: artifact)
+    monkeypatch.setattr(server, "store_workspace_executable_mechanics", lambda workspace_id, value: "key")
+
+    server.api_accept_synthetic_surrender("workspace-1", server.SyntheticCoiAcceptRequest(parameters=PARAMETERS))
+    assert artifact["candidates"]["surrender"][0]["reviewStatus"] == "review_required"
+    server.api_remove_synthetic_surrender("workspace-1")
+    assert artifact["status"]["surrender"] == "filed_evidence_review_required"
 
 
 def test_accept_refuses_to_replace_evidenced_surrender_schedule(monkeypatch) -> None:

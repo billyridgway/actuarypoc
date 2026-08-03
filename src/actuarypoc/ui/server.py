@@ -11,6 +11,7 @@ import zipfile
 from hashlib import sha256
 import math
 from pathlib import Path
+from contextvars import ContextVar
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, HTTPException, Query, UploadFile, File, Form, Request
@@ -120,6 +121,22 @@ except Exception:  # pragma: no cover - extremely unlikely in this env
 
 
 app = FastAPI(title="ActuaryPOC Projection Viewer", version="0.1.0")
+
+_WORKSPACE_MINIO_ONLY: ContextVar[bool] = ContextVar("workspace_minio_only", default=False)
+
+
+@app.middleware("http")
+async def workspace_storage_context(request: Request, call_next: Callable[..., Any]) -> Response:
+    """Keep workspace requests on the MinIO-backed persistence path."""
+
+    token = None
+    if request.url.path.startswith("/api/workspaces"):
+        token = _WORKSPACE_MINIO_ONLY.set(True)
+    try:
+        return await call_next(request)
+    finally:
+        if token is not None:
+            _WORKSPACE_MINIO_ONLY.reset(token)
 
 # Simple runtime marker so UIs can distinguish deployments without needing
 # access to git metadata. This is initialised when the process starts,
@@ -332,6 +349,32 @@ def _extract_workspace_executable_mechanics(
                 response.close()
                 response.release_conn()
     combined["usable"] = usable_mechanics(combined)
+    combined["candidates"] = {"coi": [], "surrender": [], "fees": []}
+    for mechanic, rows in combined["mechanics"].items():
+        grouped: Dict[Tuple[str, Any, str], List[Dict[str, Any]]] = {}
+        for row in rows:
+            provenance = row.get("provenance") or {}
+            if provenance.get("reviewStatus") != "review_required":
+                continue
+            key = (
+                str(provenance.get("filename") or ""),
+                provenance.get("page"),
+                str(provenance.get("tableHeading") or ""),
+            )
+            grouped.setdefault(key, []).append(row)
+        for (filename, page, heading), candidate_rows in grouped.items():
+            identity = f"{mechanic}|{filename}|{page}|{heading}"
+            combined["candidates"][mechanic].append({
+                "id": sha256(identity.encode("utf-8")).hexdigest()[:16],
+                "mechanic": mechanic,
+                "filename": filename,
+                "page": page,
+                "tableHeading": heading,
+                "valueBasis": ((candidate_rows[0].get("provenance") or {}).get("valueBasis")),
+                "reviewStatus": "review_required",
+                "rowCount": len(candidate_rows),
+                "rows": candidate_rows,
+            })
     combined["status"] = {}
     for mechanic in ("coi", "surrender", "fees"):
         candidates = list((combined.get("mechanics") or {}).get(mechanic) or [])
@@ -1956,7 +1999,16 @@ class SyntheticCoiAcceptRequest(BaseModel):  # type: ignore[misc]
 
 class FiledMechanicReviewRequest(BaseModel):  # type: ignore[misc]
     mechanic: str
+    candidateId: Optional[str] = None
     reviewedBy: Optional[str] = None
+
+
+def _status_without_synthetic(artifact: Dict[str, Any], mechanic: str) -> str:
+    pending = any(
+        candidate.get("reviewStatus") == "review_required"
+        for candidate in ((artifact.get("candidates") or {}).get(mechanic) or [])
+    )
+    return "filed_evidence_review_required" if pending else "missing_or_incomplete"
 
 
 def _workspace_synthetic_coi_context(ws: Dict[str, Any]) -> tuple[str, List[str]]:
@@ -1993,6 +2045,7 @@ def api_accept_filed_mechanic(
         reviewed = accept_filed_mechanic(
             artifact,
             mechanic,
+            candidate_id=payload.candidateId,
             reviewed_by=str(payload.reviewedBy or "workspace_user"),
         )
     except ValueError as exc:
@@ -2001,7 +2054,7 @@ def api_accept_filed_mechanic(
     return {
         "accepted": True,
         "mechanic": mechanic,
-        "review": (reviewed.get("reviews") or {}).get(mechanic),
+        "review": (reviewed.get("reviews") or {}).get(payload.candidateId or mechanic),
         "status": (reviewed.get("status") or {}).get(mechanic),
     }
 
@@ -2072,7 +2125,7 @@ def api_remove_synthetic_coi(workspace_id: str) -> Dict[str, Any]:
     if "coi" not in synthetic:
         raise HTTPException(status_code=404, detail="No synthetic COI table is active")
     (artifact.get("usable") or {}).pop("coi", None)
-    (artifact.get("status") or {}).pop("coi", None)
+    artifact.setdefault("status", {})["coi"] = _status_without_synthetic(artifact, "coi")
     synthetic.pop("coi", None)
     store_workspace_executable_mechanics(workspace_id, artifact)
     return {"removed": True}
@@ -2138,10 +2191,11 @@ def api_remove_synthetic_surrender(workspace_id: str) -> Dict[str, Any]:
     if "surrender" not in synthetic:
         raise HTTPException(status_code=404, detail="No synthetic surrender schedule is active")
     (artifact.get("usable") or {}).pop("surrender", None)
-    (artifact.get("status") or {}).pop("surrender", None)
+    artifact.setdefault("status", {})["surrender"] = _status_without_synthetic(artifact, "surrender")
     synthetic.pop("surrender", None)
     store_workspace_executable_mechanics(workspace_id, artifact)
     return {"removed": True}
+
 
 @app.post("/api/workspaces/{workspace_id}/projection")
 def api_workspace_projection(
@@ -6426,10 +6480,13 @@ def build_product_workspace_snapshot(product_code: str) -> Dict[str, Any]:
         )
 
     # --- Product Review metadata -------------------------------------------------
-    try:
-        rec = get_product_review(canonical_code)
-    except Exception:
+    if _WORKSPACE_MINIO_ONLY.get():
         rec = None
+    else:
+        try:
+            rec = get_product_review(canonical_code)
+        except Exception:
+            rec = None
 
     meta = (rec or {}).get("metadata") or {}
     if not isinstance(meta, dict):
@@ -6480,10 +6537,13 @@ def build_product_workspace_snapshot(product_code: str) -> Dict[str, Any]:
 
     # --- Documents associated with this product / filing ------------------------
     documents_payload: List[Dict[str, Any]] = []
-    try:
-        docs = list_product_documents(canonical_code, filing_id=filing_id)
-    except Exception:
+    if _WORKSPACE_MINIO_ONLY.get():
         docs = []
+    else:
+        try:
+            docs = list_product_documents(canonical_code, filing_id=filing_id)
+        except Exception:
+            docs = []
 
     for d in docs:
         documents_payload.append(
@@ -9507,7 +9567,7 @@ def load_ul_runtime_config(product_code: str) -> UlRuntimeConfig:
     # ------------------------------------------------------------------
     used_structured = False
     try:
-        rec = get_product_review(product_code)
+        rec = None if _WORKSPACE_MINIO_ONLY.get() else get_product_review(product_code)
     except Exception as exc:  # pragma: no cover - defensive
         logger.info(
             "UL config: failed to load Product Review for %s (%r); "

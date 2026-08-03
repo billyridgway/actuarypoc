@@ -320,14 +320,26 @@ def usable_mechanics(extracted: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def accept_filed_mechanic(
-    artifact: Dict[str, Any], mechanic: str, *, reviewed_by: str = "workspace_user",
+    artifact: Dict[str, Any], mechanic: str, *, candidate_id: str | None = None,
+    reviewed_by: str = "workspace_user",
 ) -> Dict[str, Any]:
     """Accept one complete filed-PDF candidate set and make only that mechanic executable."""
 
     if mechanic not in {"coi", "surrender", "fees"}:
         raise ValueError("mechanic must be coi, surrender, or fees")
     result = deepcopy(artifact)
-    rows = list((result.get("mechanics") or {}).get(mechanic) or [])
+    candidates = list((result.get("candidates") or {}).get(mechanic) or [])
+    candidate = None
+    if candidates:
+        if candidate_id:
+            candidate = next((item for item in candidates if item.get("id") == candidate_id), None)
+            if candidate is None:
+                raise ValueError(f"Filed {mechanic} candidate was not found")
+        elif len(candidates) == 1:
+            candidate = candidates[0]
+        else:
+            raise ValueError(f"Select one of the {len(candidates)} filed {mechanic} candidates")
+    rows = list((candidate or {}).get("rows") or (result.get("mechanics") or {}).get(mechanic) or [])
     if not rows:
         raise ValueError(f"No filed {mechanic} candidate is available")
     if any((row.get("provenance") or {}).get("sourceType") != "filed_pdf" for row in rows):
@@ -348,13 +360,22 @@ def accept_filed_mechanic(
             "reviewedBy": reviewed_by,
             "reviewedAt": accepted_at,
         }
-    result.setdefault("mechanics", {})[mechanic] = rows
-    result["usable"] = usable_mechanics(result)
-    if mechanic not in result["usable"]:
+    validation_artifact = {"mechanics": {mechanic: rows}}
+    validated = usable_mechanics(validation_artifact)
+    if mechanic not in validated:
         raise ValueError(f"Filed {mechanic} candidate is incomplete and cannot be executed")
+    result.setdefault("usable", {})[mechanic] = rows
+    if candidate is not None:
+        candidate["rows"] = rows
+        candidate["reviewStatus"] = "accepted"
+    synthetic = result.get("synthetic") or {}
+    synthetic.pop(mechanic, None)
     result.setdefault("status", {})[mechanic] = "executable"
-    result.setdefault("reviews", {})[mechanic] = {
+    review_key = str((candidate or {}).get("id") or mechanic)
+    result.setdefault("reviews", {})[review_key] = {
         "status": "accepted",
+        "candidateId": (candidate or {}).get("id"),
+        "mechanic": mechanic,
         "reviewedBy": reviewed_by,
         "reviewedAt": accepted_at,
         "rowCount": len(rows),
