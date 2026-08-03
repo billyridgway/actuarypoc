@@ -316,7 +316,7 @@ def _extract_workspace_executable_mechanics(
     }
     for document in workspace_documents:
         filename = str(document.get("description") or "")
-        if Path(filename).suffix.lower() not in {".csv", ".tsv", ".xlsx", ".xlsm"}:
+        if Path(filename).suffix.lower() not in {".csv", ".tsv", ".xlsx", ".xlsm", ".pdf"}:
             continue
         response = None
         try:
@@ -332,10 +332,20 @@ def _extract_workspace_executable_mechanics(
                 response.close()
                 response.release_conn()
     combined["usable"] = usable_mechanics(combined)
-    combined["status"] = {
-        mechanic: ("executable" if mechanic in combined["usable"] else "missing_or_incomplete")
-        for mechanic in ("coi", "surrender", "fees")
-    }
+    combined["status"] = {}
+    for mechanic in ("coi", "surrender", "fees"):
+        candidates = list((combined.get("mechanics") or {}).get(mechanic) or [])
+        review_required = any(
+            (row.get("provenance") or {}).get("reviewStatus") == "review_required"
+            for row in candidates
+        )
+        combined["status"][mechanic] = (
+            "executable"
+            if mechanic in combined["usable"]
+            else "filed_evidence_review_required"
+            if review_required
+            else "missing_or_incomplete"
+        )
     return combined
 
 

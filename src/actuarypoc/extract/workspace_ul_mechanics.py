@@ -9,16 +9,19 @@ from __future__ import annotations
 
 import io
 import math
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import pandas as pd
+from PyPDF2 import PdfReader
 
 
 MAX_DURATION = 121
 COI_UNITS = {"per_1000_monthly", "per_1000_annual", "percent_nar_annual"}
 SURRENDER_UNITS = {"percent_face", "per_1000_face", "fixed"}
 FEE_UNITS = {"annual_fixed", "modal_fixed", "per_1000_face_annual"}
+PDF_REVIEW_REQUIRED = "review_required"
 
 
 def _name(value: Any) -> str:
@@ -61,8 +64,122 @@ def _read_tables(filename: str, content: bytes) -> List[Tuple[str, pd.DataFrame]
     return []
 
 
+def _pdf_provenance(filename: str, page: int, heading: str) -> Dict[str, Any]:
+    return {
+        "filename": filename,
+        "page": page,
+        "tableHeading": heading,
+        "sourceType": "filed_pdf",
+        "evidenceClass": "specimen_filed_table",
+        "valueBasis": "guaranteed_maximum",
+        "reviewStatus": PDF_REVIEW_REQUIRED,
+    }
+
+
+def _number_pairs(section: str) -> List[Tuple[int, float, bool]]:
+    """Read repeated duration/value pairs while preserving an explicit '+' terminal row."""
+
+    pairs: List[Tuple[int, float, bool]] = []
+    for raw_duration, plus, raw_value in re.findall(
+        r"(?<![\d.])(\d{1,3})(\+?)\]?\s+\[?\$?([0-9]+(?:\.[0-9]+)?)\]?",
+        section,
+    ):
+        duration = int(raw_duration)
+        if 1 <= duration <= MAX_DURATION:
+            pairs.append((duration, float(raw_value), plus == "+"))
+    return pairs
+
+
+def _extract_pdf_page(filename: str, page_number: int, text: str) -> Dict[str, List[Dict[str, Any]]]:
+    """Extract only recognized, explicitly headed UL tables from one PDF page."""
+
+    mechanics: Dict[str, List[Dict[str, Any]]] = {"coi": [], "surrender": [], "fees": []}
+    compact = re.sub(r"[ \t]+", " ", text or "")
+    no_space = re.sub(r"\s+", "", compact).upper()
+    if "ICC18S18PRUL" not in no_space or "SPECIMEN" not in no_space:
+        return mechanics
+
+    surrender_heading = "Surrender Charge Rates"
+    surrender_end = re.search(r"Surrender\s+Char\s*ge\s+Calculation", compact, re.IGNORECASE)
+    if surrender_heading in compact and "Coverage" in compact and surrender_end:
+        section = compact.split(surrender_heading, 1)[1][: surrender_end.start()]
+        pairs = _number_pairs(section)
+        durations = [duration for duration, _, _ in pairs]
+        if durations and durations == list(range(1, max(durations) + 1)):
+            provenance = _pdf_provenance(filename, page_number, surrender_heading)
+            mechanics["surrender"] = [
+                {
+                    "duration": duration,
+                    "issue_age": None,
+                    "sex": None,
+                    "charge": value,
+                    "charge_unit": "per_1000_face",
+                    "provenance": dict(provenance),
+                }
+                for duration, value, _ in pairs
+            ]
+
+    coi_heading = "Table of Cost of Insurance (COI) Rates"
+    coi_start = re.search(r"Table\s+of\s+Cost\s+of\s+Insu\s*rance\s+\(COI\)\s+Rates", compact, re.IGNORECASE)
+    if coi_start and "MAXIMUMMONTHLYCOSTOFINSURANCERATESPER$1000" in no_space:
+        section = compact[coi_start.end():]
+        pairs = _number_pairs(section)
+        # Ignore heading numbers such as $1000 and accept only a complete 1..terminal schedule.
+        by_duration = {duration: (value, terminal) for duration, value, terminal in pairs}
+        terminal = max(by_duration, default=0)
+        if terminal and set(range(1, terminal + 1)) <= set(by_duration):
+            provenance = _pdf_provenance(filename, page_number, coi_heading)
+            for duration in range(1, terminal + 1):
+                value, is_terminal = by_duration[duration]
+                mechanics["coi"].append({
+                    "duration": duration,
+                    "attained_age": None,
+                    "sex": None,
+                    "risk_class": None,
+                    "tobacco_status": None,
+                    "rate": value,
+                    "rate_unit": "per_1000_monthly",
+                    "provenance": dict(provenance),
+                })
+                if is_terminal:
+                    for later_duration in range(duration + 1, MAX_DURATION + 1):
+                        mechanics["coi"].append({
+                            "duration": later_duration,
+                            "attained_age": None,
+                            "sex": None,
+                            "risk_class": None,
+                            "tobacco_status": None,
+                            "rate": value,
+                            "rate_unit": "per_1000_monthly",
+                            "provenance": {**provenance, "expandedFrom": f"{duration}+"},
+                        })
+    return mechanics
+
+
+def _read_pdf_mechanics(filename: str, content: bytes) -> Dict[str, Any]:
+    mechanics: Dict[str, List[Dict[str, Any]]] = {"coi": [], "surrender": [], "fees": []}
+    warnings: List[str] = []
+    try:
+        reader = PdfReader(io.BytesIO(content))
+    except Exception as exc:  # noqa: BLE001
+        return {"mechanics": mechanics, "warnings": [f"{filename}: PDF could not be read: {exc}"]}
+    for page_number, page in enumerate(reader.pages, 1):
+        try:
+            extracted = _extract_pdf_page(filename, page_number, page.extract_text() or "")
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"{filename} page {page_number}: PDF table extraction rejected: {exc}")
+            continue
+        for mechanic, rows in extracted.items():
+            mechanics[mechanic].extend(rows)
+    return {"mechanics": mechanics, "warnings": warnings}
+
+
 def extract_ul_mechanics(filename: str, content: bytes) -> Dict[str, Any]:
     """Return validated mechanics plus non-fatal extraction warnings."""
+
+    if Path(filename).suffix.lower() == ".pdf":
+        extracted = _read_pdf_mechanics(filename, content)
+        return {"version": 2, **extracted}
 
     mechanics: Dict[str, List[Dict[str, Any]]] = {"coi": [], "surrender": [], "fees": []}
     warnings: List[str] = []
@@ -183,14 +300,14 @@ def usable_mechanics(extracted: Dict[str, Any]) -> Dict[str, Any]:
 
     raw = extracted.get("mechanics") or {}
     usable: Dict[str, Any] = {}
-    coi = list(raw.get("coi") or [])
+    coi = [row for row in (raw.get("coi") or []) if (row.get("provenance") or {}).get("reviewStatus") != PDF_REVIEW_REQUIRED]
     if coi:
         usable["coi"] = coi
-    surrender = list(raw.get("surrender") or [])
+    surrender = [row for row in (raw.get("surrender") or []) if (row.get("provenance") or {}).get("reviewStatus") != PDF_REVIEW_REQUIRED]
     surrender_durations = sorted({row.get("duration") for row in surrender})
     if surrender and surrender_durations == list(range(1, max(surrender_durations) + 1)):
         usable["surrender"] = surrender
-    fees = list(raw.get("fees") or [])
+    fees = [row for row in (raw.get("fees") or []) if (row.get("provenance") or {}).get("reviewStatus") != PDF_REVIEW_REQUIRED]
     fee_durations = sorted({row.get("duration") for row in fees if row.get("duration") is not None})
     if fees and (
         any(row.get("duration") is None for row in fees)
