@@ -373,6 +373,7 @@ def _extract_workspace_executable_mechanics(
                 "valueBasis": ((candidate_rows[0].get("provenance") or {}).get("valueBasis")),
                 "reviewStatus": "review_required",
                 "rowCount": len(candidate_rows),
+                "components": sorted({str(row.get("component") or "policy_fee") for row in candidate_rows}),
                 "selectors": {
                     field: candidate_rows[0].get(field)
                     for field in ("sex", "risk_class", "tobacco_status", "issue_age", "premium_mode")
@@ -9160,10 +9161,11 @@ def build_ul_projection_explanation(
     # Core scalar inputs used in the original UL projection loop.
     guaranteed_rate = float(config.guaranteed_rate)
     coi_rate = float(config.coi_rate_flat)
-    policy_fee_annual = float(config.policy_fee_annual)
+    policy_fee_annual = float(target_row.get("policyFee") or 0.0)
 
     face_amount = float(request.get("faceAmount") or 0.0)
     annual_premium = float(target_row.get("annualPremium") or target_row.get("premium") or 0.0)
+    premium_load = float(target_row.get("premiumLoad") or 0.0)
     premium_mode = str(target_row.get("premiumMode") or request.get("premiumMode") or "").strip().upper()
 
     # Values as produced by `_run_ul_projection`.
@@ -9177,14 +9179,14 @@ def build_ul_projection_explanation(
 
     # Invert the simple annual projection logic to recover the opening
     # policy value for this year. The core loop is:
-    #   base = opening_value + annual_premium
+    #   base = opening_value + annual_premium - premium_load
     #   guaranteed_interest = base * guaranteed_rate
     #   policy_value_end = base + guaranteed_interest - coi_charge - policy_fee_annual
     #
     # Let X = opening_value + annual_premium. Then:
     #   policy_value_end = X * (1 + guaranteed_rate) - coi - fee
     #   X = (policy_value_end + coi + fee) / (1 + guaranteed_rate)
-    #   opening_value = X - annual_premium
+    #   opening_value = X - annual_premium + premium_load
     #
     # This matches `_run_ul_projection` exactly even when the
     # guaranteed rate is zero.
@@ -9196,7 +9198,7 @@ def build_ul_projection_explanation(
     else:
         base = (end_policy_value + coi_charge + policy_fee_annual) / one_plus_rate
 
-    opening_policy_value = base - annual_premium
+    opening_policy_value = base - annual_premium + premium_load
     if opening_policy_value < 0.0:
         # Guard against tiny negative noise from floating point
         # inversion; the engine itself floors at zero.
@@ -9279,14 +9281,15 @@ def build_ul_projection_explanation(
             "id": "premium_added",
             "order": 2,
             "title": "Premium added",
-            "formulaText": "Level premium for the year, based on the annualised modal premium used in the projection.",
+            "formulaText": "Annualised modal premium less any filed premium expense charge applied for the policy year.",
             "inputs": [
                 _explained_value(label="Annual premium", value=annual_premium, unit="USD", source="Projection row"),
                 _explained_value(label="Premium mode", value=premium_mode, source="Projection row"),
+                _explained_value(label="Premium expense charge", value=premium_load, unit="USD", source="Projection row"),
             ],
             "result": _explained_value(
                 label="Premium added",
-                value=annual_premium,
+                value=annual_premium - premium_load,
                 unit="USD",
                 source="Projection row",
             ),
@@ -9385,7 +9388,7 @@ def build_ul_projection_explanation(
             "id": "closing_policy_value",
             "order": 6,
             "title": "Closing policy value",
-            "formulaText": "Closing policy value = Opening value + premium added − COI charges − policy/admin fees + interest credited.",
+            "formulaText": "Closing policy value = Opening value + premium less premium expense charge − COI charges − policy/admin fees + interest credited.",
             "inputs": [
                 _explained_value(label="Opening policy value", value=opening_policy_value, unit="USD", source="Projection row"),
                 _explained_value(label="Premium added", value=annual_premium, unit="USD", source="Projection row"),
@@ -10015,6 +10018,18 @@ def _run_ul_projection(
         )
         return candidates[0]
 
+    def _select_all(rows: List[Dict[str, Any]], year: int, attained_age: int) -> List[Dict[str, Any]]:
+        return [
+            row for row in rows
+            if (row.get("duration") in {None, year})
+            and (row.get("attained_age") in {None, attained_age})
+            and _matches(row, "sex", request.get("sex"))
+            and _matches(row, "risk_class", request.get("riskClass"))
+            and _matches(row, "tobacco_status", request.get("tobaccoStatus"))
+            and _matches(row, "issue_age", age_norm)
+            and _matches(row, "premium_mode", premium_mode_raw)
+        ]
+
     rows: List[Dict[str, Any]] = []
     years: List[int] = []
     policy_value: float = 0.0
@@ -10032,9 +10047,29 @@ def _run_ul_projection(
         premium_annual = annual_premium
         cumulative_premium += premium_annual
 
-        # Simple annual crediting: apply guaranteed rate on beginning
-        # policy value plus current-year premium.
-        base = policy_value + premium_annual
+        fee_rows = _select_all(list(executable.get("fees") or []), year, attained_age)
+        policy_fee = 0.0
+        premium_load = 0.0
+        for fee_row in fee_rows:
+            amount = float(fee_row["amount"])
+            fee_unit = fee_row["fee_unit"]
+            if fee_unit == "percent_premium":
+                premium_load += premium_annual * amount
+            elif fee_unit == "monthly_fixed":
+                policy_fee += amount * 12.0
+            elif fee_unit == "modal_fixed":
+                policy_fee += amount * freq
+            elif fee_unit == "per_1000_face_annual":
+                policy_fee += face_amount / 1000.0 * amount
+            else:
+                policy_fee += amount
+        if not fee_rows:
+            policy_fee = config.policy_fee_annual
+            fallback_years["fees"].append(year)
+
+        # Annualized approximation: premium loads are removed before
+        # guaranteed interest is credited; monthly timing is a later slice.
+        base = policy_value + premium_annual - premium_load
         guaranteed_interest = base * guaranteed_rate
 
         coi_row = _select(list(executable.get("coi") or []), year, attained_age)
@@ -10051,20 +10086,6 @@ def _run_ul_projection(
         else:
             coi_charge = face_amount * coi_rate
             fallback_years["coi"].append(year)
-
-        fee_row = _select(list(executable.get("fees") or []), year, attained_age)
-        if fee_row:
-            amount = float(fee_row["amount"])
-            fee_unit = fee_row["fee_unit"]
-            if fee_unit == "modal_fixed":
-                policy_fee = amount * freq
-            elif fee_unit == "per_1000_face_annual":
-                policy_fee = face_amount / 1000.0 * amount
-            else:
-                policy_fee = amount
-        else:
-            policy_fee = config.policy_fee_annual
-            fallback_years["fees"].append(year)
 
         # Update policy value at end of year.
         policy_value = base + guaranteed_interest - coi_charge - policy_fee
@@ -10132,7 +10153,7 @@ def _run_ul_projection(
                 "premium": premium_annual,
                 "cumulativePremium": cumulative_premium,
                 "openingPolicyValue": opening_policy_value,
-                "premiumLoad": 0.0,
+                "premiumLoad": premium_load,
                 "guaranteedInterest": guaranteed_interest,
                 "coiCharge": coi_charge,
                 "policyFee": policy_fee,
