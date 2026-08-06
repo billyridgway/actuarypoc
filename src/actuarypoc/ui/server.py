@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 136178)
-Total output lines: 13739
-
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
@@ -5004,7 +5001,3714 @@ def api_product_detail(product_code: str) -> Dict[str, Any]:
     if isinstance(decision_history, list):
         for row in decision_history:
             if not isinstance(row, dict):
-                con…36178 tokens truncated…  "riskClass": risk_class,
+                continue
+            dr = row.get("decisionRisk") or {}
+            decisions.append(
+                {
+                    "id": row.get("id"),
+                    "createdAt": row.get("created_at"),
+                    "decision": row.get("decision"),
+                    "reviewer": row.get("reviewer"),
+                    "riskStatus": dr.get("status"),
+                    "bundlePath": row.get("bundle_path"),
+                    "comments": row.get("comments"),
+                }
+            )
+
+    product_summary = {
+        "productCode": product_block.get("code"),
+        "productName": product_block.get("name"),
+        "filingId": review_meta.get("filingId"),
+        "status": "implemented",
+        "reviewEndpoint": review_endpoint,
+        "builderRegistered": builder_registered,
+    }
+
+    return {
+        "product": product_summary,
+        "latestVersion": latest_version,
+        "versions": versions,
+        "decisions": decisions,
+        "timeline": decision_timeline,
+    }
+
+
+@app.get("/api/product-definition/{product_code}")
+def api_get_product_definition(product_code: str, filing_id: str = Query(...)) -> Dict[str, Any]:
+    """Return the v1 ProductDefinition artefact for a product+filing, if any.
+
+    For P12TRF, this will seed a minimal artefact into MinIO when one does
+    not yet exist, so that the Trust Surface and future tools have a stable
+    object to reference.
+    """
+
+    pd = _load_or_seed_product_definition(product_code, filing_id)
+    if pd is None:
+        raise HTTPException(status_code=404, detail="No ProductDefinition available for this product/filing")
+    return {"productDefinition": pd.dict()}  # type: ignore[call-arg]
+
+
+@app.post("/api/product-definition/{product_code}/build")
+def api_build_product_definition(product_code: str) -> Dict[str, Any]:
+    """Rebuild a ProductDefinition artefact for the current filing context.
+
+    This endpoint is intentionally P12TRF-first and deterministic. It:
+
+    - looks up the current Product Review for the given product,
+    - derives the active filing_id,
+    - reads filing-scoped documents, evidence, and scenarios, and
+    - assembles an enriched ProductDefinitionV1 with lineage metadata.
+
+    The updated ProductDefinition and a build-report.json artefact are
+    written to MinIO. Re-running the build overwrites the same keys for
+    the product+filing, making this endpoint idempotent.
+    """
+
+    code = (product_code or "").strip().upper()
+    if not code:
+        raise HTTPException(status_code=400, detail="product_code is required")
+    if code != "P12TRF":
+        raise HTTPException(status_code=400, detail="ProductDefinition builder is only implemented for P12TRF in this MVP")
+
+    rec = get_product_review(code)
+    if rec is None:
+        raise HTTPException(status_code=400, detail="No Product Review draft found for this product")
+
+    meta = rec.get("metadata") or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    review_state = meta.get("review") or {}
+    if not isinstance(review_state, dict):
+        review_state = {}
+
+    filing_id = review_state.get("filing_id") if isinstance(review_state, dict) else None
+    if isinstance(filing_id, str):
+        filing_id = filing_id.strip() or None
+    if not filing_id:
+        raise HTTPException(status_code=400, detail="No filing_id configured on current Product Review")
+
+    # Source inputs for the builder.
+    docs = list_product_documents(code, filing_id=filing_id)
+    evidence_rows = list_filing_rule_evidence(code, filing_id=filing_id)
+    internal_scenarios = review_state.get("scenarios") if isinstance(review_state, dict) else None
+    if not isinstance(internal_scenarios, list):
+        internal_scenarios = []
+
+    base_def = get_product_definition(code) or _load_p12trf_definition()
+    issue_limits = base_def.get("issue_age_limits") or {}
+    underwriting = base_def.get("underwriting_classes") or []
+
+    # Dimensionality from scenarios (prefer saved scenarios, fall back to
+    # the bundled fixture).
+    term_periods: List[int] = []
+    risk_classes: List[str] = []
+    smoker_classes: List[str] = []
+    premium_modes: List[str] = []
+    face_amounts: List[float] = []
+
+    scenario_source_count = 0
+
+    def _harvest_from_policy(policy: Dict[str, Any]) -> None:
+        nonlocal scenario_source_count
+        scenario_source_count += 1
+        lp = policy.get("level_period")
+        try:
+            lp_int = int(lp) if lp is not None else None
+        except (TypeError, ValueError):
+            lp_int = None
+        if lp_int and lp_int > 0:
+            term_periods.append(lp_int)
+
+        rc = policy.get("risk_class")
+        if isinstance(rc, str) and rc.strip():
+            risk_classes.append(rc.strip())
+
+        sc = policy.get("smoker_class")
+        if isinstance(sc, str) and sc.strip():
+            smoker_classes.append(sc.strip())
+
+        pm = policy.get("premium_mode")
+        if isinstance(pm, str) and pm.strip():
+            premium_modes.append(pm.strip().upper())
+
+        fa = policy.get("face_amount")
+        try:
+            fa_val = float(fa) if fa is not None else None
+        except (TypeError, ValueError):
+            fa_val = None
+        if fa_val is not None and fa_val > 0:
+            face_amounts.append(fa_val)
+
+    # Prefer saved scenarios from the Product Review.
+    if internal_scenarios:
+        for s in internal_scenarios:
+            if not isinstance(s, dict):
+                continue
+            policy = s.get("policy") or {}
+            if not isinstance(policy, dict):
+                continue
+            _harvest_from_policy(policy)
+    else:
+        # Fall back to the P12TRF fixture.
+        for s in _default_p12trf_scenarios_for_ui():
+            policy = {
+                "issue_age": s.get("age"),
+                "gender": s.get("sex"),
+                "smoker_class": s.get("smokerClass"),
+                "risk_class": s.get("riskClass"),
+                "face_amount": s.get("faceAmount"),
+                "level_period": s.get("levelPeriod"),
+                "premium_mode": s.get("premiumMode"),
+                "modal_premium": s.get("modalPremium"),
+            }
+            _harvest_from_policy(policy)
+
+    # Normalise sets.
+    def _sorted_unique(values: List[Any]) -> List[Any]:
+        seen = set()
+        out: List[Any] = []
+        for v in values:
+            if v in seen:
+                continue
+            seen.add(v)
+            out.append(v)
+        try:
+            return sorted(out)
+        except Exception:
+            return out
+
+    term_periods = _sorted_unique(term_periods)
+    risk_classes = _sorted_unique(risk_classes)
+    smoker_classes = _sorted_unique(smoker_classes)
+    premium_modes = _sorted_unique(premium_modes)
+
+    face_min = min(face_amounts) if face_amounts else None
+    face_max = max(face_amounts) if face_amounts else None
+
+    pd = ProductDefinitionV1(
+        schema_version="product-definition-v1",
+        product_code=code,
+        filing_id=filing_id,
+        coverages=[
+            {
+                "id": "base_term",
+                "name": base_def.get("marketing_name") or f"{code} Term (base)",
+                "kind": "base",
+                "term_periods": term_periods or [20],
+                "notes": "Base term coverage for P12TRF; term periods inferred from scenarios.",
+            }
+        ],
+        issue_age_min=issue_limits.get("min"),
+        issue_age_max=issue_limits.get("max"),
+        term_periods=term_periods or [20],
+        underwriting_classes=list(underwriting),
+        risk_classes=risk_classes,
+        smoker_classes=smoker_classes,
+        premium_modes=premium_modes or ["ANNUAL"],
+        face_amount_min=face_min,
+        face_amount_max=face_max,
+        source_documents=[],
+        evidence_refs=[],
+        extra={
+            "unmodeled_coverages": base_def.get("riders") or [],
+        },
+    )
+
+    # Attach documents and evidence.
+    pd.source_documents = [
+        {
+            "document_path": str(d.get("object_path")),
+            "description": d.get("description"),
+            "filing_id": d.get("serff_id") or filing_id,
+        }
+        for d in docs
+        if d.get("object_path")
+    ]
+
+    refs: List[Dict[str, Any]] = []
+    for ev in evidence_rows:
+        rule_id = ev.get("rule_id")
+        if rule_id not in {"rule_death_benefit_term", "rule_level_premiums"}:
+            continue
+        feature_id = "base_term_coverage" if rule_id == "rule_death_benefit_term" else "level_premiums"
+        refs.append(
+            {
+                "feature_id": feature_id,
+                "rule_id": rule_id,
+                "document_path": ev.get("document_path"),
+                "page_reference": ev.get("page_reference"),
+            }
+        )
+    pd.evidence_refs = refs
+
+    # Lineage / build metadata.
+    generated_at = datetime.utcnow().isoformat() + "Z"
+    generator_version = "v1"
+
+    warnings: List[str] = []
+    if not docs:
+        warnings.append("no uploaded documents")
+    if not evidence_rows:
+        warnings.append("no filing rule evidence")
+    if not internal_scenarios:
+        warnings.append("no saved scenarios; used fixture scenarios instead")
+    if not pd.source_documents:
+        warnings.append("no source documents linked to ProductDefinition")
+    if not pd.evidence_refs:
+        warnings.append("no evidence refs linked to ProductDefinition")
+
+    pd.lineage = ProductDefinitionLineage(
+        generatedAt=generated_at,
+        generatorVersion=generator_version,
+        sources={
+            "documents": len(docs),
+            "evidence": len(evidence_rows),
+            "scenarios": scenario_source_count,
+        },
+        warnings=warnings,
+    )
+
+    # Persist ProductDefinition and build-report to MinIO (idempotent).
+    minio_client = get_minio_client()
+    ensure_bucket(minio_client)
+    bucket = get_bucket_name()
+
+    pd_key = _product_definition_object_key(code, filing_id)
+    report_key = _product_definition_build_report_key(code, filing_id)
+
+    import io
+    import json
+
+    pd_body = json.dumps(pd.dict()).encode("utf-8")  # type: ignore[call-arg]
+    report = {
+        "productCode": code,
+        "filingId": filing_id,
+        "generatedAt": generated_at,
+        "generatorVersion": generator_version,
+        "sources": {
+            "documents": len(docs),
+            "evidence": len(evidence_rows),
+            "scenarios": scenario_source_count,
+        },
+        "warnings": warnings,
+        "summary": pd.summary(),
+    }
+    report_body = json.dumps(report).encode("utf-8")
+
+    minio_client.put_object(bucket, pd_key, data=io.BytesIO(pd_body), length=len(pd_body), content_type="application/json")
+    minio_client.put_object(bucket, report_key, data=io.BytesIO(report_body), length=len(report_body), content_type="application/json")
+
+    return {
+        "productCode": code,
+        "filingId": filing_id,
+        "productDefinition": pd.dict(),
+        "buildReport": report,
+    }
+
+
+@app.get("/api/debug/p12trf/scenario-suggestions")
+def api_debug_p12trf_scenario_suggestions() -> Dict[str, Any]:
+    """Debug helper: show ProductDefinition-driven scenario suggestions.
+
+    This endpoint is **read-only** and does not modify Postgres or MinIO
+    state. It is intended to validate the ProductDefinition-driven
+    scenario generator in a live environment without disturbing the
+    existing P12TRF demo state.
+    """
+
+    product_code = "P12TRF"
+    rec = get_product_review(product_code)
+    meta = (rec or {}).get("metadata") or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    review_state = meta.get("review") or {}
+    if not isinstance(review_state, dict):
+        review_state = {}
+
+    filing_id = review_state.get("filing_id") if isinstance(review_state, dict) else None
+    if isinstance(filing_id, str):
+        filing_id = filing_id.strip() or None
+
+    if not filing_id:
+        raise HTTPException(status_code=400, detail="No filing_id on current Product Review for P12TRF")
+
+    pd_scenarios = _default_p12trf_scenarios_from_product_definition(product_code, filing_id)
+    fixture_scenarios = _default_p12trf_scenarios_for_ui()
+
+    return {
+        "productCode": product_code,
+        "filingId": filing_id,
+        "fromProductDefinition": pd_scenarios,
+        "fromFixture": fixture_scenarios,
+    }
+
+
+@app.get("/api/product-model-review/p12trf")
+def api_product_model_review_p12trf() -> Dict[str, Any]:
+    """Return a Product Model Review payload for P12TRF.
+
+    This endpoint is still POC-focused but now derives key sections from
+    real P12TRF assets:
+
+    - Product Scope & Gaps from the P12TRF ProductDefinition
+    - Scenario Evidence from actual P12TRF projection runs
+    - A small internal rate reconciliation from the current premium logic
+    """
+
+    defn = _load_p12trf_definition()
+    scope = _build_p12trf_scope(defn)
+
+    # Static traceability rows remain POC text at this stage.
+    traceability = {
+        "rules": [
+            {
+                "id": "rule_death_benefit_term",
+                "name": "Death benefit during term",
+                "filingId": "P12TRF-2020-01 (POC)",
+                "page": 22,
+                "section": "Death Benefit (POC)",
+                "snippet": "If the Insured dies while this policy is in force and before the end of the level term period, we will pay the Face Amount shown on the Policy Schedule.",
+                "interpretation": "Pay face amount if death occurs during the level term; no benefit after term expiry.",
+                "confidence": "high",
+                "reviewStatus": "not_reviewed",
+            },
+            {
+                "id": "rule_level_premiums",
+                "name": "Level premiums",
+                "filingId": "P12TRF-2020-01 (POC)",
+                "page": 12,
+                "section": "Annual Premium per $1,000 – Level Term (POC)",
+                "snippet": "Annual Premium per $1,000 – 20-Year Level Term.",
+                "interpretation": "Premium is level each year; equal to rate per $1,000 times face amount divided by 1,000.",
+                "confidence": "high",
+                "reviewStatus": "not_reviewed",
+            },
+        ]
+    }
+
+    scen_and_rates = _build_p12trf_scenarios_and_rates()
+
+    # Assumptions and gaps remain mostly static POC hints for now but are
+    # clearly labeled as such. A separate mechanics-informed discovery
+    # block is attached later when available from the Product Review
+    # metadata so that downstream AI agents can see non-executable
+    # assumption discovery output.
+    assumptions = {
+        "filed": [],
+        "aiProposed": [
+            {
+                "id": "mortality",
+                "name": "Mortality basis",
+                "value": "2015 VBT, ANB (POC placeholder)",
+                "source": "ai_default",
+                "sensitivitySummary": "PV impact is small for reasonable alternatives (POC).",
+                "humanApproval": "pending",
+            },
+            {
+                "id": "lapse",
+                "name": "Lapse pattern",
+                "value": "5% annually after year 3 (POC placeholder)",
+                "source": "ai_default",
+                "sensitivitySummary": "PV impact is moderate; should be reviewed for production.",
+                "humanApproval": "pending",
+            },
+        ],
+    }
+
+    mechanics_informed: Dict[str, Any] = {
+        "status": "not_started",
+        "assumptionSetId": None,
+        "mechanicAssumptions": [],
+    }
+
+    gaps = {
+        "missingFeatures": [
+            {
+                "id": "gap_riders_not_modeled",
+                "description": "Optional riders (e.g. waiver of premium, child term) from the ProductDefinition are not yet modeled in this POC.",
+                "severity": "medium",
+            }
+        ],
+        "ambiguousLanguage": [],
+    }
+
+    product_block = {
+        "code": defn.get("product_code", "P12TRF"),
+        "name": defn.get("marketing_name", "Term Life (POC)"),
+        "definitionId": defn.get("product_definition_id", "term-def-v1-poc"),
+    }
+
+    # Optional review metadata: tie the Trust Surface back to the latest
+    # Product Review generation when Postgres is configured.
+    review_meta: Dict[str, Any] = {
+        "filingId": None,
+        "currentGeneration": None,
+        "generatedAt": None,
+        "documentCount": 0,
+        "scenarioCount": len(scen_and_rates["scenarios"]),
+        "traceableRuleCount": 0,
+        "unattributedRuleCount": len(traceability["rules"]),
+    }
+    documents_payload: List[Dict[str, Any]] = []
+    product_definition_summary: Optional[Dict[str, Any]] = None
+    product_definition_full: Optional[ProductDefinitionV1] = None
+    product_definition_build: Optional[Dict[str, Any]] = None
+    product_definition_validation: Optional[Dict[str, Any]] = None
+    docs: List[Dict[str, Any]] = []
+    evidence_rows: List[Dict[str, Any]] = []
+    rules: List[Dict[str, Any]] = traceability.get("rules", []) or []
+    coverage_matrix: List[Dict[str, Any]] = []
+    try:
+        rec = get_product_review(product_block["code"])
+        meta = (rec or {}).get("metadata") or {}
+        filing_id: Optional[str] = None
+        review_state: Dict[str, Any] = {}
+        if isinstance(meta, dict):
+            rs = meta.get("review") or {}
+            if isinstance(rs, dict):
+                review_state = rs
+                filing_id = rs.get("filing_id")
+                review_meta["currentGeneration"] = rs.get("current_generation")
+                review_meta["generatedAt"] = rs.get("generated_at")
+
+                # Mechanics-informed assumption discovery snapshot (when
+                # present in the Product Review metadata). This captures
+                # non-DSL assumption discovery so the PMR and AI summary
+                # can avoid claiming that "no assumptions" exist when
+                # mechanics-informed assumptions have been extracted.
+                ad = review_state.get("assumption_discovery")
+                if isinstance(ad, dict):
+                    status = ad.get("status") or mechanics_informed["status"]
+                    mechanics_informed["status"] = status
+                    if ad.get("assumption_set_id") is not None:
+                        mechanics_informed["assumptionSetId"] = ad.get("assumption_set_id")
+                    mach = ad.get("mechanic_assumptions")
+                    if isinstance(mach, list):
+                        mechanics_informed["mechanicAssumptions"] = mach
+        review_meta["filingId"] = filing_id
+
+        # Attach scenario-level metadata (purpose, dimensions, source)
+        # from the Product Review draft to the Scenario Evidence block
+        # so that the Trust Surface can explain why each scenario exists.
+        internal_scenarios = None
+        if isinstance(meta, dict):
+            rs2 = meta.get("review") or {}
+            if isinstance(rs2, dict):
+                internal_scenarios = rs2.get("scenarios")
+        meta_by_id: Dict[str, Dict[str, Any]] = {}
+        if isinstance(internal_scenarios, list):
+            for s in internal_scenarios:
+                if not isinstance(s, dict):
+                    continue
+                sid = str(s.get("id") or "").strip()
+                if not sid:
+                    continue
+                meta_by_id[sid] = {
+                    "purpose": s.get("purpose"),
+                    "dimensionsExercised": s.get("dimensions_exercised"),
+                    "source": s.get("source"),
+                }
+
+        for scen in scen_and_rates["scenarios"]:
+            sid = scen.get("id")
+            if not isinstance(sid, str):
+                continue
+            extra = meta_by_id.get(sid)
+            if not extra:
+                continue
+            for key, value in extra.items():
+                if value is not None:
+                    scen[key] = value
+
+        # Load or seed a ProductDefinition artefact for this (product, filing)
+        # pair so that the Trust Surface can show a concise product
+        # dimensionality summary.
+        if filing_id:
+            try:
+                pd = _load_or_seed_product_definition(product_block["code"], filing_id)
+            except Exception:
+                pd = None
+            if pd is not None:
+                product_definition_full = pd
+                product_definition_summary = pd.summary()
+
+        docs = list_product_documents(product_block["code"], filing_id=filing_id)
+        review_meta["documentCount"] = len(docs)
+        for d in docs:
+            documents_payload.append(
+                {
+                    "id": d.get("id"),
+                    "kind": d.get("kind"),
+                    "description": d.get("description"),
+                    "objectPath": d.get("object_path"),
+                    "createdAt": d.get("created_at"),
+                    "filingId": d.get("serff_id") or filing_id,
+                }
+            )
+
+        # Load any filing rule evidence for this product/filing and attach
+        # it to the static traceability rules so the UI can render
+        # document-linked evidence without changing rule IDs.
+        evidence_rows = list_filing_rule_evidence(product_block["code"], filing_id=filing_id)
+        by_rule: Dict[str, List[Dict[str, Any]]] = {}
+        for ev in evidence_rows:
+            rid = ev.get("rule_id")
+            if not isinstance(rid, str) or not rid:
+                continue
+            by_rule.setdefault(rid, []).append(
+                {
+                    "id": ev.get("id"),
+                    "documentPath": ev.get("document_path"),
+                    "pageReference": ev.get("page_reference"),
+                    "sourceSnippet": ev.get("source_snippet"),
+                    "aiInterpretation": ev.get("ai_interpretation"),
+                    "confidence": ev.get("confidence"),
+                }
+            )
+
+        rules = traceability.get("rules", []) or []
+        traceable = 0
+        for rule in rules:
+            rid = rule.get("id")
+            ev_list = by_rule.get(rid, [])
+            if ev_list:
+                traceable += 1
+            rule["evidence"] = ev_list
+        review_meta["traceableRuleCount"] = traceable
+        review_meta["unattributedRuleCount"] = max(0, len(rules) - traceable)
+
+        # Build a simple coverage matrix from the ProductDefinition, model
+        # behaviour, and available document-linked evidence. This is
+        # intentionally P12TRF-specific and conservative: dimensions
+        # without direct filing evidence are marked "partial", not
+        # silently treated as fully covered.
+        if product_definition_full is not None:
+            pd = product_definition_full
+
+            def _row(feature: str, pd_value: str, model: str, evidence_text: str, status: str) -> Dict[str, Any]:
+                return {
+                    "feature": feature,
+                    "productDefinitionValue": pd_value,
+                    "modelSupport": model,
+                    "evidence": evidence_text,
+                    "status": status,
+                }
+
+            # Map evidence rows by rule_id for quick lookup.
+            ev_by_rule: Dict[str, List[Dict[str, Any]]] = {}
+            for ev in evidence_rows:
+                rid2 = ev.get("rule_id")
+                if not isinstance(rid2, str) or not rid2:
+                    continue
+                ev_by_rule.setdefault(rid2, []).append(ev)
+
+            def _evidence_for(rule_id: str) -> str:
+                items = ev_by_rule.get(rule_id) or []
+                parts: List[str] = []
+                for ev in items:
+                    doc_path = ev.get("document_path") or ""
+                    page = ev.get("page_reference") or ""
+                    frag = ev.get("source_snippet") or ""
+                    bits = [f"rule={rule_id}"]
+                    if page:
+                        bits.append(f"page={page}")
+                    if doc_path:
+                        bits.append(f"doc={doc_path}")
+                    if frag:
+                        bits.append("snippet=…")
+                    parts.append("; ".join(bits))
+                return " | ".join(parts) if parts else "(no direct filing evidence)"
+
+            # Base term coverage.
+            base_cov_names = [c.name for c in (pd.coverages or [])]
+            base_desc = ", ".join(base_cov_names) if base_cov_names else "(none)"
+            cov_ev = _evidence_for("rule_death_benefit_term")
+            coverage_matrix.append(
+                _row(
+                    "Base term coverage",
+                    base_desc,
+                    "Modeled via P12TRF term DSL and scenario projections.",
+                    cov_ev,
+                    "covered" if ev_by_rule.get("rule_death_benefit_term") else "partial",
+                )
+            )
+
+            # Level premiums.
+            lvl_ev = _evidence_for("rule_level_premiums")
+            coverage_matrix.append(
+                _row(
+                    "Level premiums",
+                    "Premiums defined as level-term table rates (POC).",
+                    "Modeled via premium lookup table and scenario projections.",
+                    lvl_ev,
+                    "covered" if ev_by_rule.get("rule_level_premiums") else "partial",
+                )
+            )
+
+            # Term periods.
+            term_vals = ", ".join(str(t) for t in (pd.term_periods or [])) or "(none)"
+            scen_terms = sorted({s.get("inputs", {}).get("termYears") for s in scen_and_rates["scenarios"]})
+            scen_terms_str = ", ".join(str(t) for t in scen_terms if t) or "(none)"
+            coverage_matrix.append(
+                _row(
+                    "Term periods",
+                    f"Allowed: {term_vals}",
+                    f"Scenario terms: {scen_terms_str}",
+                    "(no direct filing evidence; inferred from scenarios)",
+                    "partial",
+                )
+            )
+
+            # Issue ages.
+            age_min = pd.issue_age_min
+            age_max = pd.issue_age_max
+            scen_ages = sorted({s.get("inputs", {}).get("age") for s in scen_and_rates["scenarios"]})
+            scen_age_str = ", ".join(str(a) for a in scen_ages if a) or "(none)"
+            coverage_matrix.append(
+                _row(
+                    "Issue ages",
+                    f"Allowed: {age_min}–{age_max}",
+                    f"Scenario ages: {scen_age_str}",
+                    "(no direct filing evidence; inferred from scenarios)",
+                    "partial",
+                )
+            )
+
+            # Underwriting / risk classes.
+            uw = ", ".join(pd.underwriting_classes or []) or "(none)"
+            rc = ", ".join(pd.risk_classes or []) or "(none)"
+            coverage_matrix.append(
+                _row(
+                    "Underwriting / risk classes",
+                    f"Underwriting: {uw}; Risk: {rc}",
+                    "Scenario set exercises a subset of risk classes.",
+                    "(no direct filing evidence; inferred from scenarios)",
+                    "partial",
+                )
+            )
+
+            # Smoker classes.
+            sm = ", ".join(pd.smoker_classes or []) or "(none)"
+            coverage_matrix.append(
+                _row(
+                    "Smoker classes",
+                    f"ProductDefinition: {sm}",
+                    "Scenarios include both non-smoker and smoker cases.",
+                    "(no direct filing evidence; inferred from scenarios)",
+                    "partial",
+                )
+            )
+
+            # Premium modes.
+            modes = ", ".join(pd.premium_modes or []) or "(none)"
+            coverage_matrix.append(
+                _row(
+                    "Premium modes",
+                    f"ProductDefinition: {modes}",
+                    "Current scenarios exercise the primary premium mode only.",
+                    "(no direct filing evidence; inferred from scenarios)",
+                    "partial",
+                )
+            )
+
+            # Face amount range.
+            coverage_matrix.append(
+                _row(
+                    "Face amount range",
+                    f"Allowed: {pd.face_amount_min}–{pd.face_amount_max}",
+                    "Scenario set spans low/mid/high face amounts.",
+                    "(no direct filing evidence; inferred from scenarios)",
+                    "partial",
+                )
+            )
+
+            # Riders / unmodeled coverages.
+            unmodeled = []
+            extra = getattr(pd, "extra", {}) or {}
+            if isinstance(extra, dict):
+                unmodeled = list(extra.get("unmodeled_coverages") or [])
+            unmodeled_str = ", ".join(unmodeled) if unmodeled else "(none recorded)"
+            coverage_matrix.append(
+                _row(
+                    "Riders / unmodeled coverages",
+                    unmodeled_str,
+                    "Not currently modeled in the P12TRF POC.",
+                    "(no filing rule evidence wired yet)",
+                    "gap",
+                )
+            )
+
+            # Derive simple coverage status counts for the Review Summary.
+            covered = sum(1 for r in coverage_matrix if r.get("status") == "covered")
+            partial = sum(1 for r in coverage_matrix if r.get("status") == "partial")
+            gaps = sum(1 for r in coverage_matrix if r.get("status") == "gap")
+            not_app = sum(1 for r in coverage_matrix if r.get("status") == "not_applicable")
+            review_meta["coverageCoveredCount"] = covered
+            review_meta["coveragePartialCount"] = partial
+            review_meta["coverageGapCount"] = gaps
+            review_meta["coverageNotApplicableCount"] = not_app
+
+    except Exception:
+        # Best-effort only; Trust Surface must remain robust when Postgres
+        # is not configured.
+        pass
+
+    # When no explicit assumption_set_id was recorded in the discovery
+    # block, fall back to the current approved AssumptionSet for this
+    # product (when one exists) so the PMR snapshot still reflects which
+    # executable assumptions the engine would use.
+    try:
+        current_asn = get_current_assumption_for_product(product_block["code"])
+    except Exception:
+        current_asn = None
+    if current_asn is not None and not mechanics_informed.get("assumptionSetId"):
+        mechanics_informed["assumptionSetId"] = current_asn.id
+
+    # ProductDefinition validation (best-effort, not hidden behind the
+    # broader Postgres try/except). When a ProductDefinition exists we
+    # always return a non-null validation object, even if a runtime error
+    # occurs inside the helper.
+    if product_definition_full is not None:
+        try:
+            product_definition_validation = _validate_p12trf_product_definition(
+                product_definition_full,
+                scen_and_rates["scenarios"],
+                docs,
+                evidence_rows,
+                rules,
+                coverage_matrix,
+            )
+        except Exception as exc:  # pragma: no cover - defensive logging
+            # Log the exception so it is visible in pod logs while still
+            # returning a deterministic validation payload.
+            print(f"ProductDefinition validation runtime error: {exc!r}")
+            product_definition_validation = {
+                "status": "fail",
+                "checks": [
+                    {
+                        "id": "validation_runtime_error",
+                        "label": "ProductDefinition validation runtime error",
+                        "status": "fail",
+                        "message": str(exc),
+                    }
+                ],
+                "summary": {"pass": 0, "warning": 0, "fail": 1},
+            }
+
+        if product_definition_validation is None:
+            # Defensive: ensure we never surface a null validation object
+            # when a ProductDefinition exists, even if the helper returned
+            # an unexpected null.
+            product_definition_validation = {
+                "status": "fail",
+                "checks": [
+                    {
+                        "id": "validation_runtime_error",
+                        "label": "ProductDefinition validation returned null",
+                        "status": "fail",
+                        "message": "Validation helper returned no result.",
+                    }
+                ],
+                "summary": {"pass": 0, "warning": 0, "fail": 1},
+            }
+
+    # ProductDefinition build metadata (when lineage is present).
+    if product_definition_full is not None and getattr(product_definition_full, "lineage", None) is not None:  # type: ignore[truthy-function]
+        ln = product_definition_full.lineage  # type: ignore[assignment]
+        if ln is not None:
+            sources = ln.sources or {}
+            product_definition_build = {
+                "generatedAt": ln.generatedAt,
+                "generatorVersion": ln.generatorVersion,
+                "documentCount": len(product_definition_full.source_documents or []),
+                "evidenceCount": len(product_definition_full.evidence_refs or []),
+                "scenarioCount": int(sources.get("scenarios", 0)),
+                "warningCount": len(ln.warnings or []),
+                "warnings": list(ln.warnings or []),
+            }
+
+    # Derive a lightweight progress checklist so the UI can show how
+    # complete this review feels from a workflow perspective.
+    try:
+        last_decision = get_last_product_model_review_decision(product_block["code"])
+        decision_history = list_product_model_review_decisions(product_block["code"])
+    except Exception:
+        last_decision = None
+        decision_history = []
+
+    # Derived decision risk summary (clean / warning / fail / incomplete)
+    # based on immutable snapshot fields stored with each decision.
+    if isinstance(last_decision, dict):
+        last_decision["decisionRisk"] = _build_decision_risk(last_decision)
+    if isinstance(decision_history, list):
+        for row in decision_history:
+            if isinstance(row, dict):
+                row["decisionRisk"] = _build_decision_risk(row)
+
+    # Chronological decision timeline derived from decisionHistory.
+    decision_timeline = _build_decision_timeline(decision_history)
+
+    completed_steps = 0
+    total_steps = 6
+
+    filing_ok = bool(review_meta.get("filingId"))
+    docs_ok = (review_meta.get("documentCount") or 0) > 0
+    scenarios_ok = (review_meta.get("scenarioCount") or 0) > 0
+    generation_ok = bool(review_meta.get("currentGeneration"))
+    evidence_ok = (review_meta.get("traceableRuleCount") or 0) > 0
+    decision_ok = last_decision is not None
+
+    for flag in (filing_ok, docs_ok, scenarios_ok, generation_ok, evidence_ok, decision_ok):
+        if flag:
+            completed_steps += 1
+
+    review_progress = {
+        "filingContextEstablished": filing_ok,
+        "documentsUploaded": docs_ok,
+        "scenariosConfigured": scenarios_ok,
+        "reviewGenerated": generation_ok,
+        "ruleEvidencePresent": evidence_ok,
+        "finalDecisionRecorded": decision_ok,
+        "completedSteps": completed_steps,
+        "totalSteps": total_steps,
+    }
+
+    # Derive a lightweight freshness view so the UI can highlight when
+    # the current Trust Surface may be stale or when the latest decision
+    # was made against an older evidence set.
+    review_freshness = _build_review_freshness(
+        review_meta=review_meta,
+        documents=docs,
+        product_definition_build=product_definition_build,
+        last_decision=last_decision,
+    )
+
+    # Deterministic scenario validation so the Trust Surface can expose a
+    # simple model-behaviour health signal alongside freshness and
+    # ProductDefinition validation.
+    scenario_validation = _build_p12trf_scenario_validation(scen_and_rates["scenarios"])
+
+    # Advisory Product Mechanics Graph v0.1: load any curated mechanics
+    # set available for this product that links filings ↔ mechanics ↔ DSL.
+    # This is intentionally minimal and file-backed and should not break
+    # core PMR flows when unavailable. P12TRF is the first product with a
+    # populated mechanics fixture.
+    try:
+        mechanics = load_mechanics_for_product(product_block["code"])
+        mechanics_payload = mechanics_to_json(mechanics)
+        mechanics_checks = validate_mechanics_against_dsl(product_block["code"])
+        # Mechanics-Generated DSL v0.1: preview tiny DSL fragments that
+        # could be driven from mechanics expectations. For v0.1 we limit
+        # this to meta.policy_fee.
+        mechanics_generated = generate_dsl_fragments_from_mechanics(
+            product_block["code"],
+            dsl_paths=["meta.policy_fee"],
+        )
+        # Mechanics-Generated DSL Patch Preview v0.1: show what a
+        # mechanics-derived patch would look like without applying it.
+        mechanics_patches = build_dsl_patch_preview_from_mechanics(
+            product_block["code"],
+            dsl_paths=["meta.policy_fee"],
+        )
+        # Attach latest approval metadata per dslPath when available so
+        # the UI can show whether a proposed patch has been reviewed.
+        approvals = list_mechanic_patch_approvals(product_block["code"]) or []
+        approvals_by_path: Dict[str, Dict[str, Any]] = {}
+        for row in approvals:
+            path = str(row.get("dsl_path") or "")
+            if path and path not in approvals_by_path:
+                approvals_by_path[path] = row
+        for patch in mechanics_patches:
+            path = str(patch.get("dslPath") or "")
+            info = approvals_by_path.get(path)
+            if not info:
+                continue
+            patch["approvalStatus"] = info.get("patch_status")
+            patch["approvalReviewer"] = info.get("reviewer")
+            patch["approvalReviewedAt"] = info.get("reviewed_at")
+            patch["approvalComments"] = info.get("comments")
+    except Exception:
+        mechanics_payload = []
+        mechanics_checks = []
+        mechanics_generated = []
+        mechanics_patches = []
+
+    return {
+        "product": product_block,
+        "scope": scope,
+        "traceability": traceability,
+        "rates": scen_and_rates["rates"],
+        "scenarios": scen_and_rates["scenarios"],
+        "assumptions": {**assumptions, "mechanicsInformed": mechanics_informed},
+        "gaps": gaps,
+        "reviewMeta": review_meta,
+        "reviewFreshness": review_freshness,
+        "scenarioValidation": scenario_validation,
+        "documents": documents_payload,
+        "lastDecision": last_decision,
+        "decisionHistory": decision_history,
+        "decisionTimeline": decision_timeline,
+        "reviewProgress": review_progress,
+        "productMechanics": mechanics_payload,
+        "mechanicsValidation": {
+            "productCode": product_block["code"],
+            "checks": mechanics_checks,
+        },
+        "mechanicsGeneratedDsl": {
+            "productCode": product_block["code"],
+            "fragments": mechanics_generated,
+        },
+        "mechanicsDslPatchPreview": {
+            "productCode": product_block["code"],
+            "patches": mechanics_patches,
+        },
+        "productDefinition": product_definition_summary,
+        "productDefinitionBuild": product_definition_build,
+        "productDefinitionValidation": product_definition_validation,
+        "coverageMatrix": coverage_matrix,
+    }
+
+
+ProductModelReviewBuilder = Callable[[], Dict[str, Any]]
+ProductRequirementsProvider = Callable[[str], Dict[str, Any]]
+ProductDefinitionEvidenceProvider = Callable[[str], Dict[str, Any]]
+ProductProjectionEvidenceProvider = Callable[[str], Dict[str, Any]]
+ProductIllustrationEvidenceProvider = Callable[[str], Dict[str, Any]]
+ProductIllustrationProvider = Callable[[str, Dict[str, Any]], Dict[str, Any]]
+
+
+_PRODUCT_MODEL_REVIEW_BUILDERS: Dict[str, ProductModelReviewBuilder] = {
+    "P12TRF": api_product_model_review_p12trf,
+}
+
+_PRODUCT_REQUIREMENTS_PROVIDERS: Dict[str, ProductRequirementsProvider] = {}
+_PRODUCT_DEFINITION_EVIDENCE_PROVIDERS: Dict[str, ProductDefinitionEvidenceProvider] = {}
+_PRODUCT_PROJECTION_EVIDENCE_PROVIDERS: Dict[str, ProductProjectionEvidenceProvider] = {}
+_PRODUCT_ILLUSTRATION_EVIDENCE_PROVIDERS: Dict[str, ProductIllustrationEvidenceProvider] = {}
+_ILLUSTRATION_PROVIDERS: Dict[str, ProductIllustrationProvider] = {}
+
+
+def _get_product_model_review_builder(product_code: str) -> Optional[ProductModelReviewBuilder]:
+    """Resolve a Product Model Review builder for the given product code.
+
+    This is intentionally minimal for now: only P12TRF is wired up, but the
+    registry shape allows additional products to plug in cleanly once they
+    have a PMR implementation.
+    """
+
+    code_norm = (product_code or "").strip().upper()
+    return _PRODUCT_MODEL_REVIEW_BUILDERS.get(code_norm)
+
+
+def _get_product_requirements_provider(product_code: str) -> Optional[ProductRequirementsProvider]:
+    """Resolve a Filing Requirements provider for the given product code."""
+
+    code_norm = (product_code or "").strip().upper()
+    return _PRODUCT_REQUIREMENTS_PROVIDERS.get(code_norm)
+
+
+def _get_product_definition_evidence_provider(product_code: str) -> Optional[ProductDefinitionEvidenceProvider]:
+    """Resolve a ProductDefinition evidence provider for the given product code."""
+
+    code_norm = (product_code or "").strip().upper()
+    return _PRODUCT_DEFINITION_EVIDENCE_PROVIDERS.get(code_norm)
+
+
+def _get_product_projection_evidence_provider(product_code: str) -> Optional[ProductProjectionEvidenceProvider]:
+    """Resolve a projection logic evidence provider for the given product code."""
+
+    code_norm = (product_code or "").strip().upper()
+    return _PRODUCT_PROJECTION_EVIDENCE_PROVIDERS.get(code_norm)
+
+
+def _get_product_illustration_evidence_provider(product_code: str) -> Optional[ProductIllustrationEvidenceProvider]:
+    """Resolve an illustration comparison evidence provider for the given product code."""
+
+    code_norm = (product_code or "").strip().upper()
+    return _PRODUCT_ILLUSTRATION_EVIDENCE_PROVIDERS.get(code_norm)
+
+
+def _get_illustration_provider(product_code: str) -> Optional[ProductIllustrationProvider]:
+    """Resolve an on-demand illustration provider for the given product code."""
+
+    code_norm = (product_code or "").strip().upper()
+    return _ILLUSTRATION_PROVIDERS.get(code_norm)
+
+
+def _get_product_type(product_code: str) -> str:
+    """Best-effort lookup of a product's type from Product Review metadata.
+
+    Product Review metadata remains the preferred source. The canonical
+    Promise UL code also has a deterministic fallback so workspace analysis
+    does not depend on the optional legacy Postgres review store.
+    """
+
+    code_norm = (product_code or "").strip().upper()
+    if not code_norm:
+        return ""
+
+    try:
+        rec = get_product_review(code_norm)
+    except Exception:
+        rec = None
+
+    if isinstance(rec, dict):
+        meta = rec.get("metadata") or {}
+        if isinstance(meta, dict):
+            product_type = meta.get("type") or meta.get("productType") or ""
+            if product_type:
+                return str(product_type)
+
+    if _normalise_promise_ul_code(code_norm) == "ICC18 P18PR UL":
+        return "UL"
+
+    return ""
+
+
+def _is_ul_product_type(product_type: str) -> bool:
+    """Normalise a product type string and test whether it is UL-compatible.
+
+    This is intentionally conservative: we recognise a small set of
+    known UL-style labels and treat everything else as non-UL until the
+    product registry or mechanics explicitly say otherwise.
+    """
+
+    raw = (product_type or "").strip()
+    if not raw:
+        return False
+
+    # Collapse whitespace/underscores/hyphens into single spaces and
+    # normalise to upper case so that minor formatting differences do
+    # not affect routing.
+    norm = re.sub(r"[\s_-]+", " ", raw).strip().upper()
+
+    ul_labels = {
+        "UL",
+        "UNIVERSAL LIFE",
+        "FLEXIBLE PREMIUM ADJUSTABLE LIFE",
+        "FLEXIBLE PREMIUM ADJUSTABLE",
+        "FLEXIBLE PREMIUM ADJUSTABLE LIFE INSURANCE",
+    }
+
+    return norm in ul_labels
+
+
+def _is_term_product_type(product_type: str) -> bool:
+    """Normalise a product type string and test whether it is term-compatible.
+
+    This recognises a conservative set of labels for level term life
+    products; everything else is treated as non-term for illustration
+    routing purposes.
+    """
+
+    raw = (product_type or "").strip()
+    if not raw:
+        return False
+
+    norm = re.sub(r"[\s_-]+", " ", raw).strip().upper()
+
+    term_labels = {
+        "TERM",
+        "TERM LIFE",
+        "LEVEL TERM",
+        "LEVEL TERM LIFE",
+        "LIFE TERM",
+    }
+
+    return norm in term_labels
+
+
+def _build_projection_inputs_and_table_from_summary(data: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """Derive scenario-like inputs and a compact projection table from a
+    projection summary JSON object.
+
+    This is intentionally product-agnostic and only assumes a
+    term-style projection with ``years``, ``death_benefits``, optional
+    ``cash_values``, and either ``expected_premiums`` or ``premiums``.
+    """
+
+    inputs = data.get("inputs") or {}
+    policy_inputs = inputs.get("policy_inputs") or {}
+    if not isinstance(policy_inputs, dict):
+        policy_inputs = {}
+
+    issue_age = policy_inputs.get("issue_age")
+    gender = policy_inputs.get("gender")
+    smoker_class = policy_inputs.get("smoker_class")
+    risk_class = policy_inputs.get("risk_class")
+    level_period = policy_inputs.get("level_period")
+    face_amount = policy_inputs.get("face_amount")
+    premium_mode_raw = policy_inputs.get("premium_mode") or ""
+    premium_mode = str(premium_mode_raw or "").strip().upper() or "UNKNOWN"
+
+    scenario_inputs = {
+        "age": issue_age if isinstance(issue_age, (int, float)) else "unknown",
+        "sex": str(gender).strip() or "unknown",
+        "smokerClass": str(smoker_class).strip() or "unknown",
+        "termYears": level_period or 0,
+        "faceAmount": face_amount or 0.0,
+        "premiumMode": premium_mode,
+    }
+
+    full_proj = data.get("projection") or {}
+    proj_years = full_proj.get("years") or []
+    proj_db = full_proj.get("death_benefits") or []
+    proj_cash = full_proj.get("cash_values") or []
+    proj_prem = full_proj.get("expected_premiums") or full_proj.get("premiums") or []
+
+    projection_table: List[Dict[str, Any]] = []
+    for idx, y in enumerate(proj_years):
+        if y is None:
+            continue
+        try:
+            year_int = int(y)
+        except (TypeError, ValueError):
+            year_int = y  # keep as-is if it cannot be coerced
+
+        attained_age: Optional[int] = None
+        if isinstance(issue_age, (int, float)) and isinstance(year_int, int):
+            try:
+                attained_age = int(issue_age) + max(0, year_int - 1)
+            except Exception:
+                attained_age = None
+
+        premium = proj_prem[idx] if idx < len(proj_prem) else None
+        dbv = proj_db[idx] if idx < len(proj_db) else None
+
+        status_label: Optional[str] = None
+        if isinstance(level_period, int) and level_period > 0 and isinstance(year_int, int):
+            status_label = "in_force_term" if year_int <= level_period else "post_term"
+
+        row: Dict[str, Any] = {
+            "year": year_int,
+            "attainedAge": attained_age,
+            "premium": premium,
+            "deathBenefit": dbv,
+            "status": status_label,
+        }
+
+        if idx < len(proj_cash):
+            row["cashValue"] = proj_cash[idx]
+
+        projection_table.append(row)
+
+    return scenario_inputs, projection_table
+
+
+def api_product_model_review_generic(product_code: str) -> Dict[str, Any]:
+    """Generic Product Model Review builder for ad-hoc products.
+
+    This uses the same Product Review draft state as the P12TRF builder but
+    avoids product-specific assumptions beyond the core term-style
+    dimensionality (age, term, classes, face amount, premium mode). Where
+    richer artefacts (ProductDefinition, coverage matrix, evidence) are not
+    available, it returns empty shells instead of failing.
+    """
+
+    code = (product_code or "").strip().upper()
+
+    rec = get_product_review(code)
+    meta = (rec or {}).get("metadata") or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    review_state = meta.get("review") or {}
+    if not isinstance(review_state, dict):
+        review_state = {}
+
+    filing_id = review_state.get("filing_id") if isinstance(review_state, dict) else None
+    if isinstance(filing_id, str):
+        filing_id = filing_id.strip() or None
+
+    current_generation = review_state.get("current_generation") if isinstance(review_state, dict) else None
+    generated_at = review_state.get("generated_at") if isinstance(review_state, dict) else None
+    internal_scenarios = review_state.get("scenarios") if isinstance(review_state, dict) else None
+
+    # Build a minimal scenario evidence block from the stored scenarios and
+    # any generation-scoped projections we can find.
+    scenarios: List[Dict[str, Any]] = []
+    code_lower = code.lower()
+    if isinstance(internal_scenarios, list):
+        for s in internal_scenarios:
+            if not isinstance(s, dict):
+                continue
+            sid = str(s.get("id") or "").strip()
+            if not sid:
+                continue
+            name = str(s.get("name") or sid)
+            policy = s.get("policy") or {}
+
+            inputs = {
+                "age": policy.get("issue_age", "unknown"),
+                "sex": policy.get("gender", "unknown"),
+                "smokerClass": policy.get("smoker_class", "unknown"),
+                "termYears": policy.get("level_period") or 0,
+                "faceAmount": policy.get("face_amount") or 0,
+                "premiumMode": (policy.get("premium_mode") or "UNKNOWN").upper(),
+            }
+
+            projection_key = None
+            if current_generation:
+                projection_key = f"projections/{code_lower}/reviews/{current_generation}/scenarios/{sid}.json"
+
+            scen_entry: Dict[str, Any] = {
+                "id": sid,
+                "name": name,
+                "purpose": s.get("purpose"),
+                "dimensionsExercised": s.get("dimensions_exercised"),
+                "source": s.get("source"),
+                "inputs": inputs,
+                "expectedBehavior": [],
+                "modelBehaviorSummary": "",
+                "status": "unknown",
+                "ruleIds": [],
+                "runId": None,
+                "projectionKey": projection_key,
+                "checks": {},
+                "projection": {},
+                "projectionTable": [],
+            }
+
+            scenarios.append(scen_entry)
+
+    # Best-effort ProductDefinition load; when unavailable we surface a
+    # null definition and empty coverage matrix.
+    product_definition_summary: Optional[Dict[str, Any]] = None
+    product_definition_full: Optional[ProductDefinitionV1] = None
+    coverage_matrix: List[Dict[str, Any]] = []
+    if filing_id:
+        try:
+            pd = _load_or_seed_product_definition(code, filing_id)
+        except Exception:
+            pd = None
+        if pd is not None:
+            product_definition_full = pd
+            product_definition_summary = pd.summary()
+
+    # Documents associated with this product / filing.
+    documents_payload: List[Dict[str, Any]] = []
+    docs: List[Dict[str, Any]] = []
+    try:
+        docs = list_product_documents(code, filing_id=filing_id)
+        for d in docs:
+            documents_payload.append(
+                {
+                    "id": d.get("id"),
+                    "kind": d.get("kind"),
+                    "description": d.get("description"),
+                    "objectPath": d.get("object_path"),
+                    "createdAt": d.get("created_at"),
+                    "filingId": d.get("serff_id") or filing_id,
+                }
+            )
+    except Exception:
+        docs = []
+
+    review_meta: Dict[str, Any] = {
+        "filingId": filing_id,
+        "currentGeneration": current_generation,
+        "generatedAt": generated_at,
+        "documentCount": len(docs),
+        "scenarioCount": len(scenarios),
+        "traceableRuleCount": 0,
+        "unattributedRuleCount": 0,
+    }
+
+    product_block = {
+        "code": code,
+        "name": (meta.get("name") or code) if isinstance(meta, dict) else code,
+        "definitionId": None,
+    }
+
+    # Minimal, generic shells for sections that the UI expects.
+    traceability = {"rules": []}
+    rates = {"cellsChecked": 0, "cellsMatched": 0, "exceptions": [], "spotChecks": []}
+
+    # Assumptions block for generic PMR builders. In addition to the
+    # historical filed/aiProposed shells, we surface a
+    # mechanics-informed discovery snapshot (when present in the Product
+    # Review metadata) so downstream AI agents can see that
+    # assumptions have been discovered even when they are not yet
+    # implemented as executable DSL.
+    assumptions: Dict[str, Any] = {"filed": [], "aiProposed": []}
+
+    mechanics_informed: Dict[str, Any] = {
+        "status": "not_started",
+        "assumptionSetId": None,
+        "mechanicAssumptions": [],
+    }
+
+    try:
+        ad = review_state.get("assumption_discovery") if isinstance(review_state, dict) else None
+    except Exception:
+        ad = None
+    if isinstance(ad, dict):
+        status = ad.get("status") or mechanics_informed["status"]
+        mechanics_informed["status"] = status
+        if ad.get("assumption_set_id") is not None:
+            mechanics_informed["assumptionSetId"] = ad.get("assumption_set_id")
+        mach = ad.get("mechanic_assumptions")
+        if isinstance(mach, list):
+            mechanics_informed["mechanicAssumptions"] = mach
+
+    # Fallback: if we have a current approved AssumptionSet for this
+    # product but no explicit assumption_set_id in the discovery block,
+    # surface that id so the PMR snapshot still knows which executable
+    # assumptions the engine would use.
+    try:
+        current_asn = get_current_assumption_for_product(code)
+    except Exception:
+        current_asn = None
+    if current_asn is not None and not mechanics_informed.get("assumptionSetId"):
+        mechanics_informed["assumptionSetId"] = current_asn.id
+
+    assumptions["mechanicsInformed"] = mechanics_informed
+    gaps = {"missingFeatures": [], "ambiguousLanguage": []}
+    review_freshness = {
+        "status": "unknown",
+        "messages": [],
+        "latestDocumentUploadedAt": None,
+        "currentGeneration": current_generation,
+        "generatedAt": generated_at,
+        "productDefinitionGeneratedAt": None,
+        "latestDecisionCreatedAt": None,
+    }
+
+    # Advisory Product Mechanics Graph v0.1 for generic products: when a
+    # mechanics registry exists for this product we surface it alongside
+    # the PMR so AI layers and UIs can see how filings and DSL connect,
+    # even when no product-specific PMR builder is implemented.
+    try:
+        mechanics = load_mechanics_for_product(code)
+        mechanics_payload = mechanics_to_json(mechanics)
+        mechanics_checks = validate_mechanics_against_dsl(code)
+        mechanics_generated = generate_dsl_fragments_from_mechanics(
+            code,
+            dsl_paths=["meta.policy_fee"],
+        )
+        mechanics_patches = build_dsl_patch_preview_from_mechanics(
+            code,
+            dsl_paths=["meta.policy_fee"],
+        )
+        approvals = list_mechanic_patch_approvals(code) or []
+        approvals_by_path: Dict[str, Dict[str, Any]] = {}
+        for row in approvals:
+            path = str(row.get("dsl_path") or "")
+            if path and path not in approvals_by_path:
+                approvals_by_path[path] = row
+        for patch in mechanics_patches:
+            path = str(patch.get("dslPath") or "")
+            info = approvals_by_path.get(path)
+            if not info:
+                continue
+            patch["approvalStatus"] = info.get("patch_status")
+            patch["approvalReviewer"] = info.get("reviewer")
+            patch["approvalReviewedAt"] = info.get("reviewed_at")
+            patch["approvalComments"] = info.get("comments")
+    except Exception:
+        mechanics_payload = []
+        mechanics_checks = []
+        mechanics_generated = []
+        mechanics_patches = []
+
+    return {
+        "product": product_block,
+        "scope": {
+            "filings": ([{"id": filing_id, "name": filing_id}] if filing_id else []),
+            "featuresModeled": [],
+            "featuresNotModeled": [],
+            "confidence": "medium",
+            "pocLabel": "generic-term-poc",
+        },
+        "traceability": traceability,
+        "rates": rates,
+        "scenarios": scenarios,
+        "assumptions": assumptions,
+        "gaps": gaps,
+        "reviewMeta": review_meta,
+        "reviewFreshness": review_freshness,
+        "productDefinition": product_definition_summary,
+        "coverageMatrix": coverage_matrix,
+        "productDefinitionBuild": None,
+        "productDefinitionValidation": None,
+        "scenarioValidation": None,
+        "decisionTimeline": None,
+        "productMechanics": mechanics_payload,
+        "mechanicsValidation": {
+            "productCode": product_block["code"],
+            "checks": mechanics_checks,
+        },
+        "mechanicsGeneratedDsl": {
+            "productCode": product_block["code"],
+            "fragments": mechanics_generated,
+        },
+        "mechanicsDslPatchPreview": {
+            "productCode": product_block["code"],
+            "patches": mechanics_patches,
+        },
+    }
+
+
+@app.get("/api/product-model-review/{product_code}")
+def api_product_model_review_product(product_code: str) -> Dict[str, Any]:
+    """Product-aware Product Model Review entrypoint.
+
+    Uses the static product registry to distinguish between implemented
+    products, known-but-unimplemented products, and unknown codes, and
+    then resolves a PMR builder from the builder registry.
+    """
+
+    cfg = _get_product_config(product_code)
+    code_norm = (cfg.get("productCode") if cfg else product_code or "").strip().upper()
+
+    # Prefer a product-specific builder when one is registered (currently
+    # P12TRF), but fall back to a generic builder so any product with a
+    # Product Review can still surface a model review snapshot.
+    builder = _get_product_model_review_builder(code_norm)
+    if builder is not None:
+        return builder()
+
+    return api_product_model_review_generic(code_norm)
+
+
+def build_product_workspace_snapshot(product_code: str) -> Dict[str, Any]:
+    """Build a read-only Product Workspace snapshot for a product.
+
+    Slice 3 keeps this Promise‑UL‑first but the helper is intentionally
+    product‑parameterised so future products can plug in without changing
+    the API surface. Today we support ICC18 P18PR UL only and return a
+    501 for all other products.
+    """
+
+    code_input = (product_code or "").strip()
+    if not code_input:
+        raise HTTPException(status_code=400, detail="product_code is required")
+
+    canonical_code = _normalise_promise_ul_code(code_input)
+
+    # Extension point: as additional products gain mechanics,
+    # assumptions, and illustration support, the workspace snapshot can
+    # route based on product type instead of hard-coding product
+    # codes. For now we implement the workspace surface only for
+    # UL-style products and use the shared UL providers below.
+
+    product_type_hint = _get_product_type(canonical_code)
+    if not _is_ul_product_type(product_type_hint):
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                "Product Understanding Workspace surface is currently "
+                "implemented only for UL-style products in this MVP."
+            ),
+        )
+
+    # --- Product Review metadata -------------------------------------------------
+    if _WORKSPACE_MINIO_ONLY.get():
+        rec = None
+    else:
+        try:
+            rec = get_product_review(canonical_code)
+        except Exception:
+            rec = None
+
+    meta = (rec or {}).get("metadata") or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    review_state = meta.get("review") or {}
+    if not isinstance(review_state, dict):
+        review_state = {}
+
+    product_name = meta.get("name") or meta.get("product_name") or "Promise UL"
+    product_code_effective = meta.get("product_code") or canonical_code
+    carrier = meta.get("carrier") or meta.get("carrier_name")
+    product_type = meta.get("type") or meta.get("productType") or "UL"
+
+    filing_id = review_state.get("filing_id") if isinstance(review_state, dict) else None
+    if isinstance(filing_id, str):
+        filing_id = filing_id.strip() or None
+
+    # --- UL runtime configuration & assumption provenance -----------------------
+    cfg_runtime = load_ul_runtime_config(canonical_code)
+
+    assumptions_payload = list(cfg_runtime.assumption_provenance or [])
+
+    # --- Mechanics registry (for transparency) ----------------------------------
+    mechanics_summary: Dict[str, Any] = {}
+    mechanics_payload: List[Dict[str, Any]] = []
+    try:
+        mechanics = load_mechanics_for_product(canonical_code)
+        mechanics_payload = mechanics_to_json(mechanics)
+    except Exception:
+        mechanics_payload = []
+
+    # Derive a lightweight mechanics summary from the UL runtime config. This is
+    # intentionally high‑level and does not affect projection behaviour.
+    death_benefit_option = None
+    if cfg_runtime.death_benefit is not None:
+        death_benefit_option = cfg_runtime.death_benefit.option_type
+
+    mechanics_summary = {
+        "deathBenefitOption": death_benefit_option or "level",
+        "coiApproach": f"flat {cfg_runtime.coi_rate_flat:.2%} of face amount (placeholder)",
+        "interestCrediting": f"guaranteed credited rate {cfg_runtime.guaranteed_rate:.2%}",
+        "surrenderMechanics": (
+            f"{cfg_runtime.max_surrender_pct:.2%} of face in early durations, "
+            f"declining over {cfg_runtime.surrender_period_years} years"
+        ),
+        "mechanicsCount": len(mechanics_payload),
+    }
+
+    # --- Documents associated with this product / filing ------------------------
+    documents_payload: List[Dict[str, Any]] = []
+    if _WORKSPACE_MINIO_ONLY.get():
+        docs = []
+    else:
+        try:
+            docs = list_product_documents(canonical_code, filing_id=filing_id)
+        except Exception:
+            docs = []
+
+    for d in docs:
+        documents_payload.append(
+            {
+                "id": d.get("id"),
+                "kind": d.get("kind"),
+                "description": d.get("description"),
+                "objectPath": d.get("object_path"),
+                "createdAt": d.get("created_at"),
+                "filingId": d.get("serff_id") or filing_id,
+            }
+        )
+
+    # --- Illustration snapshot (UL draft projection) -------------------------
+    (
+        projection_snapshot,
+        mechanics_explanation,
+        gap_warnings,
+        gap_notes,
+        gap_items,
+    ) = _build_ul_projection_view(canonical_code)
+
+    # --- Evidence layer: mechanics and assumptions traceability ---------------
+    evidence_items: List[Dict[str, Any]] = []
+
+    # Helper: gap ids and impact mapping for Promise‑UL v1.
+    gap_ids = {str(g.get("id")) for g in gap_items if isinstance(g, dict)}
+
+    def _impact_for_id(eid: str) -> str:
+        if eid in {"guaranteed_credited_rate"}:
+            return "high"
+        if eid in {"coi_rates", "surrender_schedule", "policy_admin_fee"}:
+            return "high" if eid == "coi_rates" else "medium"
+        if eid in {"death_benefit_option", "cash_surrender_value"}:
+            return "medium"
+        return "low"
+
+    def _confidence_from_sources(sources: List[Dict[str, Any]]) -> float:
+        vals: List[float] = []
+        for s in sources:
+            try:
+                vals.append(float(s.get("confidence") or 0.0))
+            except Exception:
+                continue
+        if not vals:
+            return 0.0
+        return max(min(v, 1.0) for v in vals)
+
+    def _sources_from_mechanic(m: Optional[Dict[str, Any]], origin: str) -> List[Dict[str, Any]]:
+        if not isinstance(m, dict):
+            return []
+        out: List[Dict[str, Any]] = []
+        for fs in m.get("filing_sources") or []:
+            if not isinstance(fs, dict):
+                continue
+            out.append(
+                {
+                    "document": fs.get("document_hint") or fs.get("document_path") or fs.get("document") or None,
+                    "page": fs.get("page") or fs.get("page_reference") or None,
+                    "snippet": fs.get("snippet") or fs.get("sourceSnippet") or None,
+                    "confidence": fs.get("confidence") or 0.0,
+                    "origin": origin,
+                }
+            )
+        return out
+
+    # Index mechanics by id/name for Promise UL.
+    mechanics_by_id: Dict[str, Dict[str, Any]] = {}
+    mechanics_by_name: Dict[str, Dict[str, Any]] = {}
+    for m in mechanics_payload:
+        if not isinstance(m, dict):
+            continue
+        mid = str(m.get("id") or "").strip()
+        name = str(m.get("name") or "").strip()
+        if mid:
+            mechanics_by_id[mid] = m
+        if name:
+            mechanics_by_name[name.lower()] = m
+
+    def _find_mechanic_by_name(substr: str) -> Optional[Dict[str, Any]]:
+        key = (substr or "").lower()
+        for name, m in mechanics_by_name.items():
+            if key in name:
+                return m
+        return None
+
+    # Evidence: Guaranteed credited rate.
+    prov_guaranteed = None
+    for ap in assumptions_payload:
+        if not isinstance(ap, dict):
+            continue
+        name = str(ap.get("name") or "").lower()
+        if "guaranteed" in name and "rate" in name:
+            prov_guaranteed = ap
+            break
+    if prov_guaranteed is not None:
+        val = prov_guaranteed.get("value")
+        src = str(prov_guaranteed.get("source") or "").strip()
+        if src == "Assumption Discovery":
+            status = "extracted"
+            origin = "assumption_discovery"
+        elif src == "AssumptionSet DSL":
+            status = "inferred"
+            origin = "dsl"
+        elif src == "Placeholder":
+            status = "placeholder"
+            origin = "placeholder"
+        else:
+            status = "inferred"
+            origin = "dsl"
+
+        mech_min_rate = _find_mechanic_by_name("minimum interest") or _find_mechanic_by_name("minimum annual interest")
+        sources = _sources_from_mechanic(mech_min_rate, "mechanic")
+        if not sources and status in {"extracted", "inferred"}:
+            # When we know it came from discovery/DSL but have no
+            # mechanic-specific filing_sources, expose a generic
+            # placeholder origin.
+            sources = [
+                {
+                    "document": None,
+                    "page": None,
+                    "snippet": None,
+                    "confidence": 0.0,
+                    "origin": origin,
+                }
+            ]
+
+        evidence_items.append(
+            {
+                "id": "guaranteed_credited_rate",
+                "label": "Guaranteed credited rate",
+                "category": "assumption",
+                "status": status,
+                "value": val,
+                "sources": sources,
+                "confidence": _confidence_from_sources(sources) or (1.0 if status in {"extracted", "inferred"} else 0.2),
+                "impact": _impact_for_id("guaranteed_credited_rate"),
+                "notes": "Determines the minimum credited interest applied to policy values; directly affects account value growth.",
+            }
+        )
+
+    # Evidence: COI rates.
+    prov_coi = None
+    for ap in assumptions_payload:
+        if not isinstance(ap, dict):
+            continue
+        name = str(ap.get("name") or "").lower()
+        if "coi" in name:
+            prov_coi = ap
+            break
+    coi_status = "missing"
+    coi_val = None
+    coi_origin = "placeholder"
+    if prov_coi is not None:
+        coi_val = prov_coi.get("value")
+        src = str(prov_coi.get("source") or "").strip()
+        if src == "Placeholder":
+            coi_status = "placeholder"
+            coi_origin = "placeholder"
+        elif src == "Assumption Discovery":
+            coi_status = "extracted"
+            coi_origin = "assumption_discovery"
+        elif src == "AssumptionSet DSL":
+            coi_status = "inferred"
+            coi_origin = "dsl"
+        else:
+            coi_status = "inferred"
+            coi_origin = "dsl"
+
+    # Mechanics evidence for COI structure, even when rates are placeholder.
+    mech_coi = _find_mechanic_by_name("cost of insurance")
+    coi_sources = _sources_from_mechanic(mech_coi, "mechanic")
+    if "missing_coi_table" in gap_ids and coi_status == "missing":
+        coi_status = "missing"
+    elif "missing_coi_table" in gap_ids and coi_status != "extracted":
+        coi_status = "placeholder"
+
+    evidence_items.append(
+        {
+            "id": "coi_rates",
+            "label": "COI rates",
+            "category": "assumption",
+            "status": coi_status,
+            "value": coi_val,
+            "sources": coi_sources,
+            "confidence": _confidence_from_sources(coi_sources) if coi_sources else 0.2,
+            "impact": _impact_for_id("coi_rates"),
+            "notes": "Controls the cost of insurance charges deducted from the policy; placeholder rates mean projected values may not reflect filed CSO-based tables.",
+        }
+    )
+
+    # Evidence: Surrender schedule.
+    prov_surr = None
+    for ap in assumptions_payload:
+        if not isinstance(ap, dict):
+            continue
+        name = str(ap.get("name") or "").lower()
+        if "surrender" in name:
+            prov_surr = ap
+            break
+    surr_status = "missing"
+    surr_val = None
+    surr_origin = "placeholder"
+    if prov_surr is not None:
+        surr_val = prov_surr.get("value")
+        src = str(prov_surr.get("source") or "").strip()
+        if src == "Placeholder":
+            surr_status = "placeholder"
+            surr_origin = "placeholder"
+        elif src == "Assumption Discovery":
+            surr_status = "extracted"
+            surr_origin = "assumption_discovery"
+        elif src == "AssumptionSet DSL":
+            surr_status = "inferred"
+            surr_origin = "dsl"
+        else:
+            surr_status = "inferred"
+            surr_origin = "dsl"
+
+    mech_surr = _find_mechanic_by_name("surrender charge")
+    surr_sources = _sources_from_mechanic(mech_surr, "mechanic")
+    if "surrender_schedule_placeholder" in gap_ids and surr_status != "extracted":
+        surr_status = "placeholder"
+
+    evidence_items.append(
+        {
+            "id": "surrender_schedule",
+            "label": "Surrender schedule",
+            "category": "assumption",
+            "status": surr_status,
+            "value": surr_val,
+            "sources": surr_sources,
+            "confidence": _confidence_from_sources(surr_sources) if surr_sources else 0.2,
+            "impact": _impact_for_id("surrender_schedule"),
+            "notes": "Determines surrender charges and cash surrender values; placeholder schedule means early duration cash values may diverge from filed illustrations.",
+        }
+    )
+
+    # Evidence: Policy / admin fee.
+    prov_fee = None
+    for ap in assumptions_payload:
+        if not isinstance(ap, dict):
+            continue
+        name = str(ap.get("name") or "").lower()
+        if "policy fee" in name or "admin fee" in name:
+            prov_fee = ap
+            break
+    fee_status = "missing"
+    fee_val = None
+    if prov_fee is not None:
+        fee_val = prov_fee.get("value")
+        src = str(prov_fee.get("source") or "").strip()
+        if src == "Placeholder":
+            fee_status = "placeholder"
+        elif src == "Assumption Discovery":
+            fee_status = "extracted"
+        elif src == "AssumptionSet DSL":
+            fee_status = "inferred"
+        else:
+            fee_status = "inferred"
+    if "policy_admin_fee_missing" in gap_ids and fee_status != "extracted":
+        fee_status = "missing" if not fee_val else "placeholder"
+
+    evidence_items.append(
+        {
+            "id": "policy_admin_fee",
+            "label": "Policy / admin fee",
+            "category": "assumption",
+            "status": fee_status,
+            "value": fee_val,
+            "sources": [],
+            "confidence": 0.0 if fee_status in {"missing", "placeholder"} else 0.5,
+            "impact": _impact_for_id("policy_admin_fee"),
+            "notes": "Per-policy fees and admin charges reduce account value; current projection assumes no fees when this remains missing or placeholder.",
+        }
+    )
+
+    # Evidence: Death benefit option.
+    mech_db = _find_mechanic_by_name("death benefit")
+    db_sources = _sources_from_mechanic(mech_db, "mechanic")
+    db_status = "extracted" if db_sources else "inferred"
+    db_val = None
+    if isinstance(mech_db, dict):
+        db_val = mech_db.get("description") or mech_db.get("name")
+
+    evidence_items.append(
+        {
+            "id": "death_benefit_option",
+            "label": "Death benefit option",
+            "category": "mechanic",
+            "status": db_status,
+            "value": db_val,
+            "sources": db_sources,
+            "confidence": _confidence_from_sources(db_sources) if db_sources else 0.5,
+            "impact": _impact_for_id("death_benefit_option"),
+            "notes": "Defines how the death benefit behaves (e.g. level vs. increasing) and ties directly to the face amount paid on death.",
+        }
+    )
+
+    # Evidence: Cash surrender value definition.
+    mech_csv = _find_mechanic_by_name("cash surrender value")
+    csv_sources = _sources_from_mechanic(mech_csv, "mechanic")
+    csv_status = "extracted" if csv_sources else "inferred"
+    csv_val = None
+    if isinstance(mech_csv, dict):
+        csv_val = mech_csv.get("description") or mech_csv.get("name")
+
+    evidence_items.append(
+        {
+            "id": "cash_surrender_value",
+            "label": "Cash surrender value",
+            "category": "mechanic",
+            "status": csv_status,
+            "value": csv_val,
+            "sources": csv_sources,
+            "confidence": _confidence_from_sources(csv_sources) if csv_sources else 0.5,
+            "impact": _impact_for_id("cash_surrender_value"),
+            "notes": "Defines how cash surrender value is determined from policy value and surrender charges; underpins surrender projections.",
+        }
+    )
+
+    # --- Compliance Matrix: filed vs implemented requirements -----------------
+
+    # Index evidence items by id for quick lookup.
+    evidence_by_id: Dict[str, Dict[str, Any]] = {}
+    for ev in evidence_items:
+        if isinstance(ev, dict) and ev.get("id"):
+            key = str(ev["id"])
+            evidence_by_id[key] = ev
+
+    # Build a UniversalLifeModel snapshot for UL-style products so
+    # downstream code (and future engines) have a product-line-aware
+    # representation rather than Promise-UL-specific dicts.
+    ul_field_evidence: Dict[str, LifeFieldEvidence] = {}
+    for evid_id, ev in evidence_by_id.items():
+        status = str(ev.get("status") or "")
+        label = str(ev.get("label") or evid_id)
+        value = ev.get("value")
+        value_summary: Optional[str]
+        if value is None:
+            value_summary = label
+        elif isinstance(value, (int, float)):
+            value_summary = str(value)
+        else:
+            value_summary = str(value)
+
+        sources_raw = ev.get("sources") or []
+        sources: List[LifeEvidenceRef] = []
+        if isinstance(sources_raw, list):
+            for s in sources_raw:
+                if not isinstance(s, dict):
+                    continue
+                src = LifeEvidenceRef(
+                    document=s.get("document"),
+                    page=s.get("page"),
+                    snippet=s.get("snippet"),
+                    confidence=(
+                        float(s.get("confidence"))
+                        if isinstance(s.get("confidence"), (int, float))
+                        else None
+                    ),
+                )
+                sources.append(src)
+
+        impact = _impact_for_id(evid_id)
+        ul_field_evidence[evid_id] = LifeFieldEvidence(
+            id=evid_id,
+            status=status,
+            value_summary=value_summary,
+            sources=sources,
+            impact=impact,
+        )
+
+    ul_model = UniversalLifeModel(
+        product_code=product_code_effective,
+        product_name=product_name,
+        carrier=carrier,
+        jurisdiction=None,
+        product_type="ul",
+        issue_age_min=None,
+        issue_age_max=None,
+        risk_classes=[],
+        premium_pattern=None,
+        premium_guarantee_description=None,
+        riders=[],
+        metadata_sources=[],
+        death_benefit_options=[
+            str(mechanics_summary.get("deathBenefitOption"))
+        ]
+        if mechanics_summary.get("deathBenefitOption")
+        else [],
+        guaranteed_rate=getattr(cfg_runtime, "guaranteed_rate", None),
+        current_rate=None,
+        crediting_rules=None,
+        coi_basis="face",
+        coi_tables=[
+            LifeTableWithStatus(
+                id="coi_rates",
+                description="COI rates",
+                evidence=ul_field_evidence.get("coi_rates"),
+            )
+        ],
+        policy_fees=[
+            LifeFeeSchedule(
+                id="policy_admin_fee",
+                description="Policy / admin fee",
+                evidence=ul_field_evidence.get("policy_admin_fee"),
+            )
+        ],
+        premium_loads=[],
+        surrender_schedule=LifeTableWithStatus(
+            id="surrender_schedule",
+            description="Surrender schedule",
+            evidence=ul_field_evidence.get("surrender_schedule"),
+        ),
+        mva_rules=None,
+        loan_rules=None,
+        withdrawal_rules=None,
+        field_evidence=ul_field_evidence,
+    )
+
+    def _req_status_for_evidence(eid: str, *, gap_key: Optional[str] = None, default: str = "missing") -> str:
+        ev = evidence_by_id.get(eid)
+        if not isinstance(ev, dict):
+            return default
+        s = str(ev.get("status") or "").lower()
+        if s in {"extracted", "inferred"}:
+            # Strongest evidence: treat as implemented when not
+            # contradicted by explicit gaps.
+            if gap_key and gap_key in gap_ids:
+                # Gap indicates table/schedule still placeholder.
+                return "partial"
+            return "implemented"
+        if s == "placeholder":
+            # Placeholder values imply partial at best when a gap is
+            # recorded; otherwise treat as partial implementation.
+            return "partial" if gap_key else "partial"
+        # s == "missing" or unknown.
+        return "missing"
+
+    compliance_requirements: List[Dict[str, Any]] = []
+
+    # Build compliance requirements from the UL requirement catalogue so
+    # semantics stay centralised and product-line-aware.
+    gap_key_by_req_id = {
+        "coi_table": "missing_coi_table",
+        "surrender_schedule": "surrender_schedule_placeholder",
+    }
+
+    for req_def in get_ul_requirement_definitions():
+        ev = evidence_by_id.get(req_def.field_evidence_id) or {}
+
+        # Special-case policy/admin fees to preserve existing
+        # placeholder/zero handling.
+        if req_def.requirement_id == "policy_admin_fees":
+            status_val = "missing"
+            if isinstance(ev, dict):
+                s_fee = str(ev.get("status") or "").lower()
+                v_fee = ev.get("value")
+                has_value = bool(v_fee not in (None, 0, 0.0, "0", "0.0"))
+                if s_fee in {"extracted", "inferred"} and has_value:
+                    status_val = "implemented"
+                elif s_fee == "placeholder" and has_value:
+                    status_val = "partial"
+                else:
+                    status_val = "missing"
+        else:
+            gap_key = gap_key_by_req_id.get(req_def.requirement_id)
+            status_val = _req_status_for_evidence(req_def.field_evidence_id, gap_key=gap_key, default="missing")
+
+        # For now we keep the currentImplementation and notes texts
+        # Promise-UL-specific; in future these can be catalog-driven.
+        if req_def.requirement_id == "guaranteed_credited_rate":
+            current_impl = (
+                "Guaranteed credited rate is loaded into UL runtime assumptions "
+                "from assumption discovery or DSL."
+            )
+            notes = (
+                "If this requirement is not implemented, projected account values "
+                "may be inconsistent with filed minimum-crediting guarantees."
+            )
+        elif req_def.requirement_id == "death_benefit_option":
+            current_impl = "Current mechanics model a level death benefit equal to the face amount."
+            notes = "Misalignment here would change the basic product promise (amount paid on death)."
+        elif req_def.requirement_id == "cash_surrender_value":
+            current_impl = "Workspace CSV mechanics reflect CSV = Policy Value − Surrender Charge."
+            notes = (
+                "Ensures surrender benefits match filed definitions for policy value "
+                "and surrender charges."
+            )
+        elif req_def.requirement_id == "coi_table":
+            current_impl = (
+                "Current implementation uses a flat 0.40% of face as a placeholder "
+                "instead of filed COI tables."
+            )
+            notes = (
+                "Placeholder COI rates mean projected charges may not align with filed "
+                "CSO-based rate tables."
+            )
+        elif req_def.requirement_id == "surrender_schedule":
+            current_impl = (
+                "Current implementation uses a simplified declining schedule over the "
+                "surrender period."
+            )
+            notes = (
+                "Placeholder surrender schedule can materially affect early-year "
+                "surrender values."
+            )
+        elif req_def.requirement_id == "policy_admin_fees":
+            current_impl = "No fee schedule is currently loaded; projections assume no policy/admin fees."
+            notes = (
+                "Missing fee schedules mean projected account values may be overstated "
+                "relative to filed illustrations."
+            )
+        else:
+            current_impl = ""
+            notes = ""
+
+        compliance_requirements.append(
+            {
+                "id": req_def.requirement_id,
+                "name": req_def.name,
+                "category": req_def.category,
+                "filedRequirement": req_def.filed_requirement,
+                "currentImplementation": current_impl,
+                "status": status_val,
+                "impact": _impact_for_id(req_def.field_evidence_id),
+                "evidence": [ev] if ev else [],
+                "notes": notes,
+            }
+        )
+
+    # --- Canonical requirement classification layer -------------------------
+
+    def _to_req_evidence(ev_list: List[Dict[str, Any]]) -> List[ReqEvidence]:
+        """Translate a requirement's evidence dicts into classifier Evidence.
+
+        We treat any evidence with filing sources (document/page/snippet)
+        as product-document evidence; everything else is engine
+        introspection. Placeholder statuses are marked via ``origin`` so
+        the classifier can treat them as placeholders for inputs.
+        """
+
+        out: List[ReqEvidence] = []
+        for ev in ev_list:
+            if not isinstance(ev, dict):
+                continue
+            sources = ev.get("sources") or []
+            has_filing = False
+            if isinstance(sources, list):
+                for s in sources:
+                    if not isinstance(s, dict):
+                        continue
+                    if s.get("document") or s.get("page") or s.get("snippet"):
+                        has_filing = True
+                        break
+
+            kind = ReqEvidenceKind.PRODUCT_DOCUMENT if has_filing else ReqEvidenceKind.ENGINE_INTROSPECTION
+            status = str(ev.get("status") or "")
+            origin = None
+            if status.lower() == "placeholder":
+                origin = "placeholder"
+            out.append(ReqEvidence(kind=kind, status=status, origin=origin))
+        return out
+
+    requirement_classifications: List[RequirementClassification] = []
+    classification_index: Dict[str, RequirementClassification] = {}
+    name_index: Dict[str, str] = {}
+
+    for req in compliance_requirements:
+        rid = str(req.get("id") or "")
+        if not rid:
+            continue
+        name_index[rid] = str(req.get("name") or "")
+
+        impact_str = str(req.get("impact") or "").lower()
+        if impact_str == "high":
+            impact = ReqImpact.HIGH
+        elif impact_str == "medium":
+            impact = ReqImpact.MEDIUM
+        else:
+            impact = ReqImpact.LOW
+
+        raw_evidence = req.get("evidence") or []
+        ev_list = raw_evidence if isinstance(raw_evidence, list) else []
+        evidence = _to_req_evidence(ev_list)
+
+        cls = classify_requirement(
+            requirement_id=rid,
+            impact=impact,
+            applicability_evidence=evidence,
+            implementation_evidence=evidence,
+            input_evidence=evidence,
+            reviewer_decisions=(),
+        )
+
+        requirement_classifications.append(cls)
+        classification_index[rid] = cls
+        # Attach classifier summary back onto the requirement for UI use.
+        req["classification"] = {
+            "applicability": cls.applicability.value,
+            "implementationState": cls.implementation_state.value,
+            "inputState": cls.input_state.value,
+            "isBlockingGap": cls.is_blocking_gap,
+        }
+
+    # Compliance summary counts and overall status based on canonical
+    # classification. Only confirmed_applicable requirements contribute to
+    # readiness counts; candidates still needing review are tracked
+    # separately and do not lower readiness.
+
+    def _is_missing(cls: RequirementClassification) -> bool:
+        return (
+            cls.implementation_state.name == "NOT_IMPLEMENTED"
+            and cls.input_state.name in {"MISSING", "UNKNOWN"}
+        )
+
+    def _is_implemented(cls: RequirementClassification) -> bool:
+        return cls.implementation_state.name == "IMPLEMENTED" and cls.input_state.name == "READY"
+
+    implemented_count = 0
+    partial_count = 0
+    missing_count = 0
+
+    for cls in requirement_classifications:
+        if cls.applicability is not ReqApplicability.CONFIRMED_APPLICABLE:
+            continue
+        if _is_implemented(cls):
+            implemented_count += 1
+        elif _is_missing(cls):
+            missing_count += 1
+        else:
+            partial_count += 1
+
+    # Overall compliance status based on high-impact confirmed requirements.
+    overall_status: str
+    has_high_missing = any(
+        cls.applicability is ReqApplicability.CONFIRMED_APPLICABLE
+        and cls.impact is ReqImpact.HIGH
+        and _is_missing(cls)
+        for cls in requirement_classifications
+    )
+    has_high_partial = any(
+        cls.applicability is ReqApplicability.CONFIRMED_APPLICABLE
+        and cls.impact is ReqImpact.HIGH
+        and not _is_implemented(cls)
+        and not _is_missing(cls)
+        for cls in requirement_classifications
+    )
+    if has_high_missing:
+        overall_status = "red"
+    elif has_high_partial:
+        overall_status = "yellow"
+    else:
+        overall_status = "green"
+
+    # --- Product Readiness Dashboard -----------------------------------------
+
+    # Overall understanding status mirrors the compliance colour for now,
+    # but is kept as a distinct field for future expansion.
+    overall_understanding_status = overall_status
+
+    # Human-readable explanation derived from counts and overall status.
+    if overall_status == "green":
+        readiness_explanation = (
+            "All high-impact filed requirements appear implemented; the current workspace "
+            "understanding is strong for review and comparison."
+        )
+    elif overall_status == "yellow":
+        readiness_explanation = (
+            "At least one high-impact requirement remains partially implemented; the workspace "
+            "is suitable for draft review but not yet filed-rate ready."
+        )
+    elif overall_status == "red":
+        readiness_explanation = (
+            "At least one high-impact requirement is missing; the workspace is not yet ready "
+            "for formal review or filed-rate comparisons."
+        )
+    else:
+        readiness_explanation = (
+            "Compliance status is unknown; treat projections as exploratory until requirements "
+            "and evidence are reviewed."
+        )
+
+    # Projection trust level from illustration presence and compliance colour.
+    # Levels: exploration_only | draft_illustration | review_ready | filed_rate_ready
+    if projection_snapshot is None:
+        projection_trust_level = "exploration_only"
+    else:
+        if has_high_missing:
+            projection_trust_level = "exploration_only"
+        elif has_high_partial or missing_count > 0:
+            projection_trust_level = "draft_illustration"
+        elif partial_count > 0:
+            projection_trust_level = "review_ready"
+        else:
+            projection_trust_level = "filed_rate_ready"
+
+    # Critical issues: confirmed, high- or medium-impact requirements that
+    # are still blocking gaps. These drive the dashboard list.
+    critical_issues: List[Dict[str, Any]] = []
+    for rid, cls in classification_index.items():
+        if cls.applicability is not ReqApplicability.CONFIRMED_APPLICABLE:
+            continue
+        if not cls.is_blocking_gap:
+            continue
+        # Translate classification back into a simple status label so the
+        # UI can continue to distinguish "missing" vs "partial".
+        if _is_missing(cls):
+            status_label = "missing"
+        elif _is_implemented(cls):
+            # Should not be blocking, but guard defensively.
+            status_label = "implemented"
+        else:
+            status_label = "partial"
+
+        critical_issues.append(
+            {
+                "id": rid,
+                "name": name_index.get(rid),
+                "status": status_label,
+                "impact": cls.impact.value,
+            }
+        )
+
+    # Recommended next action: choose the highest-leverage confirmed
+    # requirement to resolve, with a Promise‑UL‑specific mapping for
+    # clearer labels.
+    recommended_next_action = None
+
+    def _pick_requirement(predicate) -> Optional[str]:
+        for rid, cls in classification_index.items():
+            if predicate(rid, cls):
+                return rid
+        return None
+
+    # Prefer high-impact missing, then high-impact partial, then
+    # medium-impact missing.
+    cand_id = _pick_requirement(
+        lambda rid, cls: cls.applicability is ReqApplicability.CONFIRMED_APPLICABLE
+        and cls.impact is ReqImpact.HIGH
+        and _is_missing(cls)
+    )
+    if cand_id is None:
+        cand_id = _pick_requirement(
+            lambda rid, cls: cls.applicability is ReqApplicability.CONFIRMED_APPLICABLE
+            and cls.impact is ReqImpact.HIGH
+            and not _is_implemented(cls)
+            and not _is_missing(cls)
+        )
+    if cand_id is None:
+        cand_id = _pick_requirement(
+            lambda rid, cls: cls.applicability is ReqApplicability.CONFIRMED_APPLICABLE
+            and cls.impact is ReqImpact.MEDIUM
+            and _is_missing(cls)
+        )
+
+    if cand_id is not None:
+        if cand_id == "coi_table":
+            recommended_next_action = "Upload COI rate table."
+        elif cand_id == "policy_admin_fees":
+            recommended_next_action = "Upload policy/admin fee schedule."
+        elif cand_id == "surrender_schedule":
+            recommended_next_action = "Upload filed surrender charge schedule."
+        else:
+            # Generic fallback.
+            recommended_next_action = f"Resolve requirement: {name_index.get(cand_id) or cand_id}."
+
+    readiness_dashboard = {
+        "overallStatus": overall_understanding_status,
+        "overallExplanation": readiness_explanation,
+        "complianceSummary": {
+            "implemented": implemented_count,
+            "partial": partial_count,
+            "missing": missing_count,
+            "overallStatus": overall_status,
+        },
+        "projectionTrustLevel": projection_trust_level,
+        "criticalIssues": critical_issues,
+        "recommendedNextAction": recommended_next_action,
+    }
+
+    # --- PMR / readiness summary (when available) ------------------------------
+    readiness_status = "no_review"
+    readiness_messages: List[str] = []
+
+    if rec is None:
+        readiness_messages.append(
+            "No Product Review draft exists for Promise UL yet; run the Expert/Debug "
+            "pipeline before relying on this readiness status."
+        )
+    else:
+        readiness_status = "review_in_progress"
+        # Summarise compliance matrix for PMR readiness.
+        readiness_messages.append(
+            "Product Review draft exists for Promise UL. Use Expert / Debug mode "
+            "and the Trust Surface for detailed PMR status."
+        )
+
+    compliance_summary = {
+        "implemented": implemented_count,
+        "partial": partial_count,
+        "missing": missing_count,
+        "overallStatus": overall_status,
+    }
+
+    # Add a compliance-oriented message so PMR reflects the matrix.
+    readiness_messages.append(
+        f"Compliance summary: implemented={implemented_count}, partial={partial_count}, missing={missing_count}, overall status={overall_status}."
+    )
+
+    pmr_readiness = {
+        "status": readiness_status,
+        "messages": readiness_messages,
+        "complianceSummary": compliance_summary,
+    }
+
+    # --- Assemble workspace payload -------------------------------------------
+    product_block = {
+        "code": product_code_effective,
+        "name": product_name,
+        "type": product_type,
+        "carrier": carrier,
+        "filingId": filing_id,
+        "understandingStatus": readiness_status,
+    }
+
+    return {
+        "product": product_block,
+        "documents": documents_payload,
+        "mechanics": {
+            "summary": mechanics_summary,
+            "items": mechanics_payload,
+        },
+        "assumptions": {
+            "provenance": assumptions_payload,
+        },
+        "readinessDashboard": readiness_dashboard,
+        "complianceMatrix": {
+            "summary": compliance_summary,
+            "requirements": compliance_requirements,
+        },
+        "productModel": {
+            "type": ul_model.product_type,
+            "universalLife": asdict(ul_model),
+        },
+        "requirementsClassification": {
+            "all": [
+                {
+                    "id": cls.requirement_id,
+                    "name": name_index.get(cls.requirement_id),
+                    "impact": cls.impact.value,
+                    "applicability": cls.applicability.value,
+                    "implementationState": cls.implementation_state.value,
+                    "inputState": cls.input_state.value,
+                    "isBlockingGap": cls.is_blocking_gap,
+                }
+                for cls in requirement_classifications
+            ],
+        },
+        "evidence": {
+            "items": evidence_items,
+        },
+        "gaps": {
+            # Normalised gap items for structured workspace UIs. For
+            # Slice 4 this is Promise‑UL‑first and derived entirely
+            # from existing projection warnings.
+            "items": gap_items,
+            # Backwards-compatible raw warnings/notes so existing
+            # consumers (if any) can continue to render them.
+            "warnings": gap_warnings,
+            "notes": gap_notes,
+        },
+        "illustration": projection_snapshot,
+        "mechanicsExplanation": mechanics_explanation,
+        "pmrReadiness": pmr_readiness,
+    }
+
+
+@app.get("/api/product-workspace/{product_code}")
+def api_product_workspace(product_code: str) -> Dict[str, Any]:
+    """Product Understanding Workspace snapshot entrypoint.
+
+    Thin wrapper around :func:`build_product_workspace_snapshot` so the
+    HTTP surface stays stable as products are added.
+    """
+
+    return build_product_workspace_snapshot(product_code)
+
+
+@app.post("/api/product-model-review/{product_code}/ai-summary")
+def api_product_model_review_ai_summary(
+    product_code: str,
+    payload: ProductModelReviewAISummaryRequest,
+) -> Dict[str, Any]:
+    """Run multi-level AI agents on top of the PMR for this product.
+
+    This endpoint:
+    - builds the current PMR payload for the product, and
+    - runs two AI stages over it:
+      1) structured PMR summary
+      2) draft decision suggestion.
+
+    It returns a JSON object containing the original PMR payload plus the
+    AI-derived summary and suggestion. No database writes are performed;
+    callers remain responsible for persisting any accepted decision.
+    """
+
+    # Reuse the product-aware PMR entrypoint to assemble the base payload.
+    pmr = api_product_model_review_product(product_code)
+
+    feedback = (payload.feedback or "").strip() or None
+    previous_summary = payload.previousSummary or None
+    previous_decision = payload.previousDecision or None
+
+    try:
+        summary = summarise_pmr(
+            pmr,
+            model=payload.modelSummary,
+            feedback=feedback,
+            previous=previous_summary,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Failed to summarise PMR via OpenAI: {exc}") from exc
+
+    try:
+        decision = propose_decision(
+            pmr,
+            summary,
+            model=payload.modelDecision,
+            feedback=feedback,
+            previous=previous_decision,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Failed to propose decision via OpenAI: {exc}") from exc
+
+    return {
+        "pmr": pmr,
+        "aiSummary": summary,
+        "aiDecision": decision,
+    }
+
+
+@app.post("/api/product-review/finalize-product-code")
+def api_product_review_finalize_product_code(payload: ProductCodeFinalizeRequest) -> Dict[str, Any]:
+    """Migrate documents from a temporary product code to a final one.
+
+    This endpoint supports flows where filings were uploaded under a
+    temporary product identifier (e.g. TMP-*) and the metadata stage then
+    identifies the canonical product code from the filings.
+
+    It:
+    - moves MinIO objects under docs/{old}/... to docs/{new}/..., and
+    - updates the documents.product_id column from old → new.
+    """
+
+    old = (payload.oldProductCode or "").strip().upper()
+    new = (payload.newProductCode or "").strip().upper()
+
+    if not old or not new:
+        raise HTTPException(status_code=400, detail="oldProductCode and newProductCode are required")
+
+    if old == new:
+        # Nothing to do.
+        return {"movedObjects": 0, "updatedRows": 0, "skipped": True}
+
+    client = get_minio_client()
+    ensure_bucket(client)
+    bucket = get_bucket_name()
+
+    old_prefix = f"docs/{old}/"
+    new_prefix = f"docs/{new}/"
+
+    moved = 0
+    try:
+        # Move all objects under docs/{old}/ to docs/{new}/.
+        for obj in client.list_objects(bucket, prefix=old_prefix, recursive=True):
+            old_name = obj.object_name
+            if not old_name.startswith(old_prefix):
+                continue
+            suffix = old_name[len(old_prefix) :]
+            new_name = f"{new_prefix}{suffix}"
+
+            # Copy contents then delete the old object.
+            try:
+                response = client.get_object(bucket, old_name)
+                body = response.read()
+            finally:
+                try:
+                    response.close()
+                    response.release_conn()
+                except Exception:
+                    pass
+
+            import io as _io
+
+            client.put_object(
+                bucket,
+                new_name,
+                _io.BytesIO(body),
+                length=len(body),
+                content_type=obj.content_type or "application/octet-stream",
+            )
+            client.remove_object(bucket, old_name)
+            moved += 1
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Failed to migrate MinIO objects from {old} to {new}: {exc}") from exc
+
+    # Relabel documents rows in Postgres.
+    updated_rows = relabel_documents_product(old, new)
+
+    return {"movedObjects": moved, "updatedRows": updated_rows, "skipped": False}
+
+
+@app.get("/api/products/{product_code}/requirements")
+def api_product_requirements_product(product_code: str) -> Dict[str, Any]:
+    """Product-aware Filing Requirements entrypoint.
+
+    Uses the product registry and requirements provider registry to
+    distinguish implemented vs not-implemented products and to resolve a
+    product-specific requirements provider.
+    """
+
+    cfg = _get_product_config(product_code)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail=f"Unknown product_code '{product_code}'.")
+
+    status = cfg.get("status") or "unknown"
+    code_norm = (cfg.get("productCode") or product_code or "").strip().upper()
+
+    if status != "implemented":
+        # Known but not yet implemented product.
+        raise HTTPException(
+            status_code=501,
+            detail="Product requirements surface is not implemented for this product yet.",
+        )
+
+    provider = _get_product_requirements_provider(code_norm)
+    if provider is None:
+        raise HTTPException(
+            status_code=501,
+            detail="Product requirements provider is not registered for this product yet.",
+        )
+
+    return provider(code_norm)
+
+
+@app.get("/api/product-requirements/{product_code}")
+def api_product_requirements(product_code: str) -> Dict[str, Any]:
+    """Backwards-compatible alias for the product requirements endpoint."""
+
+    return api_product_requirements_product(product_code)
+
+
+@app.get("/api/products/{product_code}/product-definition-evidence")
+def api_product_definition_evidence_product(product_code: str) -> Dict[str, Any]:
+    """Product-aware ProductDefinition evidence entrypoint."""
+
+    cfg = _get_product_config(product_code)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail=f"Unknown product_code '{product_code}'.")
+
+    status = cfg.get("status") or "unknown"
+    code_norm = (cfg.get("productCode") or product_code or "").strip().upper()
+
+    if status != "implemented":
+        raise HTTPException(
+            status_code=501,
+            detail="ProductDefinition evidence surface is not implemented for this product yet.",
+        )
+
+    provider = _get_product_definition_evidence_provider(code_norm)
+    if provider is None:
+        raise HTTPException(
+            status_code=501,
+            detail="ProductDefinition evidence provider is not registered for this product yet.",
+        )
+
+    return provider(code_norm)
+
+
+@app.get("/api/products/{product_code}/projection-logic-evidence")
+def api_product_projection_evidence_product(product_code: str) -> Dict[str, Any]:
+    """Product-aware projection logic evidence entrypoint."""
+
+    cfg = _get_product_config(product_code)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail=f"Unknown product_code '{product_code}'.")
+
+    status = cfg.get("status") or "unknown"
+    code_norm = (cfg.get("productCode") or product_code or "").strip().upper()
+
+    if status != "implemented":
+        raise HTTPException(
+            status_code=501,
+            detail="Projection logic evidence surface is not implemented for this product yet.",
+        )
+
+    provider = _get_product_projection_evidence_provider(code_norm)
+    if provider is None:
+        raise HTTPException(
+            status_code=501,
+            detail="Projection logic evidence provider is not registered for this product yet.",
+        )
+
+    return provider(code_norm)
+
+
+@app.get("/api/products/{product_code}/illustration-evidence")
+def api_product_illustration_evidence_product(product_code: str) -> Dict[str, Any]:
+    """Product-aware illustration comparison evidence entrypoint."""
+
+    cfg = _get_product_config(product_code)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail=f"Unknown product_code '{product_code}'.")
+
+    status = cfg.get("status") or "unknown"
+    code_norm = (cfg.get("productCode") or product_code or "").strip().upper()
+
+    if status != "implemented":
+        raise HTTPException(
+            status_code=501,
+            detail="Illustration comparison evidence surface is not implemented for this product yet.",
+        )
+
+    provider = _get_product_illustration_evidence_provider(code_norm)
+    if provider is None:
+        raise HTTPException(
+            status_code=501,
+            detail="Illustration comparison evidence provider is not registered for this product yet.",
+        )
+
+    return provider(code_norm)
+
+
+@app.post("/api/illustrations/{product_code}")
+def api_product_illustration(product_code: str, payload: IllustrationRequest) -> Dict[str, Any]:
+    """Generic on-demand illustration endpoint.
+
+    This is product-aware and delegates to a per-product illustration
+    provider registered in the illustration provider registry. Products
+    that are known but do not yet support on-demand illustration return
+    a 501; unknown products return 404.
+    """
+
+    cfg = _get_product_config(product_code)
+    status = cfg.get("status") or "unknown"
+    code_norm = (cfg.get("productCode") or product_code or "").strip().upper()
+
+    # Prefer a product-specific illustration provider when one is
+    # registered (currently P12TRF and Promise UL aliases). Otherwise,
+    # route UL-typed products to the shared UL illustration provider and
+    # fall back to the generic term-style illustration for everything
+    # else.
+    provider = _get_illustration_provider(code_norm)
+    if provider is None:
+        product_type = _get_product_type(code_norm)
+        if _is_ul_product_type(product_type):
+            provider = build_ul_illustration_for_product
+        elif _is_term_product_type(product_type):
+            provider = build_generic_term_illustration
+        else:
+            raise HTTPException(
+                status_code=501,
+                detail=(
+                    "Illustration projection is not configured for product type "
+                    f"'{(product_type or 'unknown')}'."
+                ),
+            )
+
+    try:
+        request_dict = payload.dict()  # type: ignore[call-arg]
+    except Exception:
+        request_dict = {
+            "age": payload.age,
+            "termYears": payload.termYears,
+            "riskClass": payload.riskClass,
+            "smokerClass": payload.smokerClass,
+            "faceAmount": payload.faceAmount,
+            "premiumMode": payload.premiumMode,
+        }
+
+    return provider(code_norm, request_dict)
+
+
+def build_p12trf_requirements(product_code: str) -> Dict[str, Any]:
+    """P12TRF-specific Filing Requirements provider.
+
+    This reuses the P12TRF PMR builder so that ProductDefinition,
+    coverage matrix, and traceability are derived in one place, then
+    projects that into a generic requirements payload.
+    """
+
+    pmr = api_product_model_review_p12trf()
+    product_block = pmr.get("product") or {}
+    review_meta = pmr.get("reviewMeta") or {}
+    filing_id = review_meta.get("filingId")
+    product_definition = pmr.get("productDefinition") or {}
+    coverage_matrix = pmr.get("coverageMatrix") or []
+
+    def _cm_row(feature: str) -> Optional[Dict[str, Any]]:
+        for row in coverage_matrix or []:
+            if isinstance(row, dict) and str(row.get("feature")) == feature:
+                return row
+        return None
+
+    def _impl_status(feature: str) -> str:
+        row = _cm_row(feature)
+        cm_status = str((row or {}).get("status") or "").lower()
+        if cm_status == "covered":
+            return "implemented"
+        if cm_status == "partial":
+            return "partial"
+        if cm_status in {"gap", "not_applicable"}:
+            return "missing"
+        return "missing"
+
+    def _pd_value(path: str) -> Any:
+        # Simple one-level lookup for now; future adapters can support
+        # dotted paths. For this POC, top-level keys are enough.
+        key = path.split(".")[0]
+        return (product_definition or {}).get(key)
+
+    def _mapping(path: str) -> Dict[str, Any]:
+        return {"path": path, "value": _pd_value(path)}
+
+    requirements: List[Dict[str, Any]] = []
+
+    # Level term periods
+    requirements.append(
+        {
+            "requirementId": "req_term_periods",
+            "requirementText": "Level term periods for this product.",
+            "category": "coverage",
+            "source": {
+                "documentPath": None,
+                "filingLocation": f"{filing_id or 'P12TRF filing (POC)'} – Term periods section",
+            },
+            "productDefinitionMappings": [_mapping("termPeriods")],
+            "evidenceRuleIds": [],
+            "implementationStatus": _impl_status("Term periods"),
+            "notes": f"ProductDefinition termPeriods={_pd_value('termPeriods')!r}",
+        }
+    )
+
+    # Issue age range
+    requirements.append(
+        {
+            "requirementId": "req_issue_ages",
+            "requirementText": "Issue age range for base coverage.",
+            "category": "eligibility",
+            "source": {
+                "documentPath": None,
+                "filingLocation": f"{filing_id or 'P12TRF filing (POC)'} – Issue ages table",
+            },
+            "productDefinitionMappings": [_mapping("issueAges")],
+            "evidenceRuleIds": [],
+            "implementationStatus": _impl_status("Issue ages"),
+            "notes": f"ProductDefinition issueAges={_pd_value('issueAges')!r}",
+        }
+    )
+
+    # Risk / underwriting classes
+    requirements.append(
+        {
+            "requirementId": "req_risk_classes",
+            "requirementText": "Underwriting and risk classes supported by the product.",
+            "category": "eligibility",
+            "source": {
+                "documentPath": None,
+                "filingLocation": f"{filing_id or 'P12TRF filing (POC)'} – Risk class definitions",
+            },
+            "productDefinitionMappings": [_mapping("underwritingClasses"), _mapping("riskClasses")],
+            "evidenceRuleIds": [],
+            "implementationStatus": _impl_status("Underwriting / risk classes"),
+            "notes": f"ProductDefinition underwritingClasses={_pd_value('underwritingClasses')!r}",
+        }
+    )
+
+    # Smoker classes
+    requirements.append(
+        {
+            "requirementId": "req_smoker_classes",
+            "requirementText": "Smoker / non-smoker classes.",
+            "category": "eligibility",
+            "source": {
+                "documentPath": None,
+                "filingLocation": f"{filing_id or 'P12TRF filing (POC)'} – Smoker class definitions",
+            },
+            "productDefinitionMappings": [_mapping("smokerClasses")],
+            "evidenceRuleIds": [],
+            "implementationStatus": _impl_status("Smoker classes"),
+            "notes": f"ProductDefinition smokerClasses={_pd_value('smokerClasses')!r}",
+        }
+    )
+
+    # Premium modes
+    requirements.append(
+        {
+            "requirementId": "req_premium_modes",
+            "requirementText": "Premium payment modes (e.g. annual).",
+            "category": "premium",
+            "source": {
+                "documentPath": None,
+                "filingLocation": f"{filing_id or 'P12TRF filing (POC)'} – Premium mode definitions",
+            },
+            "productDefinitionMappings": [_mapping("premiumModes")],
+            "evidenceRuleIds": [],
+            "implementationStatus": _impl_status("Premium modes"),
+            "notes": f"ProductDefinition premiumModes={_pd_value('premiumModes')!r}",
+        }
+    )
+
+    # Face amount range
+    requirements.append(
+        {
+            "requirementId": "req_face_amount_range",
+            "requirementText": "Minimum and maximum face amounts.",
+            "category": "eligibility",
+            "source": {
+                "documentPath": None,
+                "filingLocation": f"{filing_id or 'P12TRF filing (POC)'} – Face amount limits",
+            },
+            "productDefinitionMappings": [_mapping("faceAmounts")],
+            "evidenceRuleIds": [],
+            "implementationStatus": _impl_status("Face amount range"),
+            "notes": f"ProductDefinition faceAmounts={_pd_value('faceAmounts')!r}",
+        }
+    )
+
+    # Base term death benefit
+    requirements.append(
+        {
+            "requirementId": "req_base_term_death_benefit",
+            "requirementText": "Base term death benefit payable during the level term.",
+            "category": "coverage",
+            "source": {
+                "documentPath": None,
+                "filingLocation": f"{filing_id or 'P12TRF filing (POC)'} – Death benefit during term",
+            },
+            "productDefinitionMappings": [_mapping("coverages")],
+            "evidenceRuleIds": ["rule_death_benefit_term"],
+            "implementationStatus": _impl_status("Base term coverage"),
+            "notes": f"ProductDefinition coverages={_pd_value('coverages')!r}",
+        }
+    )
+
+    # Level premiums
+    requirements.append(
+        {
+            "requirementId": "req_level_premiums",
+            "requirementText": "Premiums remain level during the term.",
+            "category": "premium",
+            "source": {
+                "documentPath": None,
+                "filingLocation": f"{filing_id or 'P12TRF filing (POC)'} – Level premium table",
+            },
+            "productDefinitionMappings": [_mapping("premiumModes")],
+            "evidenceRuleIds": ["rule_level_premiums"],
+            "implementationStatus": _impl_status("Level premiums"),
+            "notes": "Derived from premium lookup table and rate reconciliation checks.",
+        }
+    )
+
+    # Riders / unmodeled coverages
+    requirements.append(
+        {
+            "requirementId": "req_riders_unmodeled",
+            "requirementText": "Riders and unmodeled coverages recorded in the filing.",
+            "category": "rider",
+            "source": {
+                "documentPath": None,
+                "filingLocation": f"{filing_id or 'P12TRF filing (POC)'} – Rider and supplemental benefit sections",
+            },
+            "productDefinitionMappings": [_mapping("extra")],
+            "evidenceRuleIds": [],
+            "implementationStatus": _impl_status("Riders / unmodeled coverages"),
+            "notes": "Unmodeled coverages are tracked but not projected in this POC.",
+        }
+    )
+
+    # Convertibility – currently a documented placeholder only.
+    requirements.append(
+        {
+            "requirementId": "req_convertibility",
+            "requirementText": "Convertibility privilege during the level term.",
+            "category": "rider",
+            "source": {
+                "documentPath": None,
+                "filingLocation": f"{filing_id or 'P12TRF filing (POC)'} – Convertibility provisions",
+            },
+            "productDefinitionMappings": [_mapping("extra")],
+            "evidenceRuleIds": [],
+            "implementationStatus": "missing",
+            "notes": "Convertibility is acknowledged conceptually but not modeled in the current P12TRF POC.",
+        }
+    )
+
+    total = len(requirements)
+    implemented = sum(1 for r in requirements if str(r.get("implementationStatus")) == "implemented")
+    partial = sum(1 for r in requirements if str(r.get("implementationStatus")) == "partial")
+    missing = sum(1 for r in requirements if str(r.get("implementationStatus")) == "missing")
+
+    return {
+        "productCode": product_block.get("code") or product_code,
+        "productName": product_block.get("name"),
+        "filingId": filing_id,
+        "status": "available",
+        "requirements": requirements,
+        "summary": {
+            "total": total,
+            "implemented": implemented,
+            "partial": partial,
+            "missing": missing,
+        },
+    }
+
+
+_PRODUCT_REQUIREMENTS_PROVIDERS["P12TRF"] = build_p12trf_requirements
+
+
+def build_p12trf_product_definition_evidence(product_code: str) -> Dict[str, Any]:
+    """P12TRF-specific ProductDefinition evidence provider.
+
+    Projects the existing ProductDefinition summary, build metadata, and
+    validation into a generic evidence payload, and links PD fields back
+    to filing requirements where possible.
+    """
+
+    pmr = api_product_model_review_p12trf()
+    product_block = pmr.get("product") or {}
+    review_meta = pmr.get("reviewMeta") or {}
+    filing_id = review_meta.get("filingId")
+    pd_summary = pmr.get("productDefinition") or {}
+    pd_build = pmr.get("productDefinitionBuild") or {}
+    pd_validation = pmr.get("productDefinitionValidation") or {}
+
+    # Pull requirements so we can invert ProductDefinition mappings into
+    # linkedRequirementIds for each PD field.
+    requirements_payload: Dict[str, Any] = {}
+    try:
+        provider = _get_product_requirements_provider(product_code)
+        if provider is not None:
+            requirements_payload = provider(product_code)
+    except Exception:
+        requirements_payload = {}
+
+    reqs = requirements_payload.get("requirements") or []
+    reqs_by_path: Dict[str, List[str]] = {}
+    if isinstance(reqs, list):
+        for r in reqs:
+            if not isinstance(r, dict):
+                continue
+            rid = r.get("requirementId") or r.get("id")
+            if not rid:
+                continue
+            mappings = r.get("productDefinitionMappings") or []
+            if isinstance(mappings, list):
+                for m in mappings:
+                    if not isinstance(m, dict):
+                        continue
+                    path = str(m.get("path") or "").strip()
+                    if not path:
+                        continue
+                    bucket = reqs_by_path.setdefault(path, [])
+                    if rid not in bucket:
+                        bucket.append(rid)
+
+    def _field(path: str, label: str) -> Dict[str, Any]:
+        # For this POC we only look at the top-level key in the summary
+        # object; more complex adapters can support dotted paths later.
+        key = path.split(".")[0]
+        value = pd_summary.get(key)
+        linked_ids = reqs_by_path.get(path, [])
+        return {
+            "path": path,
+            "label": label,
+            "value": value,
+            "linkedRequirementIds": linked_ids,
+        }
+
+    fields: List[Dict[str, Any]] = []
+    fields.append(_field("termPeriods", "Level term periods"))
+    fields.append(_field("issueAges", "Issue ages"))
+    fields.append(_field("underwritingClasses", "Underwriting classes"))
+    fields.append(_field("riskClasses", "Risk classes"))
+    fields.append(_field("smokerClasses", "Smoker classes"))
+    fields.append(_field("premiumModes", "Premium modes"))
+    fields.append(_field("faceAmounts", "Face amount range"))
+    fields.append(_field("coverages", "Coverages"))
+    fields.append(_field("extra", "Additional product details / riders / convertibility"))
+
+    field_count = len(fields)
+    linked_field_count = sum(1 for f in fields if f.get("linkedRequirementIds"))
+    validation_status = str((pd_validation or {}).get("status") or "unknown")
+
+    return {
+        "productCode": product_block.get("code") or product_code,
+        "productName": product_block.get("name"),
+        "filingId": filing_id,
+        "status": "available",
+        "productDefinition": pd_summary,
+        "build": pd_build,
+        "validation": pd_validation,
+        "fields": fields,
+        "summary": {
+            "fieldCount": field_count,
+            "linkedFieldCount": linked_field_count,
+            "validationStatus": validation_status,
+        },
+    }
+
+
+_PRODUCT_DEFINITION_EVIDENCE_PROVIDERS["P12TRF"] = build_p12trf_product_definition_evidence
+
+
+def build_p12trf_projection_logic_evidence(product_code: str) -> Dict[str, Any]:
+    """P12TRF-specific projection logic evidence provider.
+
+    This is an explanatory layer that links filing requirements and
+    ProductDefinition fields to the high-level projection behaviour, so
+    an actuary can see how the model implements key contract features.
+    """
+
+    pmr = api_product_model_review_p12trf()
+    product_block = pmr.get("product") or {}
+    review_meta = pmr.get("reviewMeta") or {}
+    filing_id = review_meta.get("filingId")
+
+    behaviors: List[Dict[str, Any]] = []
+
+    # Base term death benefit logic.
+    behaviors.append(
+        {
+            "id": "behav_base_term_death_benefit",
+            "label": "Death benefit during level term",
+            "category": "coverage",
+            "requirementIds": ["req_base_term_death_benefit", "req_term_periods"],
+            "productDefinitionPaths": ["coverages", "termPeriods"],
+            "projectionLogic": {
+                "description": (
+                    "While duration is within a modeled term period, the death benefit equals the face "
+                    "amount from the ProductDefinition coverage; after term expiry the death benefit is zero."
+                ),
+                "pseudoCode": (
+                    "if duration_years <= level_term_years:\n"
+                    "    death_benefit = face_amount\n"
+                    "else:\n"
+                    "    death_benefit = 0"
+                ),
+                "notes": (
+                    "Implemented via the term coverage in ProductDefinition coverages and exercised by the "
+                    "scenario set used in the Trust Surface projections."
+                ),
+            },
+        }
+    )
+
+    # Level premium logic.
+    behaviors.append(
+        {
+            "id": "behav_level_premiums",
+            "label": "Level premiums during term",
+            "category": "premium",
+            "requirementIds": ["req_level_premiums", "req_premium_modes"],
+            "productDefinitionPaths": ["premiumModes"],
+            "projectionLogic": {
+                "description": (
+                    "Premiums are level over the modeled term, determined by a rate table by age, risk class, "
+                    "smoker class, and term period, and then applied at the configured premium mode."
+                ),
+                "pseudoCode": (
+                    "rate = lookup_rate(age, risk_class, smoker_class, term_years)\n"
+                    "annual_premium = rate * face_amount / 1000\n"
+                    "premium = apply_mode(annual_premium, premium_mode)"
+                ),
+                "notes": (
+                    "Implemented via the premium lookup table and premiumModes in the ProductDefinition, "
+                    "and validated by the rate reconciliation checks on the Trust Surface."
+                ),
+            },
+        }
+    )
+
+    # Eligibility / issue age logic (simplified).
+    behaviors.append(
+        {
+            "id": "behav_issue_age_eligibility",
+            "label": "Issue age eligibility",
+            "category": "eligibility",
+            "requirementIds": ["req_issue_ages"],
+            "productDefinitionPaths": ["issueAges"],
+            "projectionLogic": {
+                "description": (
+                    "Policies are only projected when the issue age falls within the ProductDefinition "
+                    "issueAges[min, max] range; scenarios outside this range are treated as invalid."
+                ),
+                "pseudoCode": (
+                    "if age < issueAgeMin or age > issueAgeMax:\n"
+                    "    reject_case('age out of bounds')\n"
+                    "else:\n"
+                    "    proceed_with_projection()"
+                ),
+                "notes": (
+                    "The POC scenarios all fall within 18–75, and the ProductDefinition validation "
+                    "explicitly checks that scenario ages respect these bounds."
+                ),
+            },
+        }
+    )
+
+    # Risk and smoker class handling (simplified mapping).
+    behaviors.append(
+        {
+            "id": "behav_risk_smoker_classes",
+            "label": "Risk and smoker class mapping",
+            "category": "eligibility",
+            "requirementIds": ["req_risk_classes", "req_smoker_classes"],
+            "productDefinitionPaths": ["underwritingClasses", "riskClasses", "smokerClasses"],
+            "projectionLogic": {
+                "description": (
+                    "Risk and smoker classes in scenarios are mapped into the ProductDefinition risk and "
+                    "smoker classes before rate lookup; unsupported combinations are treated as out of "
+                    "scope for this POC."
+                ),
+                "pseudoCode": (
+                    "uw_class = map_underwriting_class(input_uw)\n"
+                    "risk_class = map_risk_class(input_risk)\n"
+                    "smoker_class = map_smoker_class(input_smoker)\n"
+                    "# lookup_rate uses these mapped classes"
+                ),
+                "notes": (
+                    "The mapping is implicitly exercised by the P12TRF scenarios and validated via the "
+                    "ProductDefinition validation checks for risk and smoker classes."
+                ),
+            },
+        }
+    )
+
+    # Placeholder for riders / unmodeled coverage logic.
+    behaviors.append(
+        {
+            "id": "behav_unmodeled_riders",
+            "label": "Unmodeled riders and supplemental benefits",
+            "category": "rider",
+            "requirementIds": ["req_riders_unmodeled"],
+            "productDefinitionPaths": ["extra"],
+            "projectionLogic": {
+                "description": (
+                    "Riders and supplemental benefits recorded in the filing are not projected in this POC; "
+                    "the projection engine ignores them and only models the base term coverage."
+                ),
+                "pseudoCode": (
+                    "# riders listed in ProductDefinition.extra.unmodeled_coverages\n"
+                    "# are not included in projection cash flows in this POC"
+                ),
+                "notes": (
+                    "This behaviour is explicitly called out in the coverage matrix and requirements "
+                    "surface as missing/unmodeled."
+                ),
+            },
+        }
+    )
+
+    # Convertibility logic (currently unmodeled in projections).
+    behaviors.append(
+        {
+            "id": "behav_convertibility",
+            "label": "Convertibility during level term",
+            "category": "rider",
+            "requirementIds": ["req_convertibility"],
+            "productDefinitionPaths": ["extra"],
+            "projectionLogic": {
+                "description": (
+                    "Convertibility provisions are documented in the filing but are not "
+                    "projected in this POC; only the base term coverage cash flows are modeled."
+                ),
+                "pseudoCode": (
+                    "# convertibility terms recorded in ProductDefinition.extra.convertibility\n"
+                    "# are not exercised in the projection engine in this POC"
+                ),
+                "notes": (
+                    "This behaviour is tied to req_convertibility and will be updated once "
+                    "convertibility cash flows are explicitly modeled."
+                ),
+            },
+        }
+    )
+
+    return {
+        "productCode": product_block.get("code") or product_code,
+        "productName": product_block.get("name"),
+        "filingId": filing_id,
+        "status": "available",
+        "behaviors": behaviors,
+        "summary": {
+            "behaviorCount": len(behaviors),
+        },
+    }
+
+
+_PRODUCT_PROJECTION_EVIDENCE_PROVIDERS["P12TRF"] = build_p12trf_projection_logic_evidence
+
+
+def build_p12trf_illustration_evidence(product_code: str) -> Dict[str, Any]:
+    """P12TRF-specific illustration comparison evidence provider.
+
+    Projects the existing rate spot checks into a generic comparison
+    payload so an actuary can see where modelled premiums align with
+    filed illustration points and where they diverge.
+    """
+
+    pmr = api_product_model_review_p12trf()
+    product_block = pmr.get("product") or {}
+    review_meta = pmr.get("reviewMeta") or {}
+    filing_id = review_meta.get("filingId")
+
+    rates = pmr.get("rates") or {}
+    spot_checks = rates.get("spotChecks") or []
+
+    cases: List[Dict[str, Any]] = []
+
+    if isinstance(spot_checks, list):
+        for idx, sc in enumerate(spot_checks):
+            if not isinstance(sc, dict):
+                continue
+
+            age = sc.get("age")
+            term_years = sc.get("termYears")
+            risk_class = sc.get("riskClass")
+            face_amount = sc.get("faceAmount")
+            filed_prem = sc.get("filedPremium")
+            model_prem = sc.get("modelPremium")
+            raw_status = str(sc.get("status") or "").lower() or "unknown"
+
+            abs_diff: Optional[float] = None
+            pct_diff: Optional[float] = None
+            if isinstance(filed_prem, (int, float)) and isinstance(model_prem, (int, float)):
+                try:
+                    abs_diff = float(model_prem) - float(filed_prem)
+                    pct_diff = (abs_diff / float(filed_prem)) if filed_prem not in (0, 0.0) else None
+                except Exception:
+                    abs_diff = None
+                    pct_diff = None
+
+            # Normalise to a coarse within_tolerance vs mismatch view.
+            if raw_status in {"ok", "match", "within_tolerance"}:
+                norm_status = "within_tolerance"
+            elif raw_status in {"mismatch", "fail", "error"}:
+                norm_status = "mismatch"
+            else:
+                norm_status = raw_status or "unknown"
+
+            case_id = sc.get("id") or f"case_{idx + 1}"
+
+            cases.append(
+                {
+                    "id": case_id,
+                    "label": sc.get("label")
+                    or f"Age {age}, term {term_years}y, {risk_class or 'risk'} {face_amount}",
+                    "inputs": {
+                        "age": age,
+                        "termYears": term_years,
+                        "riskClass": risk_class,
+                        "faceAmount": face_amount,
+                    },
+                    "trusted": {
+                        "annualPremium": filed_prem,
+                    },
+                    "model": {
+                        "annualPremium": model_prem,
+                    },
+                    "difference": {
+                        "absolute": abs_diff,
+                        "percent": pct_diff,
+                    },
+                    "status": norm_status,
+                    # For this POC, all comparison cases support the
+                    # same premium-related requirements.
+                    "linkedRequirementIds": [
+                        "req_level_premiums",
+                        "req_premium_modes",
+                    ],
+                }
+            )
+
+    case_count = len(cases)
+    within_tolerance = sum(1 for c in cases if str(c.get("status")) == "within_tolerance")
+    mismatch = sum(1 for c in cases if str(c.get("status")) == "mismatch")
+
+    return {
+        "productCode": product_block.get("code") or product_code,
+        "productName": product_block.get("name"),
+        "filingId": filing_id,
+        "status": "available" if case_count > 0 else "no_cases",
+        "cases": cases,
+        "summary": {
+            "caseCount": case_count,
+            "withinTolerance": within_tolerance,
+            "mismatch": mismatch,
+        },
+    }
+
+
+_PRODUCT_ILLUSTRATION_EVIDENCE_PROVIDERS["P12TRF"] = build_p12trf_illustration_evidence
+
+
+@app.post("/api/client-error")
+async def api_client_error(request: Request) -> Dict[str, Any]:
+    """Receive client-side errors and log them to the server logs.
+
+    This lets us diagnose "blank screen" issues from pod logs without
+    needing direct access to the browser console.
+    """
+
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {"raw": await request.body()}  # type: ignore[assignment]
+
+    logger = logging.getLogger("client-errors")
+    try:
+        logger.error("Client error: %s", json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    except Exception:
+        logger.error("Client error (unserializable payload): %r", payload)
+
+    return {"status": "ok"}
+
+
+def build_p12trf_illustration(product_code: str, request: Dict[str, Any]) -> Dict[str, Any]:
+    """P12TRF-specific on-demand illustration provider.
+
+    This reuses the existing scenario projections as templates and
+    scales face-dependent fields to the requested face amount. It is a
+    POC-only approximation but uses the generic illustration shape so
+    other products can plug in richer behaviour later.
+    """
+
+    pmr = api_product_model_review_p12trf()
+    product_block = pmr.get("product") or {}
+
+    # Normalise request inputs with conservative defaults.
+    age_req = request.get("age")
+    try:
+        age_norm = int(age_req) if age_req is not None else None
+    except (TypeError, ValueError):
+        age_norm = None
+
+    term_req = request.get("termYears")
+    try:
+        term_years = int(term_req) if term_req is not None else None
+    except (TypeError, ValueError):
+        term_years = None
+
+    risk_class = (request.get("riskClass") or "").strip() or None
+    smoker_class = (request.get("smokerClass") or "").strip() or None
+    premium_mode_raw = (request.get("premiumMode") or "").strip()
+    premium_mode = premium_mode_raw.upper() or "ANNUAL"
+
+    face_req = request.get("faceAmount")
+    try:
+        face_amount = float(face_req) if face_req is not None else None
+    except (TypeError, ValueError):
+        face_amount = None
+
+    if term_years is None or term_years <= 0:
+        raise HTTPException(status_code=400, detail="termYears must be a positive integer.")
+    if face_amount is None or face_amount <= 0:
+        raise HTTPException(status_code=400, detail="faceAmount must be a positive number.")
+
+    # Reuse existing scenarios & projections as templates.
+    scen_and_rates = _build_p12trf_scenarios_and_rates()
+    scenarios = scen_and_rates.get("scenarios") or []
+    if not isinstance(scenarios, list) or not scenarios:
+        raise HTTPException(status_code=500, detail="No scenarios available for illustration.")
+
+    # Find a template scenario with matching term and, when possible,
+    # matching premium mode.
+    def _score_template(s: Dict[str, Any]) -> int:
+        score = 0
+        inputs = s.get("inputs") or {}
+        s_term = inputs.get("termYears")
+        s_mode = (inputs.get("premiumMode") or "").upper()
+        if isinstance(s_term, int) and s_term == term_years:
+            score += 10
+        if s_mode == premium_mode:
+            score += 3
+        return score
+
+    best: Optional[Dict[str, Any]] = None
+    best_score = -1
+    for s in scenarios:
+        if not isinstance(s, dict):
+            continue
+        score = _score_template(s)
+        if score > best_score:
+            best_score = score
+            best = s
+
+    if not best or best_score <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="No compatible scenario template found for requested termYears/premiumMode.",
+        )
+
+    inputs = best.get("inputs") or {}
+    try:
+        template_face = float(inputs.get("faceAmount") or 0.0)
+    except (TypeError, ValueError):
+        template_face = 0.0
+
+    if template_face <= 0.0:
+        template_face = face_amount
+
+    scale = face_amount / template_face if template_face not in (0.0, None) else 1.0
+
+    # Build scaled projection rows, enriching them with illustration-friendly
+    # columns such as cumulative premium, surrender value, and net amount at
+    # risk so the output table looks and feels like a real illustration grid.
+    projection_table = best.get("projectionTable") or []
+    rows: List[Dict[str, Any]] = []
+    cumulative_premium: Optional[float] = 0.0
+    for row in projection_table:
+        if not isinstance(row, dict):
+            continue
+        year = row.get("year")
+        attained_age = row.get("attainedAge")
+        premium = row.get("premium")
+        death_benefit = row.get("deathBenefit")
+        cash_value = row.get("cashValue")
+
+        # Adjust attained age if a numeric age was provided.
+        if age_norm is not None and isinstance(inputs.get("age"), int) and isinstance(attained_age, int):
+            base_issue_age = inputs.get("age")
+            try:
+                delta = age_norm - int(base_issue_age)
+                attained_age = attained_age + delta
+            except Exception:
+                pass
+
+        def _scaled(x: Any) -> Any:
+            try:
+                return float(x) * scale if x is not None else None
+            except Exception:
+                return x
+
+        scaled_premium = _scaled(premium)
+        scaled_death_benefit = _scaled(death_benefit)
+        scaled_cash_value = _scaled(cash_value)
+
+        # Track cumulative premium using numeric premiums only; when a row
+        # has a non-numeric premium we keep the last cumulative value.
+        cumulative_premium_value: Optional[float]
+        if isinstance(scaled_premium, (int, float)):
+            if cumulative_premium is None:
+                cumulative_premium = float(scaled_premium)
+            else:
+                cumulative_premium += float(scaled_premium)
+            cumulative_premium_value = cumulative_premium
+        else:
+            cumulative_premium_value = cumulative_premium
+
+        # For this POC term product we do not yet have explicit surrender
+        # charge modelling, so we expose a surrenderValue column that equals
+        # the cash value when it is present. This keeps the grid shape close
+        # to a real illustration without fabricating extra behaviour.
+        surrender_value: Optional[float]
+        if isinstance(scaled_cash_value, (int, float)):
+            surrender_value = float(scaled_cash_value)
+        else:
+            surrender_value = None
+
+        net_amount_at_risk: Optional[float]
+        if isinstance(scaled_death_benefit, (int, float)) and isinstance(scaled_cash_value, (int, float)):
+            net_amount_at_risk = float(scaled_death_benefit) - float(scaled_cash_value)
+        else:
+            net_amount_at_risk = None
+
+        rows.append(
+            {
+                "year": year,
+                "attainedAge": attained_age,
+                "premium": scaled_premium,
+                "cumulativePremium": cumulative_premium_value,
+                "deathBenefit": scaled_death_benefit,
+                "cashValue": scaled_cash_value,
+                "surrenderValue": surrender_value,
+                "netAmountAtRisk": net_amount_at_risk,
+                "status": row.get("status"),
+            }
+        )
+
+    years: List[Any] = []
+    for r in rows:
+        y = r.get("year")
+        if y is not None:
+            years.append(y)
+
+    # Lightweight decision hooks so a single projection is more actionable
+    # for an actuary or product partner.
+
+    def _first_break_even_year() -> Optional[int]:
+        """Return the first policy year where cash value >= cumulative premium.
+
+        This is intentionally simple and only considers rows with numeric
+        cumulativePremium and cashValue.
+        """
+
+        for r in rows:
+            year_val = r.get("year")
+            cv = r.get("cashValue")
+            cp = r.get("cumulativePremium")
+            if not isinstance(year_val, int):
+                continue
+            if not isinstance(cv, (int, float)) or not isinstance(cp, (int, float)):
+                continue
+            try:
+                if float(cv) >= float(cp):
+                    return year_val
+            except Exception:
+                continue
+        return None
+
+    def _compute_irr_for_horizon(horizon_year: int) -> Optional[float]:
+        """Approximate an IRR on premiums to cash value at a given horizon.
+
+        Cash flows are modelled as level outflows (premiums) each policy
+        year, with a single inflow equal to cash value at the horizon year.
+        The result is an annual effective rate when a sign change exists.
+        """
+
+        if horizon_year <= 0:
+            return None
+
+        # Index rows by year for quick lookup.
+        by_year: Dict[int, Dict[str, Any]] = {}
+        for r in rows:
+            y_val = r.get("year")
+            if isinstance(y_val, int):
+                by_year[y_val] = r
+
+        if horizon_year not in by_year:
+            return None
+
+        cashflows: List[float] = []
+        has_positive = False
+        has_negative = False
+
+        for y in range(1, horizon_year + 1):
+            row = by_year.get(y) or {}
+            prem = row.get("premium")
+            try:
+                prem_val = float(prem) if isinstance(prem, (int, float)) else 0.0
+            except Exception:
+                prem_val = 0.0
+            cf = -prem_val
+            if cf > 0:
+                has_positive = True
+            if cf < 0:
+                has_negative = True
+            cashflows.append(cf)
+
+        # Add terminal cash value at the same time as the last premium.
+        terminal = by_year.get(horizon_year) or {}
+        cv_term = terminal.get("cashValue")
+        try:
+            term_val = float(cv_term) if isinstance(cv_term, (int, float)) else 0.0
+        except Exception:
+            term_val = 0.0
+
+        if cashflows:
+            cashflows[-1] += term_val
+            if term_val > 0:
+                has_positive = True
+
+        if not (has_positive and has_negative):
+            return None
+
+        def _npv(rate: float) -> float:
+            total = 0.0
+            for t, cf in enumerate(cashflows):
+                try:
+                    total += cf / ((1.0 + rate) ** t)
+                except Exception:
+                    # Extremely unlikely (e.g. rate ~= -1); treat as large
+                    # magnitude to steer bisection away.
+                    total += float("inf") if cf > 0 else float("-inf")
+            return total
+
+        # Simple bisection between -99.9% and +100% annual effective rate.
+        low = -0.999
+        high = 1.0
+        npv_low = _npv(low)
+        npv_high = _npv(high)
+
+        if npv_low == 0.0:
+            return low
+        if npv_high == 0.0:
+            return high
+        if npv_low * npv_high > 0:
+            # No sign change → no guaranteed root in this range.
+            return None
+
+        mid = 0.0
+        for _ in range(60):
+            mid = (low + high) / 2.0
+            npv_mid = _npv(mid)
+            if abs(npv_mid) < 1e-6:
+                break
+            if npv_low * npv_mid < 0:
+                high = mid
+                npv_high = npv_mid
+            else:
+                low = mid
+                npv_low = npv_mid
+        return mid
+
+    max_year: Optional[int] = None
+    for r in rows:
+        y_val = r.get("year")
+        if isinstance(y_val, int):
+            if max_year is None or y_val > max_year:
+                max_year = y_val
+
+    break_even_year = _first_break_even_year()
+
+    irr_to_10: Optional[float] = None
+    irr_to_20: Optional[float] = None
+    irr_to_final: Optional[float] = None
+    if max_year is not None:
+        if max_year >= 10:
+            irr_to_10 = _compute_irr_for_horizon(10)
+        if max_year >= 20:
+            irr_to_20 = _compute_irr_for_horizon(20)
+        irr_to_final = _compute_irr_for_horizon(max_year)
+
+    return {
+        "productCode": product_block.get("code") or product_code,
+        "productName": product_block.get("name"),
+        "request": {
+            "age": age_norm,
+            "termYears": term_years,
+            "riskClass": risk_class,
             "smokerClass": smoker_class,
             "faceAmount": face_amount,
             "premiumMode": premium_mode,
