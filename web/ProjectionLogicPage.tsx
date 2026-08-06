@@ -50,7 +50,7 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
   const metrics = illustration?.metrics ?? {};
   const missingCount = graphNodes.filter((node) => node.status === "missing").length;
   const provisionalCount = graphNodes.filter((node) => node.status === "provisional").length;
-  const filedCandidates = ["coi", "surrender", "fees"].flatMap((mechanic) => {
+  const filedCandidates = ["coi", "surrender", "fees", "nar_factors", "corridor"].flatMap((mechanic) => {
     const grouped = (executableMechanics?.candidates?.[mechanic] || []).filter(
       (candidate: any) => candidate.reviewStatus === "review_required" && candidate.rows?.length,
     );
@@ -159,7 +159,7 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
         },
       }));
       await runProjection();
-      const label = mechanic === "coi" ? "COI table" : mechanic === "surrender" ? "surrender schedule" : "fee schedule";
+      const label = mechanic === "coi" ? "COI table" : mechanic === "surrender" ? "surrender schedule" : mechanic === "nar_factors" ? "NAR factor" : mechanic === "corridor" ? "minimum death-benefit corridor" : "fee schedule";
       const remaining = Number(body.remainingCandidateCount || 0);
       setRunMessage(`Filed ${label} accepted and applied (${body.activeRowCount} active rows).${remaining ? ` ${remaining} additional candidate${remaining === 1 ? "" : "s"} available for review.` : ""}`);
     } catch (err: any) {
@@ -335,13 +335,13 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
               const first = candidateRows[0] || {};
               const last = candidateRows[candidateRows.length - 1] || {};
               const provenance = first.provenance || {};
-              const value = (row: any) => mechanic === "coi" ? row.rate : mechanic === "surrender" ? row.charge : row.amount;
+              const value = (row: any) => mechanic === "coi" ? row.rate : mechanic === "surrender" ? row.charge : mechanic === "nar_factors" ? row.factor : mechanic === "corridor" ? row.percentage : row.amount;
               const feeComponents = (candidate.components || []).map((item: string) => item.replaceAll("_", " ")).join(", ");
               return (
                 <article key={candidate.id} className="filed-mechanics-review__candidate">
                   <div>
                     <span className="filed-mechanics-review__badge">Review required</span>
-                    <h3>{mechanic === "coi" ? "COI rate table" : mechanic === "surrender" ? "Surrender charge schedule" : "Policy fee schedule"}</h3>
+                    <h3>{mechanic === "coi" ? "COI rate table" : mechanic === "surrender" ? "Surrender charge schedule" : mechanic === "nar_factors" ? "Net amount at risk factor" : mechanic === "corridor" ? "Minimum death benefit percentages" : "Policy fee schedule"}</h3>
                   </div>
                   <dl>
                     <div><dt>Rows</dt><dd>{candidate.rowCount || candidateRows.length}</dd></div>

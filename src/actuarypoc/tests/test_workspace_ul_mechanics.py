@@ -255,7 +255,9 @@ def test_pdf_extraction_does_not_promote_specimen_policyholder_inputs() -> None:
 
     mechanics = _extract_pdf_page("ICC18 S18PRUL.pdf", 1, page)
 
-    assert mechanics == {"coi": [], "surrender": [], "fees": []}
+    assert mechanics == {
+        "coi": [], "surrender": [], "fees": [], "nar_factors": [], "corridor": [],
+    }
 
 
 def test_reads_coi_applicability_from_specimen_policy_information() -> None:
@@ -314,6 +316,29 @@ def test_extracts_premium_load_and_monthly_admin_charge(monkeypatch) -> None:
     assert admin[0]["fee_unit"] == "monthly_fixed"
 
 
+def test_extracts_nar_factor_and_minimum_death_benefit_table(monkeypatch) -> None:
+    class Page:
+        def __init__(self, text: str): self.text = text
+        def extract_text(self) -> str: return self.text
+    class Reader:
+        pages = [Page("""POLICY SPECIFICATIONS [SPECIMEN] ICC18 S18PRUL
+        Net Amount at Risk Factor: [1.0016516]
+        Table of Minimum Death Benefit Percentages
+        Policy Year Minimum Death Benefit Percentage
+        1 555% 2 507% 3 491% 4+ 101%
+        """)]
+    monkeypatch.setattr(mechanics_extractor, "PdfReader", lambda stream: Reader())
+
+    result = extract_ul_mechanics("ICC18 S18PRUL.pdf", b"pdf")
+
+    assert result["mechanics"]["nar_factors"][0]["factor"] == 1.0016516
+    corridor = result["mechanics"]["corridor"]
+    assert len(corridor) == 121
+    assert corridor[0]["percentage"] == 5.55
+    assert corridor[3]["percentage"] == 1.01
+    assert corridor[-1]["percentage"] == 1.01
+
+
 def test_workspace_analysis_reads_pdf_candidates_and_marks_them_for_review(monkeypatch) -> None:
     class Response:
         def read(self) -> bytes:
@@ -364,6 +389,8 @@ def test_workspace_analysis_reads_pdf_candidates_and_marks_them_for_review(monke
         "coi": "filed_evidence_review_required",
         "surrender": "missing_or_incomplete",
         "fees": "missing_or_incomplete",
+        "nar_factors": "missing_or_incomplete",
+        "corridor": "missing_or_incomplete",
     }
     assert len(artifact["candidates"]["coi"]) == 1
     assert artifact["candidates"]["coi"][0]["rowCount"] == 1
@@ -443,7 +470,7 @@ def test_projection_executes_rates_surrender_and_fee_schedules() -> None:
     )
 
     row = projection["rows"][0]
-    assert row["coiCharge"] == 96.94
+    assert row["coiCharge"] == pytest.approx(97.0727917051)
     assert row["policyFee"] == 120.0
     assert row["surrenderCharge"] == 5_000.0
     assert projection["mechanicsExecution"]["coi"]["fullyApplied"] is True
@@ -470,7 +497,7 @@ def test_projection_retains_placeholder_for_unmatched_coi_selector() -> None:
         horizon_years=1,
     )
 
-    assert projection["rows"][0]["coiCharge"] == 400.0
+    assert projection["rows"][0]["coiCharge"] == pytest.approx(400.0)
     assert projection["mechanicsExecution"]["coi"]["fallbackYears"] == [1]
 
 
@@ -527,7 +554,7 @@ def test_projection_selects_attained_age_sex_and_class_coi_row() -> None:
         horizon_years=1,
     )
 
-    assert projection["rows"][0]["coiCharge"] == 193.88
+    assert projection["rows"][0]["coiCharge"] == pytest.approx(194.124377314)
     assert projection["mechanicsExecution"]["coi"]["fullyApplied"] is True
 
 
@@ -592,6 +619,51 @@ def test_projection_executes_premium_load_admin_and_monthly_expense_charges() ->
 
     row = projection["rows"][0]
     assert row["premiumLoad"] == 300.0
-    assert row["policyFee"] == 371.4
-    assert row["endingPolicyValue"] == pytest.approx(1982.6)
+    assert row["policyFee"] == pytest.approx(371.4)
+    assert row["endingPolicyValue"] == pytest.approx(1974.268449, rel=1e-6)
     assert projection["mechanicsExecution"]["fees"]["fullyApplied"] is True
+
+
+def test_projection_applies_filed_nar_factor_and_cvat_corridor() -> None:
+    config = server.load_ul_runtime_config("ICC18 P18PR UL")
+    config.executable_mechanics = {
+        "coi": [{"duration": 1, "rate": 0.0, "rate_unit": "per_1000_monthly"}],
+        "nar_factors": [{"factor": 1.0016516}],
+        "corridor": [{"duration": 1, "percentage": 2.0}],
+    }
+
+    projection, _ = server._run_ul_projection(
+        request={"age": 45, "faceAmount": 100_000, "modalPremium": 100_000},
+        config=config,
+        horizon_years=1,
+    )
+
+    row = projection["rows"][0]
+    assert row["deathBenefit"] == pytest.approx(row["cashValue"] * 2.0)
+    assert row["netAmountAtRisk"] == pytest.approx(row["deathBenefit"] - row["cashValue"])
+    assert row["coiNetAmountAtRisk"] == pytest.approx(
+        row["deathBenefit"] / 1.0016516 - row["cashValue"]
+    )
+    assert row["narFactor"] == 1.0016516
+    assert row["minimumDeathBenefitPercentage"] == 2.0
+
+
+def test_projection_respects_modal_premium_timing() -> None:
+    config = server.load_ul_runtime_config("ICC18 P18PR UL")
+    config.executable_mechanics = {
+        "coi": [{"duration": 1, "rate": 0.0, "rate_unit": "per_1000_monthly"}],
+        "fees": [{"component": "administrative", "duration": None, "amount": 0.0, "fee_unit": "monthly_fixed"}],
+    }
+    annual, _ = server._run_ul_projection(
+        request={"faceAmount": 100_000, "modalPremium": 1_200, "premiumMode": "ANNUAL"},
+        config=config,
+        horizon_years=1,
+    )
+    monthly, _ = server._run_ul_projection(
+        request={"faceAmount": 100_000, "modalPremium": 100, "premiumMode": "MONTHLY"},
+        config=config,
+        horizon_years=1,
+    )
+
+    assert annual["rows"][0]["premium"] == monthly["rows"][0]["premium"] == 1_200
+    assert annual["rows"][0]["cashValue"] > monthly["rows"][0]["cashValue"]

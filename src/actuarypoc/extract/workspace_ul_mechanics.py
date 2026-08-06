@@ -23,6 +23,7 @@ MAX_DURATION = 121
 COI_UNITS = {"per_1000_monthly", "per_1000_annual", "percent_nar_annual"}
 SURRENDER_UNITS = {"percent_face", "per_1000_face", "fixed"}
 FEE_UNITS = {"annual_fixed", "monthly_fixed", "modal_fixed", "per_1000_face_annual", "percent_premium"}
+MECHANIC_KEYS = ("coi", "surrender", "fees", "nar_factors", "corridor")
 PDF_REVIEW_REQUIRED = "review_required"
 
 
@@ -121,7 +122,7 @@ def _number_pairs(section: str) -> List[Tuple[int, float, bool]]:
 def _extract_pdf_page(filename: str, page_number: int, text: str) -> Dict[str, List[Dict[str, Any]]]:
     """Extract only recognized, explicitly headed UL tables from one PDF page."""
 
-    mechanics: Dict[str, List[Dict[str, Any]]] = {"coi": [], "surrender": [], "fees": []}
+    mechanics: Dict[str, List[Dict[str, Any]]] = {key: [] for key in MECHANIC_KEYS}
     compact = re.sub(r"[ \t]+", " ", text or "")
     no_space = re.sub(r"\s+", "", compact).upper()
     if "ICC18S18PRUL" not in no_space or "SPECIMEN" not in no_space:
@@ -218,7 +219,7 @@ def _extract_pdf_page(filename: str, page_number: int, text: str) -> Dict[str, L
 
 
 def _read_pdf_mechanics(filename: str, content: bytes) -> Dict[str, Any]:
-    mechanics: Dict[str, List[Dict[str, Any]]] = {"coi": [], "surrender": [], "fees": []}
+    mechanics: Dict[str, List[Dict[str, Any]]] = {key: [] for key in MECHANIC_KEYS}
     warnings: List[str] = []
     try:
         reader = PdfReader(io.BytesIO(content))
@@ -267,6 +268,49 @@ def _read_pdf_mechanics(filename: str, content: bytes) -> Dict[str, Any]:
             "component": "administrative", "duration": None, "premium_mode": None,
             "amount": float(admin_match.group(1)), "fee_unit": "monthly_fixed", "provenance": provenance,
         })
+    nar_heading_match = re.search(r"Net\s+Amount\s+at\s+Risk\s+Factor\s*:", full_text, re.IGNORECASE)
+    nar_factor = None
+    if nar_heading_match:
+        # Multi-column specification pages can place adjacent headings before
+        # their values. Select the factor-shaped bracketed value from the
+        # nearby block instead of assuming it immediately follows the label.
+        nearby = full_text[nar_heading_match.end():nar_heading_match.end() + 240]
+        nar_factor = next(
+            (value for raw in re.findall(r"\[\s*([0-9]+(?:\.[0-9]+)?)\s*\]", nearby)
+             for value in [float(raw)] if 1.0 <= value <= 1.1),
+            None,
+        )
+    if nar_factor is not None:
+        page_number = next((index for index, text in enumerate(page_texts, 1) if "Net Amount at Risk Factor" in text), 1)
+        provenance = _pdf_provenance(filename, page_number, "Net Amount at Risk Factor")
+        mechanics["nar_factors"].append({"factor": nar_factor, "provenance": provenance})
+
+    corridor_heading = "Table of Minimum Death Benefit Percentages"
+    corridor_page = next(
+        ((index, text) for index, text in enumerate(page_texts, 1) if corridor_heading in text),
+        None,
+    )
+    if corridor_page:
+        page_number, page_text = corridor_page
+        pairs = _number_pairs(page_text.split(corridor_heading, 1)[1])
+        by_duration = {duration: (value, terminal) for duration, value, terminal in pairs}
+        terminal = max(by_duration, default=0)
+        if terminal and set(range(1, terminal + 1)) <= set(by_duration):
+            provenance = _pdf_provenance(filename, page_number, corridor_heading)
+            for duration in range(1, terminal + 1):
+                value, is_terminal = by_duration[duration]
+                mechanics["corridor"].append({
+                    "duration": duration,
+                    "percentage": value / 100.0,
+                    "provenance": dict(provenance),
+                })
+                if is_terminal:
+                    for later_duration in range(duration + 1, MAX_DURATION + 1):
+                        mechanics["corridor"].append({
+                            "duration": later_duration,
+                            "percentage": value / 100.0,
+                            "provenance": {**provenance, "expandedFrom": f"{duration}+"},
+                        })
     return {"mechanics": mechanics, "warnings": warnings}
 
 
@@ -277,7 +321,7 @@ def extract_ul_mechanics(filename: str, content: bytes) -> Dict[str, Any]:
         extracted = _read_pdf_mechanics(filename, content)
         return {"version": 2, **extracted}
 
-    mechanics: Dict[str, List[Dict[str, Any]]] = {"coi": [], "surrender": [], "fees": []}
+    mechanics: Dict[str, List[Dict[str, Any]]] = {key: [] for key in MECHANIC_KEYS}
     warnings: List[str] = []
     for sheet, frame in _read_tables(filename, content):
         frame = frame.rename(columns={column: _name(column) for column in frame.columns})
@@ -417,6 +461,13 @@ def usable_mechanics(extracted: Dict[str, Any]) -> Dict[str, Any]:
             complete_components = False
     if fees and complete_components:
         usable["fees"] = fees
+    nar_factors = [row for row in (raw.get("nar_factors") or []) if (row.get("provenance") or {}).get("reviewStatus") != PDF_REVIEW_REQUIRED]
+    if nar_factors:
+        usable["nar_factors"] = nar_factors
+    corridor = [row for row in (raw.get("corridor") or []) if (row.get("provenance") or {}).get("reviewStatus") != PDF_REVIEW_REQUIRED]
+    corridor_durations = sorted({row.get("duration") for row in corridor})
+    if corridor and corridor_durations == list(range(1, max(corridor_durations) + 1)):
+        usable["corridor"] = corridor
     return usable
 
 
@@ -426,8 +477,8 @@ def accept_filed_mechanic(
 ) -> Dict[str, Any]:
     """Accept one complete filed-PDF candidate set and make only that mechanic executable."""
 
-    if mechanic not in {"coi", "surrender", "fees"}:
-        raise ValueError("mechanic must be coi, surrender, or fees")
+    if mechanic not in set(MECHANIC_KEYS):
+        raise ValueError(f"mechanic must be one of {', '.join(MECHANIC_KEYS)}")
     result = deepcopy(artifact)
     candidates = list((result.get("candidates") or {}).get(mechanic) or [])
     candidate = None
@@ -448,7 +499,7 @@ def accept_filed_mechanic(
     if any((row.get("provenance") or {}).get("reviewStatus") != PDF_REVIEW_REQUIRED for row in rows):
         raise ValueError(f"Filed {mechanic} candidate is not awaiting review")
     durations = sorted({row.get("duration") for row in rows if row.get("duration") is not None})
-    if mechanic in {"coi", "surrender"} and durations:
+    if mechanic in {"coi", "surrender", "corridor"} and durations:
         expected = list(range(1, max(durations) + 1))
         if durations != expected:
             raise ValueError(f"Filed {mechanic} candidate has gaps in its duration schedule")
@@ -480,6 +531,8 @@ def accept_filed_mechanic(
         "coi": ("rate", "rate_unit"),
         "surrender": ("charge", "charge_unit"),
         "fees": ("amount", "fee_unit"),
+        "nar_factors": ("factor",),
+        "corridor": ("percentage",),
     }[mechanic]
     deduplicated: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
     for active_row in active_rows:
