@@ -2072,6 +2072,11 @@ def api_accept_filed_mechanic(
         "mechanic": mechanic,
         "review": (reviewed.get("reviews") or {}).get(payload.candidateId or mechanic),
         "status": (reviewed.get("status") or {}).get(mechanic),
+        "activeRowCount": len((reviewed.get("usable") or {}).get(mechanic) or []),
+        "remainingCandidateCount": sum(
+            item.get("reviewStatus") == "review_required"
+            for item in ((reviewed.get("candidates") or {}).get(mechanic) or [])
+        ),
     }
 
 

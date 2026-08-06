@@ -176,21 +176,45 @@ def test_reload_reapplies_accepted_filed_mechanics(monkeypatch) -> None:
 
 
 def test_accepts_only_selected_filed_candidate() -> None:
-    def candidate(candidate_id: str, filename: str, rate: float) -> dict:
+    def candidate(candidate_id: str, filename: str, rate: float, tobacco: str) -> dict:
         return {
             "id": candidate_id, "mechanic": "coi", "filename": filename,
             "reviewStatus": "review_required", "rows": [{
-                "duration": 1, "rate": rate, "rate_unit": "per_1000_monthly",
+                "duration": 1, "sex": "M", "risk_class": "Standard", "tobacco_status": tobacco,
+                "rate": rate, "rate_unit": "per_1000_monthly",
                 "provenance": {"filename": filename, "sourceType": "filed_pdf", "reviewStatus": "review_required"},
             }],
         }
-    artifact = {"candidates": {"coi": [candidate("a", "a.pdf", 0.1), candidate("b", "b.pdf", 0.2)]}, "mechanics": {"coi": []}}
+    artifact = {"candidates": {"coi": [
+        candidate("a", "a.pdf", 0.1, "Non-Tobacco"),
+        candidate("b", "b.pdf", 0.2, "Tobacco"),
+    ]}, "mechanics": {"coi": []}}
 
     accepted = accept_filed_mechanic(artifact, "coi", candidate_id="b")
 
     assert accepted["usable"]["coi"][0]["rate"] == 0.2
     assert accepted["candidates"]["coi"][0]["reviewStatus"] == "review_required"
     assert accepted["candidates"]["coi"][1]["reviewStatus"] == "accepted"
+
+    combined = accept_filed_mechanic(accepted, "coi", candidate_id="a")
+    assert len(combined["usable"]["coi"]) == 2
+    assert {row["tobacco_status"] for row in combined["usable"]["coi"]} == {"Tobacco", "Non-Tobacco"}
+
+
+def test_rejects_conflicting_filed_candidates_for_same_selector() -> None:
+    def candidate(candidate_id: str, rate: float) -> dict:
+        return {
+            "id": candidate_id, "mechanic": "coi", "reviewStatus": "review_required", "rows": [{
+                "duration": 1, "sex": "M", "risk_class": "Standard", "tobacco_status": "Tobacco",
+                "rate": rate, "rate_unit": "per_1000_monthly",
+                "provenance": {"sourceType": "filed_pdf", "reviewStatus": "review_required"},
+            }],
+        }
+    artifact = {"candidates": {"coi": [candidate("a", 0.1), candidate("b", 0.2)]}}
+    accepted = accept_filed_mechanic(artifact, "coi", candidate_id="a")
+
+    with pytest.raises(ValueError, match="conflict"):
+        accept_filed_mechanic(accepted, "coi", candidate_id="b")
 
 
 def test_pdf_extraction_does_not_promote_specimen_policyholder_inputs() -> None:

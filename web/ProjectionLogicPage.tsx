@@ -159,7 +159,9 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
         },
       }));
       await runProjection();
-      setRunMessage(`Filed ${mechanic === "coi" ? "COI table" : mechanic === "surrender" ? "surrender schedule" : "fee schedule"} accepted and applied.`);
+      const label = mechanic === "coi" ? "COI table" : mechanic === "surrender" ? "surrender schedule" : "fee schedule";
+      const remaining = Number(body.remainingCandidateCount || 0);
+      setRunMessage(`Filed ${label} accepted and applied (${body.activeRowCount} active rows).${remaining ? ` ${remaining} additional candidate${remaining === 1 ? "" : "s"} available for review.` : ""}`);
     } catch (err: any) {
       setError(err?.message || "The filed table could not be accepted.");
     } finally {
@@ -351,7 +353,7 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
                     <div><dt>Range</dt><dd>Duration {first.duration ?? "—"}: {value(first) ?? "—"} → duration {last.duration ?? "—"}: {value(last) ?? "—"}</dd></div>
                   </dl>
                   <button type="button" className="button" disabled={acceptingFiledMechanic !== null} onClick={() => acceptFiledMechanic(candidate)}>
-                    {acceptingFiledMechanic === candidate.id ? "Accepting…" : "Accept and use in projection"}
+                    {acceptingFiledMechanic === candidate.id ? "Accepting…" : "Accept and add to projection"}
                   </button>
                 </article>
               );

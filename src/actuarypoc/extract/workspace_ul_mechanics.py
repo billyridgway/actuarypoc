@@ -400,14 +400,45 @@ def accept_filed_mechanic(
             "reviewedBy": reviewed_by,
             "reviewedAt": accepted_at,
         }
-    validation_artifact = {"mechanics": {mechanic: rows}}
-    validated = usable_mechanics(validation_artifact)
-    if mechanic not in validated:
-        raise ValueError(f"Filed {mechanic} candidate is incomplete and cannot be executed")
-    result.setdefault("usable", {})[mechanic] = rows
     if candidate is not None:
         candidate["rows"] = rows
         candidate["reviewStatus"] = "accepted"
+    active_rows = rows
+    if candidate is not None:
+        active_rows = [
+            row
+            for item in candidates
+            if item.get("reviewStatus") == "accepted"
+            for row in (item.get("rows") or [])
+        ]
+    selector_fields = (
+        "duration", "attained_age", "sex", "risk_class", "tobacco_status",
+        "issue_age", "premium_mode",
+    )
+    value_fields = {
+        "coi": ("rate", "rate_unit"),
+        "surrender": ("charge", "charge_unit"),
+        "fees": ("amount", "fee_unit"),
+    }[mechanic]
+    deduplicated: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+    for active_row in active_rows:
+        selector = tuple(active_row.get(field) for field in selector_fields)
+        existing = deduplicated.get(selector)
+        if existing is not None:
+            existing_value = tuple(existing.get(field) for field in value_fields)
+            incoming_value = tuple(active_row.get(field) for field in value_fields)
+            if existing_value != incoming_value:
+                raise ValueError(
+                    f"Filed {mechanic} candidates conflict for selector {selector}"
+                )
+            continue
+        deduplicated[selector] = active_row
+    active_rows = list(deduplicated.values())
+    validation_artifact = {"mechanics": {mechanic: active_rows}}
+    validated = usable_mechanics(validation_artifact)
+    if mechanic not in validated:
+        raise ValueError(f"Filed {mechanic} candidate is incomplete and cannot be executed")
+    result.setdefault("usable", {})[mechanic] = active_rows
     synthetic = result.get("synthetic") or {}
     synthetic.pop(mechanic, None)
     result.setdefault("status", {})[mechanic] = "executable"
@@ -419,6 +450,7 @@ def accept_filed_mechanic(
         "reviewedBy": reviewed_by,
         "reviewedAt": accepted_at,
         "rowCount": len(rows),
+        "activeRowCount": len(active_rows),
         "sourceType": "filed_pdf",
     }
     return result
