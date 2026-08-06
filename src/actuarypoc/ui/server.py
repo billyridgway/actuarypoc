@@ -9931,6 +9931,62 @@ def validate_ul_runtime_config(config: UlRuntimeConfig, horizon_years: int) -> L
     return warnings
 
 
+def _reconcile_ul_projection_rows(rows: List[Dict[str, Any]], tolerance: float = 0.01) -> Dict[str, Any]:
+    """Reconcile annual presentation rows to their executed policy mechanics."""
+
+    failures: List[Dict[str, Any]] = []
+    max_residual = 0.0
+    check_count = 0
+
+    def check(year: int, name: str, actual: float, expected: float) -> None:
+        nonlocal max_residual, check_count
+        residual = abs(actual - expected)
+        max_residual = max(max_residual, residual)
+        check_count += 1
+        if residual > tolerance:
+            failures.append({
+                "year": year,
+                "check": name,
+                "actual": actual,
+                "expected": expected,
+                "residual": residual,
+            })
+
+    for row in rows:
+        year = int(row.get("year") or 0)
+        opening = float(row.get("openingPolicyValue") or 0.0)
+        premium = float(row.get("annualPremium") or row.get("premium") or 0.0)
+        premium_load = float(row.get("premiumLoad") or 0.0)
+        coi = float(row.get("coiCharge") or 0.0)
+        fees = float(row.get("policyFee") or 0.0)
+        interest = float(row.get("guaranteedInterest") or 0.0)
+        ending = float(row.get("endingPolicyValue") or row.get("policyValue") or 0.0)
+        cash = float(row.get("cashValue") or 0.0)
+        surrender_charge = float(row.get("surrenderCharge") or 0.0)
+        surrender = float(row.get("surrenderValue") or 0.0)
+        death_benefit = float(row.get("deathBenefit") or 0.0)
+        nar = float(row.get("netAmountAtRisk") or 0.0)
+        nar_factor = float(row.get("narFactor") or 1.0)
+        coi_nar = float(row.get("coiNetAmountAtRisk") or 0.0)
+        corridor = float(row.get("minimumDeathBenefitPercentage") or 1.0)
+
+        check(year, "policy_value_roll_forward", ending, opening + premium - premium_load - coi - fees + interest)
+        check(year, "cash_value", cash, ending)
+        check(year, "surrender_value", surrender, max(cash - surrender_charge, 0.0))
+        check(year, "net_amount_at_risk", nar, max(death_benefit - cash, 0.0))
+        check(year, "coi_net_amount_at_risk", coi_nar, max(death_benefit / nar_factor - cash, 0.0))
+        check(year, "minimum_death_benefit", death_benefit, max(float(row.get("faceAmount") or 0.0), corridor * cash))
+
+    return {
+        "passed": not failures,
+        "tolerance": tolerance,
+        "checkCount": check_count,
+        "maxResidual": max_residual,
+        "failedYears": sorted({failure["year"] for failure in failures}),
+        "failures": failures,
+    }
+
+
 def _run_ul_projection(
     *, request: Dict[str, Any], config: UlRuntimeConfig, horizon_years: int = 30
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -10189,6 +10245,7 @@ def _run_ul_projection(
                 "coiNetAmountAtRisk": max(death_benefit / nar_factor - cash_value, 0.0),
                 "narFactor": nar_factor,
                 "minimumDeathBenefitPercentage": corridor_percentage,
+                "faceAmount": face_amount,
                 "status": None,
             }
         )
@@ -10231,6 +10288,7 @@ def _run_ul_projection(
         final_surrender = last.get("surrenderValue") if isinstance(last.get("surrenderValue"), (int, float)) else None
         final_nar = last.get("netAmountAtRisk") if isinstance(last.get("netAmountAtRisk"), (int, float)) else None
 
+    reconciliation = _reconcile_ul_projection_rows(rows)
     projection = {
         "years": years,
         "rows": rows,
@@ -10252,6 +10310,7 @@ def _run_ul_projection(
             }
             for mechanic, years in fallback_years.items()
         },
+        "reconciliation": reconciliation,
     }
 
     normalised_request = {

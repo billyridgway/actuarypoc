@@ -54,6 +54,7 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
   const ruleNodes = graphNodes.filter((node) => node.kind === "rule" || (node.kind === "unmodeled" && !node.inputId));
   const rows = (illustration?.rows ?? []) as WorkspaceRow[];
   const metrics = illustration?.metrics ?? {};
+  const reconciliation = illustration?.reconciliation;
   const missingCount = graphNodes.filter((node) => node.status === "missing").length;
   const provisionalCount = graphNodes.filter((node) => node.status === "provisional").length;
   const filedCandidates = ["coi", "surrender", "fees", "nar_factors", "corridor"].flatMap((mechanic) => {
@@ -444,6 +445,16 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
               <article><span>Final surrender value</span><strong>{formatCurrency(metrics.finalSurrenderValue ?? rows[rows.length - 1]?.surrenderValue)}</strong></article>
               <article><span>Final net amount at risk</span><strong>{formatCurrency(metrics.finalNetAmountAtRisk ?? rows[rows.length - 1]?.netAmountAtRisk)}</strong></article>
             </div>
+            {reconciliation && (
+              <div className={`logic-results__reconciliation ${reconciliation.passed ? "is-passed" : "is-failed"}`} role="status">
+                <strong>{reconciliation.passed ? "Projection ledger reconciled" : "Projection reconciliation failed"}</strong>
+                <span>
+                  {reconciliation.passed
+                    ? `${reconciliation.checkCount} calculation checks passed across ${rows.length} policy years. Maximum residual ${formatCurrency(reconciliation.maxResidual)}.`
+                    : `${reconciliation.failures?.length || 0} checks failed in policy years ${(reconciliation.failedYears || []).join(", ")}.`}
+                </span>
+              </div>
+            )}
             <ProjectionChart rows={rows} />
             <details className="logic-results__ledger">
               <summary>{rows.length}-year annual projection ledger</summary>

@@ -870,6 +870,27 @@ details > summary {
   line-height: 1.45;
 }
 
+.logic-results__reconciliation {
+  display: grid;
+  gap: 0.25rem;
+  margin: 1rem 0;
+  padding: 0.85rem 1rem;
+  border: 1px solid;
+  border-radius: 0.75rem;
+}
+
+.logic-results__reconciliation.is-passed {
+  border-color: #78c89a;
+  background: #ecfbf2;
+  color: #126538;
+}
+
+.logic-results__reconciliation.is-failed {
+  border-color: #e28b8b;
+  background: #fff0f0;
+  color: #9f2020;
+}
+
 .logic-workspace__success {
   background: var(--success-soft);
   border: 1px solid color-mix(in srgb, var(--success) 45%, var(--border));

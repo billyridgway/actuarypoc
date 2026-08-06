@@ -667,3 +667,65 @@ def test_projection_respects_modal_premium_timing() -> None:
 
     assert annual["rows"][0]["premium"] == monthly["rows"][0]["premium"] == 1_200
     assert annual["rows"][0]["cashValue"] > monthly["rows"][0]["cashValue"]
+
+
+def test_complete_filing_projection_reconciles_every_annual_row() -> None:
+    config = server.load_ul_runtime_config("ICC18 P18PR UL")
+    config.executable_mechanics = {
+        "coi": [
+            {"duration": year, "rate": 0.1142 + year / 1000, "rate_unit": "per_1000_monthly"}
+            for year in range(1, 31)
+        ],
+        "fees": [
+            {"component": "premium_expense", "duration": year, "amount": 0.10, "fee_unit": "percent_premium"}
+            for year in range(1, 11)
+        ] + [
+            {"component": "administrative", "duration": None, "amount": 12.0, "fee_unit": "monthly_fixed"},
+        ] + [
+            {"component": "monthly_expense", "duration": year, "amount": 18.95, "fee_unit": "monthly_fixed"}
+            for year in range(1, 31)
+        ],
+        "surrender": [
+            {"duration": year, "charge": max(20 - year, 0) * 500.0, "charge_unit": "fixed"}
+            for year in range(1, 31)
+        ],
+        "nar_factors": [{"factor": 1.0016516}],
+        "corridor": [
+            {"duration": year, "percentage": max(1.01, 5.55 - (year - 1) * 0.15)}
+            for year in range(1, 31)
+        ],
+    }
+
+    projection, _ = server._run_ul_projection(
+        request={
+            "age": 45, "faceAmount": 100_000, "modalPremium": 250,
+            "premiumMode": "MONTHLY", "sex": "M", "riskClass": "Standard",
+            "tobaccoStatus": "Non-Tobacco",
+        },
+        config=config,
+        horizon_years=30,
+    )
+
+    reconciliation = projection["reconciliation"]
+    assert reconciliation["passed"] is True
+    assert reconciliation["checkCount"] == 180
+    assert reconciliation["failedYears"] == []
+    assert reconciliation["maxResidual"] <= 0.01
+
+
+def test_reconciliation_identifies_the_failed_year_and_formula() -> None:
+    row = {
+        "year": 7, "openingPolicyValue": 1_000.0, "annualPremium": 100.0,
+        "premiumLoad": 0.0, "coiCharge": 10.0, "policyFee": 5.0,
+        "guaranteedInterest": 20.0, "endingPolicyValue": 999.0,
+        "cashValue": 999.0, "surrenderCharge": 0.0, "surrenderValue": 999.0,
+        "deathBenefit": 1_100.0, "netAmountAtRisk": 101.0,
+        "narFactor": 1.0, "coiNetAmountAtRisk": 101.0,
+        "minimumDeathBenefitPercentage": 1.0, "faceAmount": 1_100.0,
+    }
+
+    reconciliation = server._reconcile_ul_projection_rows([row])
+
+    assert reconciliation["passed"] is False
+    assert reconciliation["failedYears"] == [7]
+    assert reconciliation["failures"][0]["check"] == "policy_value_roll_forward"
