@@ -26,6 +26,12 @@ const initialGraphInputs = (snapshot: any) => {
   return values;
 };
 
+const REQUIRED_PROJECTION_SELECTORS = [
+  ["sex", "sex"],
+  ["risk_class", "risk class"],
+  ["tobacco_status", "tobacco / nicotine status"],
+] as const;
+
 export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapshot, workspaceId }) => {
   const [illustration, setIllustration] = React.useState(snapshot?.illustration ?? null);
   const [projectionGraph, setProjectionGraph] = React.useState<ProjectionGraphDefinition | null>(snapshot?.projectionGraph ?? null);
@@ -60,6 +66,10 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
       ? [{ id: mechanic, mechanic, rows: legacyRows, rowCount: legacyRows.length }]
       : [];
   });
+  const missingSelectors = REQUIRED_PROJECTION_SELECTORS
+    .filter(([key]) => !String(values[key] ?? "").trim())
+    .map(([, label]) => label);
+  const selectorReady = missingSelectors.length === 0;
 
   const updateInput = (inputId: string, value: string) => {
     setValues((current) => ({ ...current, [inputId]: value }));
@@ -72,6 +82,10 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
     const modalPremium = Number(values.premium);
     const policyFeeText = String(values.policy_fee ?? "").trim();
     const policyFeeAnnual = policyFeeText === "" ? undefined : Number(policyFeeText);
+    if (!selectorReady) {
+      setError(`Complete ${missingSelectors.join(", ")} before running the projection so the correct filed tables can be selected.`);
+      return;
+    }
     if (!Number.isInteger(issueAge) || issueAge < 0 || issueAge > 120) {
       setError("Issue age must be a whole number from 0 to 120.");
       return;
@@ -287,8 +301,10 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
         </div>
         <div className="logic-workspace__actions">
           <a className="button button-secondary" href={`/web?workspace=${encodeURIComponent(workspaceId)}&view=details`}>More details</a>
-          <span className={`logic-workspace__run-state${dirty ? " is-dirty" : ""}`}>{dirty ? "Inputs changed" : "Projection current"}</span>
-          <button type="button" className="button" disabled={running} onClick={runProjection}>
+          <span className={`logic-workspace__run-state${dirty || !selectorReady ? " is-dirty" : ""}`}>
+            {!selectorReady ? `Projection needs ${missingSelectors.length} selector${missingSelectors.length === 1 ? "" : "s"}` : dirty ? "Inputs changed" : "Projection current"}
+          </span>
+          <button type="button" className="button" disabled={running || !selectorReady} onClick={runProjection}>
             {running ? "Running projection…" : "Run projection"}
           </button>
         </div>
@@ -301,6 +317,12 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
         <span className={missingCount ? "is-danger" : ""}><strong>{missingCount}</strong> missing</span>
       </div>
 
+      {!selectorReady && (
+        <div className="logic-workspace__readiness" role="status">
+          <strong>Complete the underwriting scenario</strong>
+          <span>Select {missingSelectors.join(", ")} in the graph. These values determine which filed COI and expense rows apply.</span>
+        </div>
+      )}
       {error && <p className="error">{error}</p>}
       {runMessage && <p className="logic-workspace__success" role="status">{runMessage}</p>}
       {projectionGraph?.nodes?.length ? (
