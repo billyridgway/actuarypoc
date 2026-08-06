@@ -373,6 +373,11 @@ def _extract_workspace_executable_mechanics(
                 "valueBasis": ((candidate_rows[0].get("provenance") or {}).get("valueBasis")),
                 "reviewStatus": "review_required",
                 "rowCount": len(candidate_rows),
+                "selectors": {
+                    field: candidate_rows[0].get(field)
+                    for field in ("sex", "risk_class", "tobacco_status", "issue_age", "premium_mode")
+                    if candidate_rows[0].get(field) not in {None, "", "ANY", "All"}
+                },
                 "rows": candidate_rows,
             })
     combined["status"] = {}
@@ -1078,6 +1083,8 @@ def _build_product_understanding(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     risk_classes = f_risk_classes.get("value")
     if not isinstance(risk_classes, list):
         risk_classes = None
+    else:
+        risk_classes = _normalise_risk_class_labels(risk_classes)
 
     documents = snapshot.get("documentInventory") or []
     if not isinstance(documents, list):
@@ -1599,15 +1606,28 @@ def _build_capability_assessment(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _normalise_risk_class_labels(values: List[Any]) -> List[str]:
+    """Keep underwriting class separate from tobacco/nicotine status."""
+
+    normalised: List[str] = []
+    for value in values:
+        label = re.sub(r"\s+", " ", str(value or "")).strip()
+        label = re.sub(
+            r"\b(?:no\s+)?nicotine\s+use\b|\bnicotine\b|\bnon[- ]?tobacco\b|\bnon[- ]?smoker\b|\btobacco\b|\bsmoker\b",
+            "",
+            label,
+            flags=re.IGNORECASE,
+        ).strip(" -/")
+        if label and label.lower() not in {item.lower() for item in normalised}:
+            normalised.append(label)
+    return normalised
+
+
 def _projection_graph_input_configs(snapshot: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     """Return backend-owned edit contracts for graph scenario inputs."""
 
     understanding = snapshot.get("productUnderstanding") or {}
-    risk_classes = [
-        str(value).strip()
-        for value in (understanding.get("riskClasses") or [])
-        if str(value).strip()
-    ]
+    risk_classes = _normalise_risk_class_labels(list(understanding.get("riskClasses") or []))
     configs: Dict[str, Dict[str, Any]] = {
         "issue_age": {"kind": "number", "min": 0, "max": 120, "step": 1, "help": "Whole number from 0 to 120"},
         "face_amount": {"kind": "number", "min": 1, "step": 1000, "help": "Must be greater than $0"},
@@ -2014,11 +2034,7 @@ def _status_without_synthetic(artifact: Dict[str, Any], mechanic: str) -> str:
 def _workspace_synthetic_coi_context(ws: Dict[str, Any]) -> tuple[str, List[str]]:
     snapshot = ws.get("latest_snapshot_json") or {}
     understanding = snapshot.get("productUnderstanding") or _build_product_understanding(snapshot)
-    risk_classes = [
-        str(value).strip()
-        for value in (understanding.get("riskClasses") or [])
-        if str(value).strip() and str(value).strip().lower() not in {"tobacco", "smoker", "non-tobacco", "nonsmoker"}
-    ]
+    risk_classes = _normalise_risk_class_labels(list(understanding.get("riskClasses") or []))
     if not risk_classes:
         risk_classes = ["Preferred", "Standard"]
     facts = snapshot.get("extractedFacts") or []
@@ -2056,6 +2072,11 @@ def api_accept_filed_mechanic(
         "mechanic": mechanic,
         "review": (reviewed.get("reviews") or {}).get(payload.candidateId or mechanic),
         "status": (reviewed.get("status") or {}).get(mechanic),
+        "activeRowCount": len((reviewed.get("usable") or {}).get(mechanic) or []),
+        "remainingCandidateCount": sum(
+            item.get("reviewStatus") == "review_required"
+            for item in ((reviewed.get("candidates") or {}).get(mechanic) or [])
+        ),
     }
 
 

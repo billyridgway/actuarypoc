@@ -78,6 +78,32 @@ def _pdf_provenance(filename: str, page: int, heading: str) -> Dict[str, Any]:
     }
 
 
+def _pdf_policy_selectors(text: str) -> Dict[str, str]:
+    """Read table applicability selectors from the specimen policy information."""
+
+    selectors: Dict[str, str] = {}
+    sex_match = re.search(r"\bSex\s*:\s*\[?\s*(Male|Female)\b", text or "", re.IGNORECASE)
+    if sex_match:
+        selectors["sex"] = "M" if sex_match.group(1).lower() == "male" else "F"
+    risk_match = re.search(r"Risk\s+Class\s*:\s*\[([^\n]+?)\]", text or "", re.IGNORECASE)
+    if risk_match:
+        raw_risk = re.sub(r"\s+", " ", risk_match.group(1)).strip()
+        lowered = raw_risk.lower()
+        if "no nicotine use" in lowered or "non-tobacco" in lowered or "nonsmoker" in lowered:
+            selectors["tobacco_status"] = "Non-Tobacco"
+        elif "nicotine use" in lowered or "tobacco" in lowered or "smoker" in lowered:
+            selectors["tobacco_status"] = "Tobacco"
+        risk_class = re.sub(
+            r"\b(?:no\s+)?nicotine\s+use\b|\bnon[- ]?tobacco\b|\bnon[- ]?smoker\b|\btobacco\b|\bsmoker\b",
+            "",
+            raw_risk,
+            flags=re.IGNORECASE,
+        ).strip(" -/")
+        if risk_class:
+            selectors["risk_class"] = risk_class
+    return selectors
+
+
 def _number_pairs(section: str) -> List[Tuple[int, float, bool]]:
     """Read repeated duration/value pairs while preserving an explicit '+' terminal row."""
 
@@ -165,13 +191,27 @@ def _read_pdf_mechanics(filename: str, content: bytes) -> Dict[str, Any]:
         reader = PdfReader(io.BytesIO(content))
     except Exception as exc:  # noqa: BLE001
         return {"mechanics": mechanics, "warnings": [f"{filename}: PDF could not be read: {exc}"]}
-    for page_number, page in enumerate(reader.pages, 1):
+    page_texts: List[str] = []
+    for page in reader.pages:
         try:
-            extracted = _extract_pdf_page(filename, page_number, page.extract_text() or "")
+            page_texts.append(page.extract_text() or "")
+        except Exception:  # noqa: BLE001
+            page_texts.append("")
+    selectors = _pdf_policy_selectors("\n".join(page_texts))
+    for page_number, text in enumerate(page_texts, 1):
+        try:
+            extracted = _extract_pdf_page(filename, page_number, text)
         except Exception as exc:  # noqa: BLE001
             warnings.append(f"{filename} page {page_number}: PDF table extraction rejected: {exc}")
             continue
         for mechanic, rows in extracted.items():
+            if mechanic == "coi" and selectors:
+                for row in rows:
+                    row.update(selectors)
+                    row["provenance"] = {
+                        **(row.get("provenance") or {}),
+                        "selectorEvidence": selectors,
+                    }
             mechanics[mechanic].extend(rows)
     return {"mechanics": mechanics, "warnings": warnings}
 
@@ -360,14 +400,45 @@ def accept_filed_mechanic(
             "reviewedBy": reviewed_by,
             "reviewedAt": accepted_at,
         }
-    validation_artifact = {"mechanics": {mechanic: rows}}
-    validated = usable_mechanics(validation_artifact)
-    if mechanic not in validated:
-        raise ValueError(f"Filed {mechanic} candidate is incomplete and cannot be executed")
-    result.setdefault("usable", {})[mechanic] = rows
     if candidate is not None:
         candidate["rows"] = rows
         candidate["reviewStatus"] = "accepted"
+    active_rows = rows
+    if candidate is not None:
+        active_rows = [
+            row
+            for item in candidates
+            if item.get("reviewStatus") == "accepted"
+            for row in (item.get("rows") or [])
+        ]
+    selector_fields = (
+        "duration", "attained_age", "sex", "risk_class", "tobacco_status",
+        "issue_age", "premium_mode",
+    )
+    value_fields = {
+        "coi": ("rate", "rate_unit"),
+        "surrender": ("charge", "charge_unit"),
+        "fees": ("amount", "fee_unit"),
+    }[mechanic]
+    deduplicated: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+    for active_row in active_rows:
+        selector = tuple(active_row.get(field) for field in selector_fields)
+        existing = deduplicated.get(selector)
+        if existing is not None:
+            existing_value = tuple(existing.get(field) for field in value_fields)
+            incoming_value = tuple(active_row.get(field) for field in value_fields)
+            if existing_value != incoming_value:
+                raise ValueError(
+                    f"Filed {mechanic} candidates conflict for selector {selector}"
+                )
+            continue
+        deduplicated[selector] = active_row
+    active_rows = list(deduplicated.values())
+    validation_artifact = {"mechanics": {mechanic: active_rows}}
+    validated = usable_mechanics(validation_artifact)
+    if mechanic not in validated:
+        raise ValueError(f"Filed {mechanic} candidate is incomplete and cannot be executed")
+    result.setdefault("usable", {})[mechanic] = active_rows
     synthetic = result.get("synthetic") or {}
     synthetic.pop(mechanic, None)
     result.setdefault("status", {})[mechanic] = "executable"
@@ -379,6 +450,7 @@ def accept_filed_mechanic(
         "reviewedBy": reviewed_by,
         "reviewedAt": accepted_at,
         "rowCount": len(rows),
+        "activeRowCount": len(active_rows),
         "sourceType": "filed_pdf",
     }
     return result

@@ -65,6 +65,16 @@ def test_preview_endpoint_uses_agent_parameters_without_persisting(monkeypatch) 
     assert response["preview"]["rowCount"] == 968
 
 
+def test_synthetic_context_does_not_treat_nicotine_as_risk_class() -> None:
+    ws = {"latest_snapshot_json": {"productUnderstanding": {
+        "riskClasses": ["Standard No Nicotine Use", "Standard Nicotine Use", "Nicotine"],
+    }}}
+
+    _, risk_classes = server._workspace_synthetic_coi_context(ws)
+
+    assert risk_classes == ["Standard"]
+
+
 def test_accept_and_remove_persist_synthetic_provenance_only_after_review(monkeypatch) -> None:
     stored = []
     artifact = {"usable": {"fees": [{"amount": 10}]}, "status": {"fees": "executable"}, "warnings": []}

@@ -159,7 +159,9 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
         },
       }));
       await runProjection();
-      setRunMessage(`Filed ${mechanic === "coi" ? "COI table" : mechanic === "surrender" ? "surrender schedule" : "fee schedule"} accepted and applied.`);
+      const label = mechanic === "coi" ? "COI table" : mechanic === "surrender" ? "surrender schedule" : "fee schedule";
+      const remaining = Number(body.remainingCandidateCount || 0);
+      setRunMessage(`Filed ${label} accepted and applied (${body.activeRowCount} active rows).${remaining ? ` ${remaining} additional candidate${remaining === 1 ? "" : "s"} available for review.` : ""}`);
     } catch (err: any) {
       setError(err?.message || "The filed table could not be accepted.");
     } finally {
@@ -345,10 +347,13 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
                     <div><dt>Source</dt><dd>{candidate.filename || provenance.filename || "Uploaded PDF"}{candidate.page || provenance.page ? ` · page ${candidate.page || provenance.page}` : ""}</dd></div>
                     <div><dt>Table</dt><dd>{candidate.tableHeading || provenance.tableHeading || "Filed table"}</dd></div>
                     <div><dt>Value basis</dt><dd>{String(candidate.valueBasis || provenance.valueBasis || "filed").replaceAll("_", " ")}</dd></div>
+                    {candidate.selectors && Object.keys(candidate.selectors).length > 0 && (
+                      <div><dt>Applies to</dt><dd>{Object.entries(candidate.selectors).map(([key, value]) => `${key.replaceAll("_", " ")}: ${value}`).join(" · ")}</dd></div>
+                    )}
                     <div><dt>Range</dt><dd>Duration {first.duration ?? "—"}: {value(first) ?? "—"} → duration {last.duration ?? "—"}: {value(last) ?? "—"}</dd></div>
                   </dl>
                   <button type="button" className="button" disabled={acceptingFiledMechanic !== null} onClick={() => acceptFiledMechanic(candidate)}>
-                    {acceptingFiledMechanic === candidate.id ? "Accepting…" : "Accept and use in projection"}
+                    {acceptingFiledMechanic === candidate.id ? "Accepting…" : "Accept and add to projection"}
                   </button>
                 </article>
               );

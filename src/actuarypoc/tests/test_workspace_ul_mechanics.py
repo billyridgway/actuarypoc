@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from actuarypoc.extract.workspace_ul_mechanics import _extract_pdf_page, accept_filed_mechanic, extract_ul_mechanics, usable_mechanics
+from actuarypoc.extract import workspace_ul_mechanics as mechanics_extractor
+from actuarypoc.extract.workspace_ul_mechanics import _extract_pdf_page, _pdf_policy_selectors, accept_filed_mechanic, extract_ul_mechanics, usable_mechanics
 from actuarypoc.ui import server
 
 
@@ -175,21 +176,45 @@ def test_reload_reapplies_accepted_filed_mechanics(monkeypatch) -> None:
 
 
 def test_accepts_only_selected_filed_candidate() -> None:
-    def candidate(candidate_id: str, filename: str, rate: float) -> dict:
+    def candidate(candidate_id: str, filename: str, rate: float, tobacco: str) -> dict:
         return {
             "id": candidate_id, "mechanic": "coi", "filename": filename,
             "reviewStatus": "review_required", "rows": [{
-                "duration": 1, "rate": rate, "rate_unit": "per_1000_monthly",
+                "duration": 1, "sex": "M", "risk_class": "Standard", "tobacco_status": tobacco,
+                "rate": rate, "rate_unit": "per_1000_monthly",
                 "provenance": {"filename": filename, "sourceType": "filed_pdf", "reviewStatus": "review_required"},
             }],
         }
-    artifact = {"candidates": {"coi": [candidate("a", "a.pdf", 0.1), candidate("b", "b.pdf", 0.2)]}, "mechanics": {"coi": []}}
+    artifact = {"candidates": {"coi": [
+        candidate("a", "a.pdf", 0.1, "Non-Tobacco"),
+        candidate("b", "b.pdf", 0.2, "Tobacco"),
+    ]}, "mechanics": {"coi": []}}
 
     accepted = accept_filed_mechanic(artifact, "coi", candidate_id="b")
 
     assert accepted["usable"]["coi"][0]["rate"] == 0.2
     assert accepted["candidates"]["coi"][0]["reviewStatus"] == "review_required"
     assert accepted["candidates"]["coi"][1]["reviewStatus"] == "accepted"
+
+    combined = accept_filed_mechanic(accepted, "coi", candidate_id="a")
+    assert len(combined["usable"]["coi"]) == 2
+    assert {row["tobacco_status"] for row in combined["usable"]["coi"]} == {"Tobacco", "Non-Tobacco"}
+
+
+def test_rejects_conflicting_filed_candidates_for_same_selector() -> None:
+    def candidate(candidate_id: str, rate: float) -> dict:
+        return {
+            "id": candidate_id, "mechanic": "coi", "reviewStatus": "review_required", "rows": [{
+                "duration": 1, "sex": "M", "risk_class": "Standard", "tobacco_status": "Tobacco",
+                "rate": rate, "rate_unit": "per_1000_monthly",
+                "provenance": {"sourceType": "filed_pdf", "reviewStatus": "review_required"},
+            }],
+        }
+    artifact = {"candidates": {"coi": [candidate("a", 0.1), candidate("b", 0.2)]}}
+    accepted = accept_filed_mechanic(artifact, "coi", candidate_id="a")
+
+    with pytest.raises(ValueError, match="conflict"):
+        accept_filed_mechanic(accepted, "coi", candidate_id="b")
 
 
 def test_pdf_extraction_does_not_promote_specimen_policyholder_inputs() -> None:
@@ -207,6 +232,38 @@ def test_pdf_extraction_does_not_promote_specimen_policyholder_inputs() -> None:
     mechanics = _extract_pdf_page("ICC18 S18PRUL.pdf", 1, page)
 
     assert mechanics == {"coi": [], "surrender": [], "fees": []}
+
+
+def test_reads_coi_applicability_from_specimen_policy_information() -> None:
+    assert _pdf_policy_selectors("Sex: [Male]\nRisk Class: [Standard No Nicotine Use]") == {
+        "sex": "M", "risk_class": "Standard", "tobacco_status": "Non-Tobacco",
+    }
+    assert _pdf_policy_selectors("Sex: [Female]\nRisk Class: [Preferred Nicotine Use]") == {
+        "sex": "F", "risk_class": "Preferred", "tobacco_status": "Tobacco",
+    }
+
+
+def test_applies_document_selectors_to_extracted_coi_rows(monkeypatch) -> None:
+    class Page:
+        def __init__(self, text: str): self.text = text
+        def extract_text(self) -> str: return self.text
+    class Reader:
+        pages = [
+            Page("POLICY SPECIFICATIONS [SPECIMEN] ICC18 S18PRUL Sex: [Male] Risk Class: [Standard Nicotine Use]"),
+            Page("""POLICY SPECIFICATIONS [SPECIMEN] ICC18 S18PRUL
+            Table of Cost of Insurance (COI) Rates
+            Maximum Monthly Cost of Insurance Rates Per $1000.00 of Net Amount at Risk
+            Policy Year COI Rate 1 0.10 2 0.20 3 0.30"""),
+        ]
+    monkeypatch.setattr(mechanics_extractor, "PdfReader", lambda stream: Reader())
+
+    result = extract_ul_mechanics("ICC18 S18PRUL Nicotine.pdf", b"pdf")
+
+    assert len(result["mechanics"]["coi"]) == 3
+    assert {row["sex"] for row in result["mechanics"]["coi"]} == {"M"}
+    assert {row["risk_class"] for row in result["mechanics"]["coi"]} == {"Standard"}
+    assert {row["tobacco_status"] for row in result["mechanics"]["coi"]} == {"Tobacco"}
+    assert result["mechanics"]["coi"][0]["provenance"]["selectorEvidence"]["tobacco_status"] == "Tobacco"
 
 
 def test_workspace_analysis_reads_pdf_candidates_and_marks_them_for_review(monkeypatch) -> None:
@@ -424,6 +481,26 @@ def test_projection_selects_attained_age_sex_and_class_coi_row() -> None:
 
     assert projection["rows"][0]["coiCharge"] == 193.88
     assert projection["mechanicsExecution"]["coi"]["fullyApplied"] is True
+
+
+def test_projection_selects_coi_by_tobacco_status() -> None:
+    config = server.load_ul_runtime_config("ICC18 P18PR UL")
+    config.executable_mechanics = {"coi": [
+        {"duration": 1, "sex": "M", "risk_class": "Standard", "tobacco_status": "Non-Tobacco", "rate": 1.0, "rate_unit": "per_1000_annual"},
+        {"duration": 1, "sex": "M", "risk_class": "Standard", "tobacco_status": "Tobacco", "rate": 2.0, "rate_unit": "per_1000_annual"},
+    ]}
+    base = {"age": 45, "faceAmount": 100_000, "modalPremium": 3_000, "sex": "M", "riskClass": "Standard"}
+
+    non_tobacco, _ = server._run_ul_projection(request={**base, "tobaccoStatus": "Non-Tobacco"}, config=config, horizon_years=1)
+    tobacco, _ = server._run_ul_projection(request={**base, "tobaccoStatus": "Tobacco"}, config=config, horizon_years=1)
+
+    assert tobacco["rows"][0]["coiCharge"] > non_tobacco["rows"][0]["coiCharge"]
+
+
+def test_normalises_underwriting_class_separately_from_nicotine_status() -> None:
+    assert server._normalise_risk_class_labels([
+        "Standard No Nicotine Use", "Standard Nicotine Use", "Nicotine", "Preferred Non-Tobacco",
+    ]) == ["Standard", "Preferred"]
 
 
 def test_projection_executes_fixed_surrender_schedule_and_modal_fee() -> None:
