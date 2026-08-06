@@ -26,6 +26,12 @@ const initialGraphInputs = (snapshot: any) => {
   return values;
 };
 
+const REQUIRED_PROJECTION_SELECTORS = [
+  ["sex", "sex"],
+  ["risk_class", "risk class"],
+  ["tobacco_status", "tobacco / nicotine status"],
+] as const;
+
 export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapshot, workspaceId }) => {
   const [illustration, setIllustration] = React.useState(snapshot?.illustration ?? null);
   const [projectionGraph, setProjectionGraph] = React.useState<ProjectionGraphDefinition | null>(snapshot?.projectionGraph ?? null);
@@ -48,9 +54,10 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
   const ruleNodes = graphNodes.filter((node) => node.kind === "rule" || (node.kind === "unmodeled" && !node.inputId));
   const rows = (illustration?.rows ?? []) as WorkspaceRow[];
   const metrics = illustration?.metrics ?? {};
+  const reconciliation = illustration?.reconciliation;
   const missingCount = graphNodes.filter((node) => node.status === "missing").length;
   const provisionalCount = graphNodes.filter((node) => node.status === "provisional").length;
-  const filedCandidates = ["coi", "surrender", "fees"].flatMap((mechanic) => {
+  const filedCandidates = ["coi", "surrender", "fees", "nar_factors", "corridor"].flatMap((mechanic) => {
     const grouped = (executableMechanics?.candidates?.[mechanic] || []).filter(
       (candidate: any) => candidate.reviewStatus === "review_required" && candidate.rows?.length,
     );
@@ -60,6 +67,10 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
       ? [{ id: mechanic, mechanic, rows: legacyRows, rowCount: legacyRows.length }]
       : [];
   });
+  const missingSelectors = REQUIRED_PROJECTION_SELECTORS
+    .filter(([key]) => !String(values[key] ?? "").trim())
+    .map(([, label]) => label);
+  const selectorReady = missingSelectors.length === 0;
 
   const updateInput = (inputId: string, value: string) => {
     setValues((current) => ({ ...current, [inputId]: value }));
@@ -72,6 +83,10 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
     const modalPremium = Number(values.premium);
     const policyFeeText = String(values.policy_fee ?? "").trim();
     const policyFeeAnnual = policyFeeText === "" ? undefined : Number(policyFeeText);
+    if (!selectorReady) {
+      setError(`Complete ${missingSelectors.join(", ")} before running the projection so the correct filed tables can be selected.`);
+      return;
+    }
     if (!Number.isInteger(issueAge) || issueAge < 0 || issueAge > 120) {
       setError("Issue age must be a whole number from 0 to 120.");
       return;
@@ -159,7 +174,7 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
         },
       }));
       await runProjection();
-      const label = mechanic === "coi" ? "COI table" : mechanic === "surrender" ? "surrender schedule" : "fee schedule";
+      const label = mechanic === "coi" ? "COI table" : mechanic === "surrender" ? "surrender schedule" : mechanic === "nar_factors" ? "NAR factor" : mechanic === "corridor" ? "minimum death-benefit corridor" : "fee schedule";
       const remaining = Number(body.remainingCandidateCount || 0);
       setRunMessage(`Filed ${label} accepted and applied (${body.activeRowCount} active rows).${remaining ? ` ${remaining} additional candidate${remaining === 1 ? "" : "s"} available for review.` : ""}`);
     } catch (err: any) {
@@ -287,8 +302,10 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
         </div>
         <div className="logic-workspace__actions">
           <a className="button button-secondary" href={`/web?workspace=${encodeURIComponent(workspaceId)}&view=details`}>More details</a>
-          <span className={`logic-workspace__run-state${dirty ? " is-dirty" : ""}`}>{dirty ? "Inputs changed" : "Projection current"}</span>
-          <button type="button" className="button" disabled={running} onClick={runProjection}>
+          <span className={`logic-workspace__run-state${dirty || !selectorReady ? " is-dirty" : ""}`}>
+            {!selectorReady ? `Projection needs ${missingSelectors.length} selector${missingSelectors.length === 1 ? "" : "s"}` : dirty ? "Inputs changed" : "Projection current"}
+          </span>
+          <button type="button" className="button" disabled={running || !selectorReady} onClick={runProjection}>
             {running ? "Running projection…" : "Run projection"}
           </button>
         </div>
@@ -301,6 +318,12 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
         <span className={missingCount ? "is-danger" : ""}><strong>{missingCount}</strong> missing</span>
       </div>
 
+      {!selectorReady && (
+        <div className="logic-workspace__readiness" role="status">
+          <strong>Complete the underwriting scenario</strong>
+          <span>Select {missingSelectors.join(", ")} in the graph. These values determine which filed COI and expense rows apply.</span>
+        </div>
+      )}
       {error && <p className="error">{error}</p>}
       {runMessage && <p className="logic-workspace__success" role="status">{runMessage}</p>}
       {projectionGraph?.nodes?.length ? (
@@ -335,17 +358,21 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
               const first = candidateRows[0] || {};
               const last = candidateRows[candidateRows.length - 1] || {};
               const provenance = first.provenance || {};
-              const value = (row: any) => mechanic === "coi" ? row.rate : mechanic === "surrender" ? row.charge : row.amount;
+              const value = (row: any) => mechanic === "coi" ? row.rate : mechanic === "surrender" ? row.charge : mechanic === "nar_factors" ? row.factor : mechanic === "corridor" ? row.percentage : row.amount;
               const feeComponents = (candidate.components || []).map((item: string) => item.replaceAll("_", " ")).join(", ");
               return (
                 <article key={candidate.id} className="filed-mechanics-review__candidate">
                   <div>
                     <span className="filed-mechanics-review__badge">Review required</span>
-                    <h3>{mechanic === "coi" ? "COI rate table" : mechanic === "surrender" ? "Surrender charge schedule" : "Policy fee schedule"}</h3>
+                    <h3>{mechanic === "coi" ? "COI rate table" : mechanic === "surrender" ? "Surrender charge schedule" : mechanic === "nar_factors" ? "Net amount at risk factor" : mechanic === "corridor" ? "Minimum death benefit percentages" : "Policy fee schedule"}</h3>
                   </div>
                   <dl>
                     <div><dt>Rows</dt><dd>{candidate.rowCount || candidateRows.length}</dd></div>
-                    <div><dt>Source</dt><dd>{candidate.filename || provenance.filename || "Uploaded PDF"}{candidate.page || provenance.page ? ` · page ${candidate.page || provenance.page}` : ""}</dd></div>
+                    <div><dt>Source{candidate.sources?.length > 1 ? "s" : ""}</dt><dd>
+                      {candidate.sources?.length > 1
+                        ? candidate.sources.map((source: any) => `${source.filename || "Uploaded PDF"}${source.page ? ` · page ${source.page}` : ""}`).join("; ")
+                        : <>{candidate.filename || provenance.filename || "Uploaded PDF"}{candidate.page || provenance.page ? ` · page ${candidate.page || provenance.page}` : ""}</>}
+                    </dd></div>
                     <div><dt>Table</dt><dd>{candidate.tableHeading || provenance.tableHeading || "Filed table"}</dd></div>
                     {mechanic === "fees" && feeComponents && <div><dt>Charge type</dt><dd>{feeComponents}</dd></div>}
                     <div><dt>Value basis</dt><dd>{String(candidate.valueBasis || provenance.valueBasis || "filed").replaceAll("_", " ")}</dd></div>
@@ -422,6 +449,16 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
               <article><span>Final surrender value</span><strong>{formatCurrency(metrics.finalSurrenderValue ?? rows[rows.length - 1]?.surrenderValue)}</strong></article>
               <article><span>Final net amount at risk</span><strong>{formatCurrency(metrics.finalNetAmountAtRisk ?? rows[rows.length - 1]?.netAmountAtRisk)}</strong></article>
             </div>
+            {reconciliation && (
+              <div className={`logic-results__reconciliation ${reconciliation.passed ? "is-passed" : "is-failed"}`} role="status">
+                <strong>{reconciliation.passed ? "Projection ledger reconciled" : "Projection reconciliation failed"}</strong>
+                <span>
+                  {reconciliation.passed
+                    ? `${reconciliation.checkCount} calculation checks passed across ${rows.length} policy years. Maximum residual ${formatCurrency(reconciliation.maxResidual)}.`
+                    : `${reconciliation.failures?.length || 0} checks failed in policy years ${(reconciliation.failedYears || []).join(", ")}.`}
+                </span>
+              </div>
+            )}
             <ProjectionChart rows={rows} />
             <details className="logic-results__ledger">
               <summary>{rows.length}-year annual projection ledger</summary>

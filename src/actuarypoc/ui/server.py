@@ -328,7 +328,7 @@ def _extract_workspace_executable_mechanics(
     bucket = get_bucket_name()
     combined: Dict[str, Any] = {
         "version": 1,
-        "mechanics": {"coi": [], "surrender": [], "fees": []},
+        "mechanics": {"coi": [], "surrender": [], "fees": [], "nar_factors": [], "corridor": []},
         "warnings": [],
     }
     for document in workspace_documents:
@@ -349,7 +349,7 @@ def _extract_workspace_executable_mechanics(
                 response.close()
                 response.release_conn()
     combined["usable"] = usable_mechanics(combined)
-    combined["candidates"] = {"coi": [], "surrender": [], "fees": []}
+    combined["candidates"] = {"coi": [], "surrender": [], "fees": [], "nar_factors": [], "corridor": []}
     for mechanic, rows in combined["mechanics"].items():
         grouped: Dict[Tuple[str, Any, str], List[Dict[str, Any]]] = {}
         for row in rows:
@@ -362,10 +362,24 @@ def _extract_workspace_executable_mechanics(
                 str(provenance.get("tableHeading") or ""),
             )
             grouped.setdefault(key, []).append(row)
+        semantic_groups: Dict[str, Dict[str, Any]] = {}
         for (filename, page, heading), candidate_rows in grouped.items():
-            identity = f"{mechanic}|{filename}|{page}|{heading}"
-            combined["candidates"][mechanic].append({
-                "id": sha256(identity.encode("utf-8")).hexdigest()[:16],
+            canonical_rows = [
+                {key: value for key, value in row.items() if key != "provenance"}
+                for row in candidate_rows
+            ]
+            canonical_rows.sort(key=lambda row: json.dumps(row, sort_keys=True, default=str))
+            signature = json.dumps(
+                {"mechanic": mechanic, "rows": canonical_rows},
+                sort_keys=True, separators=(",", ":"), default=str,
+            )
+            source = {"filename": filename, "page": page, "tableHeading": heading}
+            existing = semantic_groups.get(signature)
+            if existing is not None:
+                existing["sources"].append(source)
+                continue
+            semantic_groups[signature] = {
+                "id": sha256(signature.encode("utf-8")).hexdigest()[:16],
                 "mechanic": mechanic,
                 "filename": filename,
                 "page": page,
@@ -380,9 +394,26 @@ def _extract_workspace_executable_mechanics(
                     if candidate_rows[0].get(field) not in {None, "", "ANY", "All"}
                 },
                 "rows": candidate_rows,
-            })
+                "sources": [source],
+            }
+        for candidate in semantic_groups.values():
+            sources = sorted(
+                candidate["sources"],
+                key=lambda source: (str(source.get("filename") or ""), int(source.get("page") or 0)),
+            )
+            candidate["sources"] = sources
+            if len(sources) > 1:
+                candidate["filename"] = None
+                candidate["page"] = None
+                candidate["sourceCount"] = len(sources)
+                for row in candidate["rows"]:
+                    row["provenance"] = {
+                        **(row.get("provenance") or {}),
+                        "supportingSources": sources,
+                    }
+            combined["candidates"][mechanic].append(candidate)
     combined["status"] = {}
-    for mechanic in ("coi", "surrender", "fees"):
+    for mechanic in ("coi", "surrender", "fees", "nar_factors", "corridor"):
         candidates = list((combined.get("mechanics") or {}).get(mechanic) or [])
         review_required = any(
             (row.get("provenance") or {}).get("reviewStatus") == "review_required"
@@ -1956,7 +1987,7 @@ def api_workspace_analyze(workspace_id: str) -> Dict[str, Any]:
         "ICC18 P18PR UL", executable_request
     )
     execution = (projection or {}).get("mechanicsExecution") or {}
-    for mechanic in ("coi", "surrender", "fees"):
+    for mechanic in ("coi", "surrender", "fees", "nar_factors", "corridor"):
         if (execution.get(mechanic) or {}).get("fallbackYears"):
             mechanics_artifact["status"][mechanic] = "partial_fallback"
     store_workspace_executable_mechanics(workspace_id, mechanics_artifact)
@@ -9931,6 +9962,62 @@ def validate_ul_runtime_config(config: UlRuntimeConfig, horizon_years: int) -> L
     return warnings
 
 
+def _reconcile_ul_projection_rows(rows: List[Dict[str, Any]], tolerance: float = 0.01) -> Dict[str, Any]:
+    """Reconcile annual presentation rows to their executed policy mechanics."""
+
+    failures: List[Dict[str, Any]] = []
+    max_residual = 0.0
+    check_count = 0
+
+    def check(year: int, name: str, actual: float, expected: float) -> None:
+        nonlocal max_residual, check_count
+        residual = abs(actual - expected)
+        max_residual = max(max_residual, residual)
+        check_count += 1
+        if residual > tolerance:
+            failures.append({
+                "year": year,
+                "check": name,
+                "actual": actual,
+                "expected": expected,
+                "residual": residual,
+            })
+
+    for row in rows:
+        year = int(row.get("year") or 0)
+        opening = float(row.get("openingPolicyValue") or 0.0)
+        premium = float(row.get("annualPremium") or row.get("premium") or 0.0)
+        premium_load = float(row.get("premiumLoad") or 0.0)
+        coi = float(row.get("coiCharge") or 0.0)
+        fees = float(row.get("policyFee") or 0.0)
+        interest = float(row.get("guaranteedInterest") or 0.0)
+        ending = float(row.get("endingPolicyValue") or row.get("policyValue") or 0.0)
+        cash = float(row.get("cashValue") or 0.0)
+        surrender_charge = float(row.get("surrenderCharge") or 0.0)
+        surrender = float(row.get("surrenderValue") or 0.0)
+        death_benefit = float(row.get("deathBenefit") or 0.0)
+        nar = float(row.get("netAmountAtRisk") or 0.0)
+        nar_factor = float(row.get("narFactor") or 1.0)
+        coi_nar = float(row.get("coiNetAmountAtRisk") or 0.0)
+        corridor = float(row.get("minimumDeathBenefitPercentage") or 1.0)
+
+        check(year, "policy_value_roll_forward", ending, opening + premium - premium_load - coi - fees + interest)
+        check(year, "cash_value", cash, ending)
+        check(year, "surrender_value", surrender, max(cash - surrender_charge, 0.0))
+        check(year, "net_amount_at_risk", nar, max(death_benefit - cash, 0.0))
+        check(year, "coi_net_amount_at_risk", coi_nar, max(death_benefit / nar_factor - cash, 0.0))
+        check(year, "minimum_death_benefit", death_benefit, max(float(row.get("faceAmount") or 0.0), corridor * cash))
+
+    return {
+        "passed": not failures,
+        "tolerance": tolerance,
+        "checkCount": check_count,
+        "maxResidual": max_residual,
+        "failedYears": sorted({failure["year"] for failure in failures}),
+        "failures": failures,
+    }
+
+
 def _run_ul_projection(
     *, request: Dict[str, Any], config: UlRuntimeConfig, horizon_years: int = 30
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -10034,63 +10121,85 @@ def _run_ul_projection(
     years: List[int] = []
     policy_value: float = 0.0
     cumulative_premium: float = 0.0
-    fallback_years: Dict[str, List[int]] = {"coi": [], "surrender": [], "fees": []}
+    fallback_years: Dict[str, List[int]] = {
+        "coi": [], "surrender": [], "fees": [], "nar_factors": [], "corridor": [],
+    }
 
     for year in range(1, horizon_years + 1):
         attained_age = age_norm + year - 1
         opening_policy_value = policy_value
 
-        # Level premium each projection year. The internal accumulation
-        # uses the *annual* premium so that IRR-style metrics line up
-        # with year-based horizons, while we still surface the modal
-        # premium for UI transparency.
+        # Level modal premiums are placed on their scheduled monthly payment
+        # dates. Annual output is retained for the graph and ledger.
         premium_annual = annual_premium
         cumulative_premium += premium_annual
 
         fee_rows = _select_all(list(executable.get("fees") or []), year, attained_age)
         policy_fee = 0.0
         premium_load = 0.0
-        for fee_row in fee_rows:
-            amount = float(fee_row["amount"])
-            fee_unit = fee_row["fee_unit"]
-            if fee_unit == "percent_premium":
-                premium_load += premium_annual * amount
-            elif fee_unit == "monthly_fixed":
-                policy_fee += amount * 12.0
-            elif fee_unit == "modal_fixed":
-                policy_fee += amount * freq
-            elif fee_unit == "per_1000_face_annual":
-                policy_fee += face_amount / 1000.0 * amount
-            else:
-                policy_fee += amount
         if not fee_rows:
-            policy_fee = config.policy_fee_annual
             fallback_years["fees"].append(year)
-
-        # Annualized approximation: premium loads are removed before
-        # guaranteed interest is credited; monthly timing is a later slice.
-        base = policy_value + premium_annual - premium_load
-        guaranteed_interest = base * guaranteed_rate
-
         coi_row = _select(list(executable.get("coi") or []), year, attained_age)
-        if coi_row:
-            rate = float(coi_row["rate"])
-            unit = coi_row["rate_unit"]
-            nar_before_charge = max(face_amount - base - guaranteed_interest, 0.0)
-            if unit == "per_1000_monthly":
-                coi_charge = nar_before_charge / 1000.0 * rate * 12.0
-            elif unit == "per_1000_annual":
-                coi_charge = nar_before_charge / 1000.0 * rate
-            else:
-                coi_charge = nar_before_charge * rate
-        else:
-            coi_charge = face_amount * coi_rate
+        if not coi_row:
             fallback_years["coi"].append(year)
+        nar_row = _select(list(executable.get("nar_factors") or []), year, attained_age)
+        corridor_row = _select(list(executable.get("corridor") or []), year, attained_age)
+        if not nar_row:
+            fallback_years["nar_factors"].append(year)
+        if not corridor_row:
+            fallback_years["corridor"].append(year)
+        nar_factor = float((nar_row or {}).get("factor") or 1.0)
+        corridor_percentage = float((corridor_row or {}).get("percentage") or 1.0)
+        monthly_interest_rate = (1.0 + guaranteed_rate) ** (1.0 / 12.0) - 1.0
+        payment_interval = max(1, int(round(12.0 / freq)))
+        guaranteed_interest = 0.0
+        coi_charge = 0.0
+        death_benefit = face_amount
 
-        # Update policy value at end of year.
-        policy_value = base + guaranteed_interest - coi_charge - policy_fee
-        if policy_value < 0.0:
-            policy_value = 0.0
+        for month in range(1, 13):
+            payment_due = (month - 1) % payment_interval == 0
+            gross_premium = modal_premium if payment_due else 0.0
+            month_premium_load = sum(
+                gross_premium * float(row["amount"])
+                for row in fee_rows if row.get("fee_unit") == "percent_premium"
+            )
+            premium_load += month_premium_load
+            policy_value += gross_premium - month_premium_load
+
+            monthly_fee = 0.0
+            for fee_row in fee_rows:
+                amount = float(fee_row["amount"])
+                fee_unit = fee_row["fee_unit"]
+                if fee_unit == "monthly_fixed":
+                    monthly_fee += amount
+                elif fee_unit == "modal_fixed" and payment_due:
+                    monthly_fee += amount
+                elif fee_unit == "per_1000_face_annual":
+                    monthly_fee += face_amount / 1000.0 * amount / 12.0
+                elif fee_unit == "annual_fixed":
+                    monthly_fee += amount / 12.0
+            if not fee_rows:
+                monthly_fee = config.policy_fee_annual / 12.0
+
+            death_benefit = max(face_amount, corridor_percentage * policy_value)
+            charge_nar = max(death_benefit / nar_factor - policy_value, 0.0)
+            if coi_row:
+                rate = float(coi_row["rate"])
+                unit = coi_row["rate_unit"]
+                if unit == "per_1000_monthly":
+                    month_coi = charge_nar / 1000.0 * rate
+                elif unit == "per_1000_annual":
+                    month_coi = charge_nar / 1000.0 * rate / 12.0
+                else:
+                    month_coi = charge_nar * rate / 12.0
+            else:
+                month_coi = face_amount * coi_rate / 12.0
+            coi_charge += month_coi
+            policy_fee += monthly_fee
+            policy_value = max(policy_value - month_coi - monthly_fee, 0.0)
+            month_interest = policy_value * monthly_interest_rate
+            policy_value += month_interest
+            guaranteed_interest += month_interest
 
         # Placeholder surrender charge schedule: linear decline from
         # max_surrender_pct of face down to 0 over the surrender period.
@@ -10136,7 +10245,7 @@ def _run_ul_projection(
 
         cash_value = policy_value
         surrender_value = max(cash_value - surrender_charge, 0.0)
-        death_benefit = face_amount
+        death_benefit = max(face_amount, corridor_percentage * cash_value)
         net_amount_at_risk = max(death_benefit - cash_value, 0.0)
 
         years.append(year)
@@ -10164,6 +10273,10 @@ def _run_ul_projection(
                 "surrenderValue": surrender_value,
                 "deathBenefit": death_benefit,
                 "netAmountAtRisk": net_amount_at_risk,
+                "coiNetAmountAtRisk": max(death_benefit / nar_factor - cash_value, 0.0),
+                "narFactor": nar_factor,
+                "minimumDeathBenefitPercentage": corridor_percentage,
+                "faceAmount": face_amount,
                 "status": None,
             }
         )
@@ -10206,6 +10319,7 @@ def _run_ul_projection(
         final_surrender = last.get("surrenderValue") if isinstance(last.get("surrenderValue"), (int, float)) else None
         final_nar = last.get("netAmountAtRisk") if isinstance(last.get("netAmountAtRisk"), (int, float)) else None
 
+    reconciliation = _reconcile_ul_projection_rows(rows)
     projection = {
         "years": years,
         "rows": rows,
@@ -10227,6 +10341,7 @@ def _run_ul_projection(
             }
             for mechanic, years in fallback_years.items()
         },
+        "reconciliation": reconciliation,
     }
 
     normalised_request = {
@@ -10329,6 +10444,14 @@ def build_ul_illustration_for_product(product_code: str, request: Dict[str, Any]
     elif not executable.get("fees"):
         warnings.append(
             "Policy/admin fees use a user-entered scenario assumption because no complete evidenced fee schedule is loaded."
+        )
+    if not executable.get("nar_factors"):
+        warnings.append(
+            "COI net amount at risk uses factor 1.0 because no reviewed filed NAR factor is loaded."
+        )
+    if not executable.get("corridor"):
+        warnings.append(
+            "Death benefit remains at face amount because no reviewed CVAT minimum death-benefit table is loaded."
         )
     elif (execution.get("fees") or {}).get("fallbackYears"):
         warnings.append(
