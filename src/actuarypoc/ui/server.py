@@ -362,10 +362,24 @@ def _extract_workspace_executable_mechanics(
                 str(provenance.get("tableHeading") or ""),
             )
             grouped.setdefault(key, []).append(row)
+        semantic_groups: Dict[str, Dict[str, Any]] = {}
         for (filename, page, heading), candidate_rows in grouped.items():
-            identity = f"{mechanic}|{filename}|{page}|{heading}"
-            combined["candidates"][mechanic].append({
-                "id": sha256(identity.encode("utf-8")).hexdigest()[:16],
+            canonical_rows = [
+                {key: value for key, value in row.items() if key != "provenance"}
+                for row in candidate_rows
+            ]
+            canonical_rows.sort(key=lambda row: json.dumps(row, sort_keys=True, default=str))
+            signature = json.dumps(
+                {"mechanic": mechanic, "rows": canonical_rows},
+                sort_keys=True, separators=(",", ":"), default=str,
+            )
+            source = {"filename": filename, "page": page, "tableHeading": heading}
+            existing = semantic_groups.get(signature)
+            if existing is not None:
+                existing["sources"].append(source)
+                continue
+            semantic_groups[signature] = {
+                "id": sha256(signature.encode("utf-8")).hexdigest()[:16],
                 "mechanic": mechanic,
                 "filename": filename,
                 "page": page,
@@ -380,7 +394,24 @@ def _extract_workspace_executable_mechanics(
                     if candidate_rows[0].get(field) not in {None, "", "ANY", "All"}
                 },
                 "rows": candidate_rows,
-            })
+                "sources": [source],
+            }
+        for candidate in semantic_groups.values():
+            sources = sorted(
+                candidate["sources"],
+                key=lambda source: (str(source.get("filename") or ""), int(source.get("page") or 0)),
+            )
+            candidate["sources"] = sources
+            if len(sources) > 1:
+                candidate["filename"] = None
+                candidate["page"] = None
+                candidate["sourceCount"] = len(sources)
+                for row in candidate["rows"]:
+                    row["provenance"] = {
+                        **(row.get("provenance") or {}),
+                        "supportingSources": sources,
+                    }
+            combined["candidates"][mechanic].append(candidate)
     combined["status"] = {}
     for mechanic in ("coi", "surrender", "fees", "nar_factors", "corridor"):
         candidates = list((combined.get("mechanics") or {}).get(mechanic) or [])

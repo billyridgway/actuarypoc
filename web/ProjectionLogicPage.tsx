@@ -368,7 +368,11 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
                   </div>
                   <dl>
                     <div><dt>Rows</dt><dd>{candidate.rowCount || candidateRows.length}</dd></div>
-                    <div><dt>Source</dt><dd>{candidate.filename || provenance.filename || "Uploaded PDF"}{candidate.page || provenance.page ? ` · page ${candidate.page || provenance.page}` : ""}</dd></div>
+                    <div><dt>Source{candidate.sources?.length > 1 ? "s" : ""}</dt><dd>
+                      {candidate.sources?.length > 1
+                        ? candidate.sources.map((source: any) => `${source.filename || "Uploaded PDF"}${source.page ? ` · page ${source.page}` : ""}`).join("; ")
+                        : <>{candidate.filename || provenance.filename || "Uploaded PDF"}{candidate.page || provenance.page ? ` · page ${candidate.page || provenance.page}` : ""}</>}
+                    </dd></div>
                     <div><dt>Table</dt><dd>{candidate.tableHeading || provenance.tableHeading || "Filed table"}</dd></div>
                     {mechanic === "fees" && feeComponents && <div><dt>Charge type</dt><dd>{feeComponents}</dd></div>}
                     <div><dt>Value basis</dt><dd>{String(candidate.valueBasis || provenance.valueBasis || "filed").replaceAll("_", " ")}</dd></div>

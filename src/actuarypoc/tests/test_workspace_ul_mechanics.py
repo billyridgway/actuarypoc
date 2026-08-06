@@ -396,6 +396,52 @@ def test_workspace_analysis_reads_pdf_candidates_and_marks_them_for_review(monke
     assert artifact["candidates"]["coi"][0]["rowCount"] == 1
 
 
+def test_workspace_analysis_consolidates_duplicate_filed_fee_candidates(monkeypatch) -> None:
+    class Response:
+        def read(self) -> bytes: return b"filed PDF bytes"
+        def close(self) -> None: pass
+        def release_conn(self) -> None: pass
+    class Client:
+        def get_object(self, bucket: str, object_path: str) -> Response: return Response()
+
+    def extracted(filename: str, content: bytes) -> dict:
+        row = {
+            "component": "administrative", "duration": None, "premium_mode": None,
+            "amount": 12.0, "fee_unit": "monthly_fixed",
+            "provenance": {
+                "filename": filename, "page": 2,
+                "tableHeading": "Administrative Charge Per Month",
+                "reviewStatus": "review_required", "sourceType": "filed_pdf",
+                "valueBasis": "guaranteed_maximum",
+            },
+        }
+        return {"version": 2, "mechanics": {"coi": [], "surrender": [], "fees": [row]}, "warnings": []}
+
+    monkeypatch.setattr(server, "get_minio_client", lambda: Client())
+    monkeypatch.setattr(server, "ensure_bucket", lambda client: None)
+    monkeypatch.setattr(server, "get_bucket_name", lambda: "workspace-bucket")
+    monkeypatch.setattr(server, "extract_ul_mechanics", extracted)
+
+    artifact = server._extract_workspace_executable_mechanics([
+        {"description": "Base form.pdf", "object_path": "documents/base.pdf"},
+        {"description": "Duplicate form.pdf", "object_path": "documents/duplicate.pdf"},
+    ])
+
+    candidates = artifact["candidates"]["fees"]
+    assert len(candidates) == 1
+    assert candidates[0]["rowCount"] == 1
+    assert candidates[0]["sourceCount"] == 2
+    assert [source["filename"] for source in candidates[0]["sources"]] == [
+        "Base form.pdf", "Duplicate form.pdf",
+    ]
+    assert len(candidates[0]["rows"][0]["provenance"]["supportingSources"]) == 2
+
+    accepted = mechanics_extractor.accept_filed_mechanic(
+        artifact, "fees", candidate_id=candidates[0]["id"],
+    )
+    assert len(accepted["usable"]["fees"]) == 1
+
+
 def test_workspace_analysis_keeps_duplicate_filed_tables_as_separate_candidates(monkeypatch) -> None:
     class Response:
         def read(self) -> bytes: return b"pdf"
