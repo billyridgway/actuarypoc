@@ -22,7 +22,7 @@ from PyPDF2 import PdfReader
 MAX_DURATION = 121
 COI_UNITS = {"per_1000_monthly", "per_1000_annual", "percent_nar_annual"}
 SURRENDER_UNITS = {"percent_face", "per_1000_face", "fixed"}
-FEE_UNITS = {"annual_fixed", "modal_fixed", "per_1000_face_annual"}
+FEE_UNITS = {"annual_fixed", "monthly_fixed", "modal_fixed", "per_1000_face_annual", "percent_premium"}
 PDF_REVIEW_REQUIRED = "review_required"
 
 
@@ -181,6 +181,39 @@ def _extract_pdf_page(filename: str, page_number: int, text: str) -> Dict[str, L
                             "rate_unit": "per_1000_monthly",
                             "provenance": {**provenance, "expandedFrom": f"{duration}+"},
                         })
+
+    expense_heading = "Table of Maximum Monthly Expense Charges"
+    expense_start = re.search(
+        r"Table\s+of\s+Maximum\s+Monthly\s+Expense\s+Charges",
+        compact,
+        re.IGNORECASE,
+    )
+    if expense_start and "POLICYYEAR" in no_space and "EXPENSECHARGE" in no_space:
+        pairs = _number_pairs(compact[expense_start.end():])
+        by_duration = {duration: (value, terminal) for duration, value, terminal in pairs}
+        terminal = max(by_duration, default=0)
+        if terminal and set(range(1, terminal + 1)) <= set(by_duration):
+            provenance = _pdf_provenance(filename, page_number, expense_heading)
+            for duration in range(1, terminal + 1):
+                value, is_terminal = by_duration[duration]
+                mechanics["fees"].append({
+                    "component": "monthly_expense",
+                    "duration": duration,
+                    "premium_mode": None,
+                    "amount": value,
+                    "fee_unit": "monthly_fixed",
+                    "provenance": dict(provenance),
+                })
+                if is_terminal:
+                    for later_duration in range(duration + 1, MAX_DURATION + 1):
+                        mechanics["fees"].append({
+                            "component": "monthly_expense",
+                            "duration": later_duration,
+                            "premium_mode": None,
+                            "amount": value,
+                            "fee_unit": "monthly_fixed",
+                            "provenance": {**provenance, "expandedFrom": f"{duration}+"},
+                        })
     return mechanics
 
 
@@ -205,14 +238,35 @@ def _read_pdf_mechanics(filename: str, content: bytes) -> Dict[str, Any]:
             warnings.append(f"{filename} page {page_number}: PDF table extraction rejected: {exc}")
             continue
         for mechanic, rows in extracted.items():
-            if mechanic == "coi" and selectors:
+            if mechanic == "coi" and selectors or mechanic == "fees" and selectors:
                 for row in rows:
-                    row.update(selectors)
+                    if mechanic == "coi" or row.get("component") == "monthly_expense":
+                        row.update(selectors)
                     row["provenance"] = {
                         **(row.get("provenance") or {}),
-                        "selectorEvidence": selectors,
+                        **({"selectorEvidence": selectors} if row.get("component") == "monthly_expense" or mechanic == "coi" else {}),
                     }
             mechanics[mechanic].extend(rows)
+    full_text = "\n".join(page_texts)
+    period_match = re.search(r"Initial\s+Expense\s+Charge\s+Period\s*:\s*\[?\s*(\d+)\s+Policy\s+Years", full_text, re.IGNORECASE)
+    premium_match = re.search(r"Premium\s+Expense\s+Charge\s+Rate\s*:\s*\[?\s*([0-9]+(?:\.[0-9]+)?)\s*\]?%", full_text, re.IGNORECASE)
+    if premium_match and period_match:
+        page_number = next((index for index, text in enumerate(page_texts, 1) if "Premium Expense Charge" in text), 1)
+        rate = float(premium_match.group(1)) / 100.0
+        period = min(MAX_DURATION, int(period_match.group(1)))
+        provenance = _pdf_provenance(filename, page_number, "Premium Expense Charge Rate")
+        mechanics["fees"].extend({
+            "component": "premium_expense", "duration": duration, "premium_mode": None,
+            "amount": rate, "fee_unit": "percent_premium", "provenance": dict(provenance),
+        } for duration in range(1, period + 1))
+    admin_match = re.search(r"Administrative\s+Charge\s+Per\s+Month\s*:\s*\$?\[?\s*([0-9]+(?:\.[0-9]+)?)", full_text, re.IGNORECASE)
+    if admin_match:
+        page_number = next((index for index, text in enumerate(page_texts, 1) if "Administrative Charge Per Month" in text), 1)
+        provenance = _pdf_provenance(filename, page_number, "Administrative Charge Per Month")
+        mechanics["fees"].append({
+            "component": "administrative", "duration": None, "premium_mode": None,
+            "amount": float(admin_match.group(1)), "fee_unit": "monthly_fixed", "provenance": provenance,
+        })
     return {"mechanics": mechanics, "warnings": warnings}
 
 
@@ -330,6 +384,7 @@ def _parse_row(mechanic: str, raw: Dict[str, Any]) -> Dict[str, Any]:
     if not 0 <= amount <= 1_000_000:
         raise ValueError("fee amount must be between 0 and 1000000")
     return {
+        "component": _text(raw.get("component")) or "policy_fee",
         "duration": _integer(raw["duration"], "duration", 1, MAX_DURATION) if _text(raw.get("duration")) else None,
         "premium_mode": _text(raw.get("premium_mode")),
         "amount": amount,
@@ -350,11 +405,17 @@ def usable_mechanics(extracted: Dict[str, Any]) -> Dict[str, Any]:
     if surrender and surrender_durations == list(range(1, max(surrender_durations) + 1)):
         usable["surrender"] = surrender
     fees = [row for row in (raw.get("fees") or []) if (row.get("provenance") or {}).get("reviewStatus") != PDF_REVIEW_REQUIRED]
-    fee_durations = sorted({row.get("duration") for row in fees if row.get("duration") is not None})
-    if fees and (
-        any(row.get("duration") is None for row in fees)
-        or fee_durations == list(range(1, 31))
-    ):
+    components: Dict[str, List[Dict[str, Any]]] = {}
+    for row in fees:
+        components.setdefault(str(row.get("component") or "policy_fee"), []).append(row)
+    complete_components = True
+    for rows in components.values():
+        durations = sorted({row.get("duration") for row in rows if row.get("duration") is not None})
+        if not any(row.get("duration") is None for row in rows) and (
+            not durations or durations != list(range(1, max(durations) + 1))
+        ):
+            complete_components = False
+    if fees and complete_components:
         usable["fees"] = fees
     return usable
 
@@ -412,7 +473,7 @@ def accept_filed_mechanic(
             for row in (item.get("rows") or [])
         ]
     selector_fields = (
-        "duration", "attained_age", "sex", "risk_class", "tobacco_status",
+        "component", "duration", "attained_age", "sex", "risk_class", "tobacco_status",
         "issue_age", "premium_mode",
     )
     value_fields = {

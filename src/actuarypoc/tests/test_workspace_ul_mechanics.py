@@ -97,6 +97,30 @@ def test_extracts_complete_pdf_coi_candidate_and_expands_explicit_terminal_age()
     assert "coi" not in usable_mechanics({"mechanics": mechanics})
 
 
+def test_extracts_maximum_monthly_expense_schedule_for_review() -> None:
+    mechanics = _extract_pdf_page("ICC18 S18PRUL.pdf", 5, """
+    POLICY SPECIFICATIONS [SPECIMEN] ICC18 S18PRUL
+    Table of Maximum Monthly Expense Charges For Life Coverage
+    Policy Year Expense Charge
+    1 $18.95 2 18.95 3+ 0
+    """)
+
+    fees = mechanics["fees"]
+    assert len(fees) == 121
+    assert fees[0] == {
+        "component": "monthly_expense", "duration": 1, "premium_mode": None,
+        "amount": 18.95, "fee_unit": "monthly_fixed",
+        "provenance": {
+            "filename": "ICC18 S18PRUL.pdf", "page": 5,
+            "tableHeading": "Table of Maximum Monthly Expense Charges",
+            "sourceType": "filed_pdf", "evidenceClass": "specimen_filed_table",
+            "valueBasis": "guaranteed_maximum", "reviewStatus": "review_required",
+        },
+    }
+    assert fees[-1]["duration"] == 121
+    assert fees[-1]["amount"] == 0.0
+
+
 def test_accepts_complete_filed_schedule_and_records_review_provenance() -> None:
     provenance = {
         "filename": "ICC18 S18PRUL.pdf", "page": 3, "sourceType": "filed_pdf",
@@ -264,6 +288,30 @@ def test_applies_document_selectors_to_extracted_coi_rows(monkeypatch) -> None:
     assert {row["risk_class"] for row in result["mechanics"]["coi"]} == {"Standard"}
     assert {row["tobacco_status"] for row in result["mechanics"]["coi"]} == {"Tobacco"}
     assert result["mechanics"]["coi"][0]["provenance"]["selectorEvidence"]["tobacco_status"] == "Tobacco"
+
+
+def test_extracts_premium_load_and_monthly_admin_charge(monkeypatch) -> None:
+    class Page:
+        def __init__(self, text: str): self.text = text
+        def extract_text(self) -> str: return self.text
+    class Reader:
+        pages = [Page("""POLICY SPECIFICATIONS [SPECIMEN] ICC18 S18PRUL
+        Premium Expense Charge Rate: [10]%
+        Administrative Charge Per Month: $[12.00]
+        Initial Expense Charge Period: [10 Policy Years]
+        """)]
+    monkeypatch.setattr(mechanics_extractor, "PdfReader", lambda stream: Reader())
+
+    result = extract_ul_mechanics("ICC18 S18PRUL.pdf", b"pdf")
+    fees = result["mechanics"]["fees"]
+
+    premium = [row for row in fees if row["component"] == "premium_expense"]
+    admin = [row for row in fees if row["component"] == "administrative"]
+    assert len(premium) == 10
+    assert premium[0]["amount"] == 0.10
+    assert premium[0]["fee_unit"] == "percent_premium"
+    assert admin[0]["amount"] == 12.0
+    assert admin[0]["fee_unit"] == "monthly_fixed"
 
 
 def test_workspace_analysis_reads_pdf_candidates_and_marks_them_for_review(monkeypatch) -> None:
@@ -525,4 +573,25 @@ def test_projection_executes_fixed_surrender_schedule_and_modal_fee() -> None:
     assert projection["rows"][0]["policyFee"] == 120.0
     assert projection["rows"][1]["policyFee"] == 120.0
     assert projection["mechanicsExecution"]["surrender"]["fullyApplied"] is True
+    assert projection["mechanicsExecution"]["fees"]["fullyApplied"] is True
+
+
+def test_projection_executes_premium_load_admin_and_monthly_expense_charges() -> None:
+    config = server.load_ul_runtime_config("ICC18 P18PR UL")
+    config.executable_mechanics = {"fees": [
+        {"component": "premium_expense", "duration": 1, "amount": 0.10, "fee_unit": "percent_premium"},
+        {"component": "administrative", "duration": None, "amount": 12.0, "fee_unit": "monthly_fixed"},
+        {"component": "monthly_expense", "duration": 1, "amount": 18.95, "fee_unit": "monthly_fixed"},
+    ]}
+
+    projection, _ = server._run_ul_projection(
+        request={"age": 45, "faceAmount": 100_000, "modalPremium": 3_000},
+        config=config,
+        horizon_years=1,
+    )
+
+    row = projection["rows"][0]
+    assert row["premiumLoad"] == 300.0
+    assert row["policyFee"] == 371.4
+    assert row["endingPolicyValue"] == pytest.approx(1982.6)
     assert projection["mechanicsExecution"]["fees"]["fullyApplied"] is True

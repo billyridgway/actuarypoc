@@ -336,6 +336,7 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
               const last = candidateRows[candidateRows.length - 1] || {};
               const provenance = first.provenance || {};
               const value = (row: any) => mechanic === "coi" ? row.rate : mechanic === "surrender" ? row.charge : row.amount;
+              const feeComponents = (candidate.components || []).map((item: string) => item.replaceAll("_", " ")).join(", ");
               return (
                 <article key={candidate.id} className="filed-mechanics-review__candidate">
                   <div>
@@ -346,6 +347,7 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
                     <div><dt>Rows</dt><dd>{candidate.rowCount || candidateRows.length}</dd></div>
                     <div><dt>Source</dt><dd>{candidate.filename || provenance.filename || "Uploaded PDF"}{candidate.page || provenance.page ? ` · page ${candidate.page || provenance.page}` : ""}</dd></div>
                     <div><dt>Table</dt><dd>{candidate.tableHeading || provenance.tableHeading || "Filed table"}</dd></div>
+                    {mechanic === "fees" && feeComponents && <div><dt>Charge type</dt><dd>{feeComponents}</dd></div>}
                     <div><dt>Value basis</dt><dd>{String(candidate.valueBasis || provenance.valueBasis || "filed").replaceAll("_", " ")}</dd></div>
                     {candidate.selectors && Object.keys(candidate.selectors).length > 0 && (
                       <div><dt>Applies to</dt><dd>{Object.entries(candidate.selectors).map(([key, value]) => `${key.replaceAll("_", " ")}: ${value}`).join(" · ")}</dd></div>
