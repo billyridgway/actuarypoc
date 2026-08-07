@@ -2041,6 +2041,65 @@ class WorkspaceProjectionRequest(BaseModel):  # type: ignore[misc]
     riskClass: Optional[str] = None
     tobaccoStatus: Optional[str] = None
     policyFeeAnnual: Optional[float] = None
+    allowSelectorFallback: bool = False
+
+
+def _selector_match_issues(
+    executable: Dict[str, Any], request: Dict[str, Any], horizon_years: int = 30,
+) -> List[Dict[str, Any]]:
+    """Find accepted selector-specific schedules that cannot serve the scenario."""
+
+    scenario = {
+        "sex": request.get("sex"),
+        "risk_class": request.get("riskClass"),
+        "tobacco_status": request.get("tobaccoStatus"),
+    }
+
+    def matches(row: Dict[str, Any], field: str) -> bool:
+        expected = row.get(field)
+        actual = scenario[field]
+        return expected in {None, "", "ANY", "All"} or (
+            actual is not None and str(expected).strip().lower() == str(actual).strip().lower()
+        )
+
+    schedules = {
+        "coi": list(executable.get("coi") or []),
+        "monthly_expense": [
+            row for row in (executable.get("fees") or [])
+            if row.get("component") == "monthly_expense"
+        ],
+    }
+    issues: List[Dict[str, Any]] = []
+    for mechanic, rows in schedules.items():
+        selector_specific = any(
+            row.get(field) not in {None, "", "ANY", "All"}
+            for row in rows for field in scenario
+        )
+        if not rows or not selector_specific:
+            continue
+        unavailable_years = []
+        for year in range(1, horizon_years + 1):
+            attained_age = int(request.get("age") or 45) + year - 1
+            matching = [
+                row for row in rows
+                if row.get("duration") in {None, year}
+                and row.get("attained_age") in {None, attained_age}
+                and all(matches(row, field) for field in scenario)
+            ]
+            if not matching:
+                unavailable_years.append(year)
+        if unavailable_years:
+            issues.append({
+                "mechanic": mechanic,
+                "years": unavailable_years,
+                "scenario": scenario,
+                "message": (
+                    f"No accepted {mechanic.replace('_', ' ')} rows match "
+                    f"sex={scenario['sex']}, risk class={scenario['risk_class']}, "
+                    f"tobacco status={scenario['tobacco_status']}."
+                ),
+            })
+    return issues
 
 
 class SyntheticCoiAcceptRequest(BaseModel):  # type: ignore[misc]
@@ -2286,9 +2345,31 @@ def api_workspace_projection(
     }
     artifact = load_workspace_executable_mechanics(workspace_id) or {}
     request["_workspaceExecutableMechanics"] = artifact.get("usable") or {}
+    selector_issues = _selector_match_issues(request["_workspaceExecutableMechanics"], request)
+    if selector_issues and not payload.allowSelectorFallback:
+        raise HTTPException(status_code=409, detail={
+            "code": "selector_table_mismatch",
+            "message": "Accepted filed tables do not cover this underwriting scenario.",
+            "issues": selector_issues,
+        })
     projection, mechanics, warnings, notes, gaps = _build_ul_projection_view(product_code, request)
     if projection is None:
         raise HTTPException(status_code=503, detail="Diagnostic projection is not available")
+    projection["selectorIntegrity"] = {
+        "passed": not selector_issues,
+        "fallbackAuthorized": bool(selector_issues and payload.allowSelectorFallback),
+        "issues": selector_issues,
+        "scenario": {
+            "sex": payload.sex,
+            "riskClass": payload.riskClass,
+            "tobaccoStatus": payload.tobaccoStatus,
+        },
+    }
+    if isinstance(projection.get("reconciliation"), dict):
+        projection["reconciliation"]["selectorIntegrityPassed"] = not selector_issues
+        projection["reconciliation"]["selectorFallbackAuthorized"] = bool(
+            selector_issues and payload.allowSelectorFallback
+        )
     graph_snapshot = dict(ws.get("latest_snapshot_json") or {})
     graph_snapshot["product"] = {
         **(graph_snapshot.get("product") or {}),
@@ -10247,6 +10328,18 @@ def _run_ul_projection(
         surrender_value = max(cash_value - surrender_charge, 0.0)
         death_benefit = max(face_amount, corridor_percentage * cash_value)
         net_amount_at_risk = max(death_benefit - cash_value, 0.0)
+        monthly_expense_rows = [row for row in fee_rows if row.get("component") == "monthly_expense"]
+
+        def source_summary(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+            if not row:
+                return None
+            provenance = row.get("provenance") or {}
+            return {
+                "filename": provenance.get("filename"),
+                "page": provenance.get("page"),
+                "tableHeading": provenance.get("tableHeading"),
+                "valueBasis": provenance.get("valueBasis"),
+            }
 
         years.append(year)
         rows.append(
@@ -10277,6 +10370,13 @@ def _run_ul_projection(
                 "narFactor": nar_factor,
                 "minimumDeathBenefitPercentage": corridor_percentage,
                 "faceAmount": face_amount,
+                "appliedClassification": {
+                    "sex": request.get("sex"),
+                    "riskClass": request.get("riskClass"),
+                    "tobaccoStatus": request.get("tobaccoStatus"),
+                },
+                "coiSource": source_summary(coi_row),
+                "monthlyExpenseSources": [source_summary(row) for row in monthly_expense_rows],
                 "status": None,
             }
         )

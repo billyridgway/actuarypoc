@@ -891,6 +891,34 @@ details > summary {
   color: #9f2020;
 }
 
+.logic-workspace__selector-fallback,
+.logic-results__selector-integrity {
+  display: grid;
+  gap: 0.5rem;
+  margin: 1rem 0;
+  padding: 0.9rem 1rem;
+  border: 1px solid #df9f28;
+  border-radius: 0.75rem;
+  background: #fff7dc;
+  color: #704900;
+}
+
+.logic-workspace__selector-fallback .button {
+  justify-self: start;
+  margin-top: 0.25rem;
+}
+
+.logic-results__selector-integrity.is-passed {
+  border-color: #78c89a;
+  background: #ecfbf2;
+  color: #126538;
+}
+
+.logic-results__selector-integrity.is-fallback {
+  border-color: #df9f28;
+  background: #fff7dc;
+}
+
 .logic-workspace__success {
   background: var(--success-soft);
   border: 1px solid color-mix(in srgb, var(--success) 45%, var(--border));
