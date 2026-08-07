@@ -618,6 +618,49 @@ def test_projection_selects_coi_by_tobacco_status() -> None:
     assert tobacco["rows"][0]["coiCharge"] > non_tobacco["rows"][0]["coiCharge"]
 
 
+def test_projection_selects_monthly_expense_by_tobacco_status() -> None:
+    config = server.load_ul_runtime_config("ICC18 P18PR UL")
+    config.executable_mechanics = {
+        "coi": [{"duration": 1, "rate": 0.0, "rate_unit": "per_1000_monthly"}],
+        "fees": [
+            {"component": "monthly_expense", "duration": 1, "sex": "M", "risk_class": "Standard", "tobacco_status": "Non-Tobacco", "amount": 18.95, "fee_unit": "monthly_fixed"},
+            {"component": "monthly_expense", "duration": 1, "sex": "M", "risk_class": "Standard", "tobacco_status": "Tobacco", "amount": 27.40, "fee_unit": "monthly_fixed"},
+        ],
+    }
+    base = {"age": 45, "faceAmount": 100_000, "modalPremium": 3_000, "sex": "M", "riskClass": "Standard"}
+
+    non_tobacco, _ = server._run_ul_projection(
+        request={**base, "tobaccoStatus": "Non-Tobacco"}, config=config, horizon_years=1,
+    )
+    tobacco, _ = server._run_ul_projection(
+        request={**base, "tobaccoStatus": "Tobacco"}, config=config, horizon_years=1,
+    )
+
+    assert non_tobacco["rows"][0]["policyFee"] == pytest.approx(18.95 * 12)
+    assert tobacco["rows"][0]["policyFee"] == pytest.approx(27.40 * 12)
+    assert tobacco["rows"][0]["cashValue"] < non_tobacco["rows"][0]["cashValue"]
+
+
+def test_selector_preflight_blocks_opposite_tobacco_table() -> None:
+    executable = {
+        "coi": [
+            {"duration": year, "sex": "M", "risk_class": "Standard", "tobacco_status": "Tobacco", "rate": 1.0, "rate_unit": "per_1000_monthly"}
+            for year in range(1, 31)
+        ],
+        "fees": [
+            {"component": "monthly_expense", "duration": year, "sex": "M", "risk_class": "Standard", "tobacco_status": "Tobacco", "amount": 27.40, "fee_unit": "monthly_fixed"}
+            for year in range(1, 31)
+        ],
+    }
+
+    issues = server._selector_match_issues(executable, {
+        "age": 45, "sex": "M", "riskClass": "Standard", "tobaccoStatus": "Non-Tobacco",
+    })
+
+    assert {issue["mechanic"] for issue in issues} == {"coi", "monthly_expense"}
+    assert all(issue["years"] == list(range(1, 31)) for issue in issues)
+
+
 def test_normalises_underwriting_class_separately_from_nicotine_status() -> None:
     assert server._normalise_risk_class_labels([
         "Standard No Nicotine Use", "Standard Nicotine Use", "Nicotine", "Preferred Non-Tobacco",

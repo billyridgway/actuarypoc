@@ -41,6 +41,7 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
   const [running, setRunning] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [runMessage, setRunMessage] = React.useState<string | null>(null);
+  const [selectorFallbackIssues, setSelectorFallbackIssues] = React.useState<any[]>([]);
   const [syntheticPreview, setSyntheticPreview] = React.useState<any>(null);
   const [generatingSynthetic, setGeneratingSynthetic] = React.useState(false);
   const [acceptingSynthetic, setAcceptingSynthetic] = React.useState(false);
@@ -77,7 +78,7 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
     setDirty(true);
   };
 
-  const runProjection = async () => {
+  const runProjection = async (allowSelectorFallback = false) => {
     const issueAge = Number(values.issue_age);
     const faceAmount = Number(values.face_amount);
     const modalPremium = Number(values.premium);
@@ -106,6 +107,7 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
     setRunning(true);
     setError(null);
     setRunMessage(null);
+    setSelectorFallbackIssues([]);
     try {
       const response = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/projection`, {
         method: "POST",
@@ -119,9 +121,19 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
           riskClass: String(values.risk_class || ""),
           tobaccoStatus: String(values.tobacco_status || ""),
           policyFeeAnnual,
+          allowSelectorFallback,
         }),
       });
-      if (!response.ok) throw new Error((await response.text()) || `Projection failed (HTTP ${response.status})`);
+      if (!response.ok) {
+        const raw = await response.text();
+        let detail: any = raw;
+        try { detail = JSON.parse(raw)?.detail ?? raw; } catch { /* retain response text */ }
+        if (response.status === 409 && detail?.code === "selector_table_mismatch") {
+          setSelectorFallbackIssues(detail.issues || []);
+          throw new Error(detail.message || "Accepted filed tables do not cover this underwriting scenario.");
+        }
+        throw new Error(typeof detail === "string" ? detail : detail?.message || `Projection failed (HTTP ${response.status})`);
+      }
       const body = await response.json();
       setIllustration(body.illustration ?? null);
       setProjectionGraph(body.projectionGraph ?? null);
@@ -305,7 +317,7 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
           <span className={`logic-workspace__run-state${dirty || !selectorReady ? " is-dirty" : ""}`}>
             {!selectorReady ? `Projection needs ${missingSelectors.length} selector${missingSelectors.length === 1 ? "" : "s"}` : dirty ? "Inputs changed" : "Projection current"}
           </span>
-          <button type="button" className="button" disabled={running || !selectorReady} onClick={runProjection}>
+          <button type="button" className="button" disabled={running || !selectorReady} onClick={() => runProjection(false)}>
             {running ? "Running projection…" : "Run projection"}
           </button>
         </div>
@@ -325,6 +337,17 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
         </div>
       )}
       {error && <p className="error">{error}</p>}
+      {selectorFallbackIssues.length > 0 && (
+        <div className="logic-workspace__selector-fallback" role="alert">
+          <strong>No exact filed-table match</strong>
+          {selectorFallbackIssues.map((issue: any) => (
+            <span key={issue.mechanic}>{issue.message} Affected policy years: {issue.years?.join(", ")}.</span>
+          ))}
+          <button type="button" className="button button-secondary" disabled={running} onClick={() => runProjection(true)}>
+            Run with disclosed fallback
+          </button>
+        </div>
+      )}
       {runMessage && <p className="logic-workspace__success" role="status">{runMessage}</p>}
       {projectionGraph?.nodes?.length ? (
         <ProjectionLogicGraph
@@ -457,6 +480,15 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
                     ? `${reconciliation.checkCount} calculation checks passed across ${rows.length} policy years. Maximum residual ${formatCurrency(reconciliation.maxResidual)}.`
                     : `${reconciliation.failures?.length || 0} checks failed in policy years ${(reconciliation.failedYears || []).join(", ")}.`}
                 </span>
+              </div>
+            )}
+            {illustration?.selectorIntegrity && (
+              <div className={`logic-results__selector-integrity ${illustration.selectorIntegrity.passed ? "is-passed" : "is-fallback"}`}>
+                <strong>{illustration.selectorIntegrity.passed ? "Filed classification matched" : "Projection used authorized selector fallback"}</strong>
+                <span>
+                  Sex: {illustration.selectorIntegrity.scenario?.sex} · Risk class: {illustration.selectorIntegrity.scenario?.riskClass} · Tobacco status: {illustration.selectorIntegrity.scenario?.tobaccoStatus}
+                </span>
+                {!illustration.selectorIntegrity.passed && <span>{illustration.selectorIntegrity.issues?.map((issue: any) => issue.mechanic.replaceAll("_", " ")).join(", ")} did not have an exact match.</span>}
               </div>
             )}
             <ProjectionChart rows={rows} />
