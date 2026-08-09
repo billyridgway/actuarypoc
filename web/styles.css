@@ -1266,3 +1266,39 @@ details > summary {
     gap: 4px;
   }
 }
+.projection-ledger__calculation > td {
+  background: #f8fafc;
+  padding: 0.65rem 1rem 1rem;
+}
+
+.projection-ledger__calculation summary,
+.logic-results__chart > summary {
+  cursor: pointer;
+  font-weight: 650;
+}
+
+.calculation-audit {
+  display: grid;
+  gap: 0.85rem;
+  margin-top: 0.85rem;
+}
+
+.calculation-audit > section {
+  border-left: 3px solid #cbd5e1;
+  padding-left: 0.85rem;
+}
+
+.calculation-audit h4,
+.calculation-audit p {
+  margin: 0.25rem 0;
+}
+
+.projection-ledger td .tag {
+  display: block;
+  margin-top: 0.3rem;
+  width: fit-content;
+}
+
+.logic-results__chart {
+  margin-top: 1rem;
+}

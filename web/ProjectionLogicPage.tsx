@@ -440,7 +440,7 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
           <div className="table-scroll">
             <table>
               <thead>{syntheticPreview.mechanic === "surrender" ? <tr><th>Duration</th><th>Charge</th><th>Unit</th></tr> : <tr><th>Attained age</th><th>Sex</th><th>Risk class</th><th>Tobacco</th><th>Annual rate / $1,000</th></tr>}</thead>
-              <tbody>{(syntheticPreview.sampleRows ?? []).map((row: any, index: number) => (
+              <tbody>{(syntheticPreview.rows ?? syntheticPreview.sampleRows ?? []).map((row: any, index: number) => (
                 syntheticPreview.mechanic === "surrender" ? <tr key={`${row.duration}-${index}`}><td>{row.duration}</td><td>{(Number(row.charge) * 100).toFixed(2)}%</td><td>{row.charge_unit}</td></tr> : <tr key={`${row.attained_age}-${row.sex}-${row.risk_class}-${index}`}><td>{row.attained_age}</td><td>{row.sex}</td><td>{row.risk_class}</td><td>{row.tobacco_status}</td><td>{row.rate}</td></tr>
               ))}</tbody>
             </table>
@@ -491,15 +491,52 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
                 {!illustration.selectorIntegrity.passed && <span>{illustration.selectorIntegrity.issues?.map((issue: any) => issue.mechanic.replaceAll("_", " ")).join(", ")} did not have an exact match.</span>}
               </div>
             )}
-            <ProjectionChart rows={rows} />
-            <details className="logic-results__ledger">
+            <details className="logic-results__ledger" open>
               <summary>{rows.length}-year annual projection ledger</summary>
               <div className="table-scroll projection-ledger">
                 <table className="kv-table">
                   <thead><tr><th>Year</th><th>Age</th><th>Opening value</th><th>Premium</th><th>COI</th><th>Policy fee</th><th>Interest</th><th>Ending value</th><th>Surrender charge</th><th>Surrender value</th><th>Death benefit</th><th>Net amount at risk</th></tr></thead>
-                  <tbody>{rows.map((row, index) => <tr key={row.year ?? index}><td>{row.year}</td><td>{row.attainedAge}</td><td>{formatCurrency(row.openingPolicyValue)}</td><td>{formatCurrency(row.annualPremium)}</td><td>{formatCurrency(row.coiCharge)}</td><td>{formatCurrency(row.policyFee)}</td><td>{formatCurrency(row.guaranteedInterest)}</td><td>{formatCurrency(row.endingPolicyValue ?? row.policyValue)}</td><td>{formatCurrency(row.surrenderCharge)}</td><td>{formatCurrency(row.surrenderValue)}</td><td>{formatCurrency(row.deathBenefit)}</td><td>{formatCurrency(row.netAmountAtRisk)}</td></tr>)}</tbody>
+                  <tbody>{rows.map((row, index) => <React.Fragment key={row.year ?? index}>
+                    <tr>
+                      <td>{row.year}</td><td>{row.attainedAge}</td><td>{formatCurrency(row.openingPolicyValue)}</td><td>{formatCurrency(row.annualPremium)}</td>
+                      <td>{formatCurrency(row.coiCharge)}{row.calculation?.coi?.mode === "flat_face_fallback" && <span className="tag">Fallback</span>}</td>
+                      <td>{formatCurrency(row.policyFee)}</td><td>{formatCurrency(row.guaranteedInterest)}</td><td>{formatCurrency(row.endingPolicyValue ?? row.policyValue)}</td>
+                      <td>{formatCurrency(row.surrenderCharge)}{row.calculation?.surrender?.mode === "declining_face_fallback" && <span className="tag">Fallback</span>}</td>
+                      <td>{formatCurrency(row.surrenderValue)}</td><td>{formatCurrency(row.deathBenefit)}</td><td>{formatCurrency(row.netAmountAtRisk)}</td>
+                    </tr>
+                    {row.calculation && <tr className="projection-ledger__calculation"><td colSpan={12}>
+                      <details>
+                        <summary>Show Year {row.year} calculation and source</summary>
+                        <div className="calculation-audit">
+                          <section>
+                            <h4>Account value roll-forward</h4>
+                            <p>{row.calculation.rollForwardFormula}</p>
+                            <p>{formatCurrency(row.openingPolicyValue)} + {formatCurrency(row.annualPremium)} − {formatCurrency(row.premiumLoad)} − {formatCurrency(row.coiCharge)} − {formatCurrency(row.policyFee)} + {formatCurrency(row.guaranteedInterest)} = <strong>{formatCurrency(row.endingPolicyValue ?? row.policyValue)}</strong></p>
+                          </section>
+                          <section>
+                            <h4>COI · {String(row.calculation.coi?.mode || "unknown").replaceAll("_", " ")}</h4>
+                            <p>{row.calculation.coi?.formula}</p>
+                            <p>Rate: {row.calculation.coi?.rate} ({row.calculation.coi?.rateUnit})</p>
+                            {row.calculation.coi?.source && <p>Source: {row.calculation.coi.source.filename || "Filed evidence"}{row.calculation.coi.source.page ? ` · page ${row.calculation.coi.source.page}` : ""}{row.calculation.coi.source.tableHeading ? ` · ${row.calculation.coi.source.tableHeading}` : ""}</p>}
+                            {row.calculation.coi?.coverageIssue && <p className="error">{row.calculation.coi.coverageIssue.message} Requested: {row.calculation.coi.coverageIssue.requested?.sex || "—"} / {row.calculation.coi.coverageIssue.requested?.riskClass || "—"} / {row.calculation.coi.coverageIssue.requested?.tobaccoStatus || "—"}, age {row.calculation.coi.coverageIssue.attainedAge}.</p>}
+                            {row.calculation.coi?.coverageIssue?.available && <p className="muted">Available table values: sex {(row.calculation.coi.coverageIssue.available.sex || []).join(", ") || "any"}; risk class {(row.calculation.coi.coverageIssue.available.riskClass || []).join(", ") || "any"}; tobacco {(row.calculation.coi.coverageIssue.available.tobaccoStatus || []).join(", ") || "any"}.</p>}
+                          </section>
+                          <section>
+                            <h4>Surrender charge · {String(row.calculation.surrender?.mode || "unknown").replaceAll("_", " ")}</h4>
+                            <p>{row.calculation.surrender?.formula}</p>
+                            {row.calculation.surrender?.source && <p>Source: {row.calculation.surrender.source.filename || "Filed evidence"}{row.calculation.surrender.source.page ? ` · page ${row.calculation.surrender.source.page}` : ""}{row.calculation.surrender.source.tableHeading ? ` · ${row.calculation.surrender.source.tableHeading}` : ""}</p>}
+                          </section>
+                          {!!row.calculation.months?.length && <details><summary>Show 12 monthly calculations</summary><div className="table-scroll"><table><thead><tr><th>Month</th><th>Premium</th><th>NAR used for COI</th><th>COI rate</th><th>COI charge</th><th>Fee</th><th>Interest</th><th>Ending value</th></tr></thead><tbody>{row.calculation.months.map((month) => <tr key={month.month}><td>{month.month}</td><td>{formatCurrency(month.premium)}</td><td>{formatCurrency(month.netAmountAtRisk)}</td><td>{month.coiRate} {month.coiRateUnit}</td><td>{formatCurrency(month.coiCharge)}</td><td>{formatCurrency(month.policyFee)}</td><td>{formatCurrency(month.interest)}</td><td>{formatCurrency(month.endingPolicyValue)}</td></tr>)}</tbody></table></div></details>}
+                        </div>
+                      </details>
+                    </td></tr>}
+                  </React.Fragment>)}</tbody>
                 </table>
               </div>
+            </details>
+            <details className="logic-results__chart">
+              <summary>Show projection chart</summary>
+              <ProjectionChart rows={rows} />
             </details>
           </>
         ) : <p className="muted">Run the projection to generate results.</p>}
