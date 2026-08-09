@@ -524,6 +524,9 @@ def test_projection_executes_rates_surrender_and_fee_schedules() -> None:
     assert row["calculation"]["coi"]["formula"] == "monthly net amount at risk / 1,000 × selected annual COI rate / 12"
     assert len(row["calculation"]["months"]) == 12
     assert row["calculation"]["months"][0]["netAmountAtRisk"] > 0
+    assert row["calculation"]["months"][0]["coiBasisLabel"] == "net amount at risk"
+    assert row["calculation"]["months"][0]["coiDivisor"] == 1000.0
+    assert row["calculation"]["months"][0]["coiAnnualizationDivisor"] == 12.0
     assert sum(month["coiCharge"] for month in row["calculation"]["months"]) == pytest.approx(row["coiCharge"])
     assert row["calculation"]["surrender"]["mode"] == "evidenced_schedule"
 
@@ -555,6 +558,11 @@ def test_projection_retains_placeholder_for_unmatched_coi_selector() -> None:
     assert calculation["mode"] == "flat_face_fallback"
     assert calculation["coverageIssue"]["requested"]["sex"] == "F"
     assert calculation["coverageIssue"]["available"]["sex"] == ["M"]
+    month = projection["rows"][0]["calculation"]["months"][0]
+    assert month["coiBasisLabel"] == "face amount"
+    assert month["coiBasis"] == 100_000
+    assert month["coiDivisor"] == 1.0
+    assert month["coiAnnualizationDivisor"] == 12.0
 
 
 def test_projection_explanation_describes_the_executed_coi_and_surrender_mechanics() -> None:
@@ -587,6 +595,9 @@ def test_projection_explanation_describes_the_executed_coi_and_surrender_mechani
     assert steps["surrender_charge"]["formulaText"] == "face amount / 1,000 × selected surrender charge"
     assert steps["surrender_charge"]["inputs"][1]["source"] == "policy.pdf"
     assert steps["opening_policy_value"]["result"]["value"] == projection["rows"][0]["openingPolicyValue"]
+    month = projection["rows"][0]["calculation"]["months"][0]
+    assert month["coiDivisor"] == 1000.0
+    assert month["coiAnnualizationDivisor"] == 1.0
 
 
 def test_engine_capabilities_do_not_depend_on_workspace_schedule_availability() -> None:

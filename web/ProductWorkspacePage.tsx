@@ -54,6 +54,10 @@ export interface WorkspaceRow {
       premium?: number;
       premiumLoad?: number;
       netAmountAtRisk?: number;
+      coiBasis?: number;
+      coiBasisLabel?: string;
+      coiDivisor?: number;
+      coiAnnualizationDivisor?: number;
       coiRate?: number;
       coiRateUnit?: string;
       coiCharge?: number;

@@ -1302,3 +1302,18 @@ details > summary {
 .logic-results__chart {
   margin-top: 1rem;
 }
+
+.calculation-equation {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  min-width: 22rem;
+  white-space: nowrap;
+}
+
+.calculation-equation__basis,
+.calculation-equation small {
+  color: var(--text-muted);
+  display: block;
+  font-family: var(--font-sans);
+  font-size: 0.72rem;
+  white-space: normal;
+}
