@@ -26,6 +26,46 @@ export interface WorkspaceRow {
   deathBenefit?: number;
   netAmountAtRisk?: number;
   status?: string | null;
+  calculation?: {
+    rollForwardFormula?: string;
+    coi?: {
+      mode?: string;
+      formula?: string;
+      rate?: number;
+      rateUnit?: string;
+      source?: { filename?: string; page?: number; tableHeading?: string; valueBasis?: string } | null;
+      coverageIssue?: {
+        year?: number;
+        attainedAge?: number;
+        requested?: { sex?: string; riskClass?: string; tobaccoStatus?: string };
+        available?: { sex?: unknown[]; riskClass?: unknown[]; tobaccoStatus?: unknown[]; duration?: unknown[]; attainedAge?: unknown[] };
+        message?: string;
+      } | null;
+    };
+    surrender?: {
+      mode?: string;
+      formula?: string;
+      charge?: number | null;
+      chargeUnit?: string;
+      source?: { filename?: string; page?: number; tableHeading?: string; valueBasis?: string } | null;
+    };
+    months?: Array<{
+      month?: number;
+      premium?: number;
+      premiumLoad?: number;
+      netAmountAtRisk?: number;
+      coiBasis?: number;
+      coiBasisLabel?: string;
+      coiDivisor?: number;
+      coiAnnualizationDivisor?: number;
+      coiRate?: number;
+      coiRateUnit?: string;
+      coiCharge?: number;
+      policyFee?: number;
+      interest?: number;
+      endingPolicyValue?: number;
+    }>;
+  };
 }
 
 export interface ProjectionInput {
@@ -747,7 +787,6 @@ export const ProjectionChart: React.FC<{ rows: WorkspaceRow[] }> = ({ rows }) =>
     left + ((year - minYear) / Math.max(maxYear - minYear, 1)) * (width - left - right);
   const y = (value: number) => top + (1 - value / maxValue) * (height - top - bottom);
   const ticks = [0, 0.25, 0.5, 0.75, 1];
-  const crossovers = findProjectionCrossovers(rows, visibleSeries).slice(0, 12);
   const hoveredRow = hoveredIndex == null ? null : rows[hoveredIndex];
   const hoveredYear = Number(hoveredRow?.year ?? minYear);
   const hoveredX = x(hoveredYear);
@@ -793,14 +832,6 @@ export const ProjectionChart: React.FC<{ rows: WorkspaceRow[] }> = ({ rows }) =>
             .join(" ");
           return <polyline key={item.key} points={points} fill="none" stroke={item.color} strokeWidth="3" />;
         })}
-        {crossovers.map((event, index) => {
-          const startX = x(event.year);
-          if (event.kind === "overlap_range" && event.endYear != null) {
-            const endX = x(event.endYear);
-            return <line key={`${event.first.key}-${event.second.key}-${event.year}`} x1={startX} x2={endX} y1={y(event.value)} y2={y(Number(rows.find((row) => Number(row.year) === event.endYear)?.[event.first.key] ?? event.value))} className="projection-chart__overlap" />;
-          }
-          return <g key={`${event.first.key}-${event.second.key}-${event.year}`}><circle cx={startX} cy={y(event.value)} r="6" className="projection-chart__crossover-marker" /><text x={startX} y={y(event.value) + 3} textAnchor="middle" className="projection-chart__crossover-number">{index + 1}</text></g>;
-        })}
         {hoveredRow && (
           <g className="projection-chart__hover">
             <line x1={hoveredX} x2={hoveredX} y1={top} y2={height - bottom} className="projection-chart__cursor" />
@@ -828,19 +859,6 @@ export const ProjectionChart: React.FC<{ rows: WorkspaceRow[] }> = ({ rows }) =>
           </button>
         ))}
       </div>
-      {crossovers.length > 0 && (
-        <div className="projection-chart__events" aria-label="Important projection intersections">
-          <strong>Important intersections</strong>
-          <div>{crossovers.map((event, index) => (
-            <span key={`${event.first.key}-${event.second.key}-${event.year}`}>
-              <b>{event.kind === "overlap_range" ? "↔" : index + 1}</b>
-              {event.kind === "overlap_range"
-                ? `${event.first.label} and ${event.second.label} overlap from year ${Math.round(event.year)}${event.endYear && event.endYear !== event.year ? ` through ${Math.round(event.endYear)}` : ""}`
-                : `${event.first.label} and ${event.second.label} ${event.kind === "crossing" ? "cross" : "meet"} near year ${event.year.toFixed(1)} at ${formatCurrency(event.value)}`}
-            </span>
-          ))}</div>
-        </div>
-      )}
     </div>
   );
 };

@@ -9289,32 +9289,14 @@ def build_ul_projection_explanation(
     death_benefit = float(target_row.get("deathBenefit") or 0.0)
     net_amount_at_risk = float(target_row.get("netAmountAtRisk") or 0.0)
 
-    # Invert the simple annual projection logic to recover the opening
-    # policy value for this year. The core loop is:
-    #   base = opening_value + annual_premium - premium_load
-    #   guaranteed_interest = base * guaranteed_rate
-    #   policy_value_end = base + guaranteed_interest - coi_charge - policy_fee_annual
-    #
-    # Let X = opening_value + annual_premium. Then:
-    #   policy_value_end = X * (1 + guaranteed_rate) - coi - fee
-    #   X = (policy_value_end + coi + fee) / (1 + guaranteed_rate)
-    #   opening_value = X - annual_premium + premium_load
-    #
-    # This matches `_run_ul_projection` exactly even when the
-    # guaranteed rate is zero.
-    one_plus_rate = 1.0 + guaranteed_rate
-    if one_plus_rate == 0.0:
-        # Degenerate case; fall back to a simpler reconstruction that
-        # mirrors the zero-rate branch of the loop.
-        base = end_policy_value + coi_charge + policy_fee_annual
-    else:
-        base = (end_policy_value + coi_charge + policy_fee_annual) / one_plus_rate
-
-    opening_policy_value = base - annual_premium + premium_load
-    if opening_policy_value < 0.0:
-        # Guard against tiny negative noise from floating point
-        # inversion; the engine itself floors at zero.
-        opening_policy_value = 0.0
+    # The engine now retains the executed opening value and calculation
+    # metadata.  Do not invert an older annual approximation: UL mechanics
+    # execute monthly and the approximation can misstate timing and charges.
+    opening_policy_value = float(target_row.get("openingPolicyValue") or 0.0)
+    calculation = target_row.get("calculation") or {}
+    coi_calculation = calculation.get("coi") or {}
+    surrender_calculation = calculation.get("surrender") or {}
+    monthly_calculations = calculation.get("months") or []
 
     # Helper to map high-level assumption provenance into a lookup by
     # (case-insensitive) name substring.
@@ -9367,14 +9349,9 @@ def build_ul_projection_explanation(
             "formulaText": "Opening policy value is the prior year closing policy value, or zero at issue.",
             "inputs": [
                 _explained_value(
-                    label="Reconstructed from projection row",
-                    value={
-                        "endPolicyValue": end_policy_value,
-                        "annualPremium": annual_premium,
-                        "guaranteedRate": guaranteed_rate,
-                        "coiCharge": coi_charge,
-                        "policyFeeAnnual": policy_fee_annual,
-                    },
+                    label="Executed opening value",
+                    value=opening_policy_value,
+                    unit="USD",
                     source="Projection row",
                 ),
             ],
@@ -9414,21 +9391,21 @@ def build_ul_projection_explanation(
             "id": "coi_charge_deducted",
             "order": 3,
             "title": "COI charge deducted",
-            "formulaText": "COI charge is a flat fraction of face amount for this draft Promise UL projection.",
+            "formulaText": coi_calculation.get("formula") or "COI calculation details are unavailable.",
             "inputs": [
                 _explained_value(
-                    label="Face amount",
-                    value=face_amount,
-                    unit="USD",
-                    source="Projection row",
+                    label="Calculation mode",
+                    value=coi_calculation.get("mode") or "unknown",
+                    source="Executed projection",
                 ),
                 _explained_value(
-                    label="COI rate (flat)",
-                    value=coi_rate,
-                    unit="rate",
-                    source=_prov_source(prov_coi_rate),
-                    source_detail=prov_coi_rate.get("name") or None,
+                    label="COI rate",
+                    value=coi_calculation.get("rate", coi_rate),
+                    unit=coi_calculation.get("rateUnit") or "rate",
+                    source=(coi_calculation.get("source") or {}).get("filename") or _prov_source(prov_coi_rate),
+                    source_detail=(coi_calculation.get("source") or {}).get("tableHeading") or prov_coi_rate.get("name") or None,
                 ),
+                _explained_value(label="Monthly calculations", value=monthly_calculations, source="Executed projection"),
             ],
             "result": _explained_value(
                 label="COI charge deducted",
@@ -9473,7 +9450,7 @@ def build_ul_projection_explanation(
             "id": "interest_credited",
             "order": 5,
             "title": "Interest credited",
-            "formulaText": "Interest is credited at the guaranteed rate on beginning policy value plus current-year premium.",
+            "formulaText": "Interest is credited monthly after premium, COI, and policy-fee transactions for the month.",
             "inputs": [
                 _explained_value(
                     label="Guaranteed credited rate",
@@ -9523,14 +9500,15 @@ def build_ul_projection_explanation(
             "id": "surrender_charge",
             "order": 7,
             "title": "Surrender charge",
-            "formulaText": "Draft surrender charge based on a declining percentage of face amount over the surrender period.",
+            "formulaText": surrender_calculation.get("formula") or "Surrender charge calculation details are unavailable.",
             "inputs": [
                 _explained_value(label="Face amount", value=face_amount, unit="USD", source="Projection row"),
                 _explained_value(
-                    label="Surrender schedule",
-                    value=prov_surrender.get("value"),
-                    source=_prov_source(prov_surrender),
-                    source_detail=prov_surrender.get("name") or None,
+                    label="Applied charge",
+                    value=surrender_calculation.get("charge"),
+                    unit=surrender_calculation.get("chargeUnit"),
+                    source=(surrender_calculation.get("source") or {}).get("filename") or _prov_source(prov_surrender),
+                    source_detail=(surrender_calculation.get("source") or {}).get("tableHeading") or prov_surrender.get("name") or None,
                 ),
             ],
             "result": _explained_value(
@@ -10157,6 +10135,11 @@ def _run_ul_projection(
     max_surrender_pct = config.max_surrender_pct
     coi_rate = config.coi_rate_flat
     executable = config.executable_mechanics or {}
+    accepted_coi_rows = list(executable.get("coi") or [])
+
+    def _available_coi_values(field: str) -> List[Any]:
+        values = {row.get(field) for row in accepted_coi_rows if row.get(field) not in {None, "", "ANY", "All"}}
+        return sorted(values, key=lambda value: str(value))
 
     def _matches(row: Dict[str, Any], field: str, actual: Any) -> bool:
         expected = row.get(field)
@@ -10220,7 +10203,7 @@ def _run_ul_projection(
         premium_load = 0.0
         if not fee_rows:
             fallback_years["fees"].append(year)
-        coi_row = _select(list(executable.get("coi") or []), year, attained_age)
+        coi_row = _select(accepted_coi_rows, year, attained_age)
         if not coi_row:
             fallback_years["coi"].append(year)
         nar_row = _select(list(executable.get("nar_factors") or []), year, attained_age)
@@ -10236,6 +10219,7 @@ def _run_ul_projection(
         guaranteed_interest = 0.0
         coi_charge = 0.0
         death_benefit = face_amount
+        monthly_calculations: List[Dict[str, Any]] = []
 
         for month in range(1, 13):
             payment_due = (month - 1) % payment_interval == 0
@@ -10281,6 +10265,24 @@ def _run_ul_projection(
             month_interest = policy_value * monthly_interest_rate
             policy_value += month_interest
             guaranteed_interest += month_interest
+            monthly_calculations.append(
+                {
+                    "month": month,
+                    "premium": gross_premium,
+                    "premiumLoad": month_premium_load,
+                    "netAmountAtRisk": charge_nar,
+                    "coiBasis": charge_nar if coi_row else face_amount,
+                    "coiBasisLabel": "net amount at risk" if coi_row else "face amount",
+                    "coiDivisor": 1000.0 if coi_row and coi_row.get("rate_unit") in {"per_1000_monthly", "per_1000_annual"} else 1.0,
+                    "coiAnnualizationDivisor": 1.0 if coi_row and coi_row.get("rate_unit") == "per_1000_monthly" else 12.0,
+                    "coiRate": float(coi_row["rate"]) if coi_row else coi_rate,
+                    "coiRateUnit": coi_row.get("rate_unit") if coi_row else "percent_face_annual",
+                    "coiCharge": month_coi,
+                    "policyFee": monthly_fee,
+                    "interest": month_interest,
+                    "endingPolicyValue": policy_value,
+                }
+            )
 
         # Placeholder surrender charge schedule: linear decline from
         # max_surrender_pct of face down to 0 over the surrender period.
@@ -10377,6 +10379,60 @@ def _run_ul_projection(
                 },
                 "coiSource": source_summary(coi_row),
                 "monthlyExpenseSources": [source_summary(row) for row in monthly_expense_rows],
+                "calculation": {
+                    "rollForwardFormula": (
+                        "opening policy value + premium - premium load - COI charge "
+                        "- policy fees + credited interest = ending policy value"
+                    ),
+                    "coi": {
+                        "mode": "evidenced_table" if coi_row else "flat_face_fallback",
+                        "formula": (
+                            "monthly net amount at risk / 1,000 × selected COI rate"
+                            if coi_row and coi_row.get("rate_unit") == "per_1000_monthly"
+                            else "monthly net amount at risk / 1,000 × selected annual COI rate / 12"
+                            if coi_row and coi_row.get("rate_unit") == "per_1000_annual"
+                            else "monthly net amount at risk × selected annual COI rate / 12"
+                            if coi_row
+                            else "face amount × flat annual fallback rate / 12"
+                        ),
+                        "rate": float(coi_row["rate"]) if coi_row else coi_rate,
+                        "rateUnit": coi_row.get("rate_unit") if coi_row else "percent_face_annual",
+                        "source": source_summary(coi_row),
+                        "coverageIssue": None if coi_row else {
+                            "year": year,
+                            "attainedAge": attained_age,
+                            "requested": {
+                                "sex": request.get("sex"),
+                                "riskClass": request.get("riskClass"),
+                                "tobaccoStatus": request.get("tobaccoStatus"),
+                            },
+                            "available": {
+                                "sex": _available_coi_values("sex"),
+                                "riskClass": _available_coi_values("risk_class"),
+                                "tobaccoStatus": _available_coi_values("tobacco_status"),
+                                "duration": _available_coi_values("duration"),
+                                "attainedAge": _available_coi_values("attained_age"),
+                            },
+                            "message": "No accepted COI row matched this policy year and classification.",
+                        },
+                    },
+                    "surrender": {
+                        "mode": "evidenced_schedule" if surrender_row else "declining_face_fallback",
+                        "formula": (
+                            "face amount × selected surrender percentage"
+                            if surrender_row and surrender_row.get("charge_unit") == "percent_face"
+                            else "face amount / 1,000 × selected surrender charge"
+                            if surrender_row and surrender_row.get("charge_unit") == "per_1000_face"
+                            else "selected fixed surrender charge"
+                            if surrender_row
+                            else "face amount × simplified declining fallback percentage"
+                        ),
+                        "charge": float(surrender_row["charge"]) if surrender_row else None,
+                        "chargeUnit": surrender_row.get("charge_unit") if surrender_row else "percent_face",
+                        "source": source_summary(surrender_row),
+                    },
+                    "months": monthly_calculations,
+                },
                 "status": None,
             }
         )

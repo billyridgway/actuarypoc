@@ -520,6 +520,15 @@ def test_projection_executes_rates_surrender_and_fee_schedules() -> None:
     assert row["policyFee"] == 120.0
     assert row["surrenderCharge"] == 5_000.0
     assert projection["mechanicsExecution"]["coi"]["fullyApplied"] is True
+    assert row["calculation"]["coi"]["mode"] == "evidenced_table"
+    assert row["calculation"]["coi"]["formula"] == "monthly net amount at risk / 1,000 × selected annual COI rate / 12"
+    assert len(row["calculation"]["months"]) == 12
+    assert row["calculation"]["months"][0]["netAmountAtRisk"] > 0
+    assert row["calculation"]["months"][0]["coiBasisLabel"] == "net amount at risk"
+    assert row["calculation"]["months"][0]["coiDivisor"] == 1000.0
+    assert row["calculation"]["months"][0]["coiAnnualizationDivisor"] == 12.0
+    assert sum(month["coiCharge"] for month in row["calculation"]["months"]) == pytest.approx(row["coiCharge"])
+    assert row["calculation"]["surrender"]["mode"] == "evidenced_schedule"
 
 
 def test_projection_retains_placeholder_for_unmatched_coi_selector() -> None:
@@ -545,6 +554,50 @@ def test_projection_retains_placeholder_for_unmatched_coi_selector() -> None:
 
     assert projection["rows"][0]["coiCharge"] == pytest.approx(400.0)
     assert projection["mechanicsExecution"]["coi"]["fallbackYears"] == [1]
+    calculation = projection["rows"][0]["calculation"]["coi"]
+    assert calculation["mode"] == "flat_face_fallback"
+    assert calculation["coverageIssue"]["requested"]["sex"] == "F"
+    assert calculation["coverageIssue"]["available"]["sex"] == ["M"]
+    month = projection["rows"][0]["calculation"]["months"][0]
+    assert month["coiBasisLabel"] == "face amount"
+    assert month["coiBasis"] == 100_000
+    assert month["coiDivisor"] == 1.0
+    assert month["coiAnnualizationDivisor"] == 12.0
+
+
+def test_projection_explanation_describes_the_executed_coi_and_surrender_mechanics() -> None:
+    config = server.load_ul_runtime_config("ICC18 P18PR UL")
+    config.executable_mechanics = {
+        "coi": [{
+            "duration": 1, "rate": 1.25, "rate_unit": "per_1000_monthly",
+            "provenance": {"filename": "rates.pdf", "page": 4, "tableHeading": "COI Rates"},
+        }],
+        "surrender": [{
+            "duration": 1, "charge": 17.5, "charge_unit": "per_1000_face",
+            "provenance": {"filename": "policy.pdf", "page": 3, "tableHeading": "Surrender Charge Rates"},
+        }],
+    }
+    request = {"age": 45, "faceAmount": 100_000, "modalPremium": 3_000}
+    projection, normalised_request = server._run_ul_projection(
+        request=request, config=config, horizon_years=1,
+    )
+
+    explanation = server.build_ul_projection_explanation(
+        product_code="ICC18 P18PR UL", request=normalised_request,
+        config=config, projection=projection, year=1,
+    )
+    steps = {step["id"]: step for step in explanation["steps"]}
+
+    assert "net amount at risk" in steps["coi_charge_deducted"]["formulaText"]
+    assert "flat fraction of face" not in steps["coi_charge_deducted"]["formulaText"]
+    assert steps["coi_charge_deducted"]["inputs"][0]["value"] == "evidenced_table"
+    assert steps["coi_charge_deducted"]["inputs"][1]["source"] == "rates.pdf"
+    assert steps["surrender_charge"]["formulaText"] == "face amount / 1,000 × selected surrender charge"
+    assert steps["surrender_charge"]["inputs"][1]["source"] == "policy.pdf"
+    assert steps["opening_policy_value"]["result"]["value"] == projection["rows"][0]["openingPolicyValue"]
+    month = projection["rows"][0]["calculation"]["months"][0]
+    assert month["coiDivisor"] == 1000.0
+    assert month["coiAnnualizationDivisor"] == 1.0
 
 
 def test_engine_capabilities_do_not_depend_on_workspace_schedule_availability() -> None:
