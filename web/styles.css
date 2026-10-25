@@ -1391,3 +1391,66 @@ details > summary {
   color: #92400e;
   padding: 0.75rem;
 }
+
+/* Phase 2 (the chassis): product-input slots */
+.slot-card {
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+  margin-top: 1rem;
+  padding: 1rem;
+}
+
+.slot-card:target {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.35);
+}
+
+.slot-stale-banner {
+  background: #fef3c7;
+  border: 1px solid #f59e0b;
+  border-radius: 0.6rem;
+  color: #92400e;
+  margin-top: 1rem;
+  padding: 0.75rem;
+}
+
+.slot-table-wrap {
+  max-height: 20rem;
+  overflow: auto;
+  margin: 0.5rem 0;
+}
+
+.slot-table td,
+.slot-table th {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.slot-edit {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: flex-start;
+  margin-top: 0.75rem;
+}
+
+.slot-paste {
+  flex: 1 1 24rem;
+  font-family: monospace;
+}
+
+.slot-fee-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  width: 100%;
+}
+
+.slot-candidate {
+  margin-top: 0.75rem;
+}
+
+.slot-history {
+  margin-top: 1.25rem;
+}

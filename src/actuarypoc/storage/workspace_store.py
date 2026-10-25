@@ -38,6 +38,10 @@ def _executable_mechanics_key(workspace_id: str) -> str:
     return f"workspaces/{workspace_id}/analysis/executable-ul-mechanics.json"
 
 
+def _mechanics_changes_key(workspace_id: str) -> str:
+    return f"workspaces/{workspace_id}/analysis/mechanics-changes.json"
+
+
 def _client_and_bucket() -> tuple[Any, str]:
     client = get_minio_client()
     ensure_bucket(client)
@@ -172,6 +176,67 @@ def load_workspace_executable_mechanics(workspace_id: str) -> Optional[Dict[str,
     return _read_json(_executable_mechanics_key(workspace_id))
 
 
+def load_workspace_mechanics_changes(workspace_id: str) -> List[Dict[str, Any]]:
+    """Return the workspace's mechanics change log, oldest first."""
+
+    payload = _read_json(_mechanics_changes_key(workspace_id)) or {}
+    changes = payload.get("changes")
+    return list(changes) if isinstance(changes, list) else []
+
+
+def append_workspace_mechanics_change(
+    workspace_id: str, change: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """Append one change record to the workspace's mechanics change log.
+
+    The log is the audit trail Eddy asked for: every slot edit records
+    who changed what, when, and the prior -> new summary.  It is stored
+    as its own object under the workspace prefix so workspace deletion
+    removes it with everything else.
+    """
+
+    if get_workspace(workspace_id) is None:
+        raise ValueError("workspace does not exist")
+    changes = load_workspace_mechanics_changes(workspace_id)
+    changes.append(change)
+    _write_json(_mechanics_changes_key(workspace_id), {"changes": changes})
+    return changes
+
+
+def set_workspace_projection_stale(
+    workspace_id: str,
+    *,
+    stale: bool,
+    slots: Optional[Sequence[str]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Mark (or clear) the workspace's saved projection as stale.
+
+    A slot edit makes the persisted analysis snapshot older than the
+    mechanics it was computed from; the flag tells the UI to offer the
+    re-run flow.  Analysis itself clears the flag via
+    ``update_workspace_analysis``.
+    """
+
+    workspace = get_workspace(workspace_id)
+    if workspace is None:
+        return None
+    if stale:
+        existing = list(workspace.get("projection_stale_slots") or [])
+        for slot in slots or []:
+            if slot not in existing:
+                existing.append(slot)
+        workspace["projection_stale"] = True
+        workspace["projection_stale_since"] = _now()
+        workspace["projection_stale_slots"] = existing
+    else:
+        workspace["projection_stale"] = False
+        workspace["projection_stale_since"] = None
+        workspace["projection_stale_slots"] = []
+    workspace["updated_at"] = _now()
+    _write_json(_workspace_key(workspace_id), workspace)
+    return workspace
+
+
 def update_workspace_analysis(
     workspace_id: str,
     *,
@@ -211,6 +276,12 @@ def update_workspace_analysis(
             "compliance_missing_count": compliance_missing_count,
             "projection_trust_level": projection_trust_level,
             "last_analysis_run_id": last_analysis_run_id,
+            # A fresh analysis recomputes the projection from the current
+            # mechanics (workspace edits included), so it clears any
+            # staleness a slot edit marked.
+            "projection_stale": False,
+            "projection_stale_since": None,
+            "projection_stale_slots": [],
             "updated_at": _now(),
         }
     )

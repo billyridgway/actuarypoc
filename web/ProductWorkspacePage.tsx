@@ -1,5 +1,6 @@
 import React from "react";
 import { ProjectionLedger } from "./ProjectionLedger";
+import { MechanicsPanel } from "./MechanicsPanel";
 
 interface WorkspaceAssumption {
   name?: string;
@@ -171,6 +172,7 @@ interface WorkspacePayload {
       whyItMatters?: string;
       suggestedUploads?: string[];
       source?: string;
+      slotId?: string;
     }>;
     warnings?: string[];
     notes?: string[];
@@ -989,6 +991,21 @@ export const ProductWorkspacePage: React.FC<{
     if (!featureRequests || !Array.isArray(featureRequests)) return undefined;
     const cid = (capabilityId || "").toString();
     return featureRequests.find((fr) => (fr.capabilityId || "") === cid);
+  };
+
+  // Phase 2: after a slot edit or candidate acceptance in the product
+  // inputs panel, reload the workspace snapshot so projections and gaps
+  // reflect the mechanics now in force.
+  const reloadWorkspaceSnapshot = async () => {
+    if (!workspaceId) return;
+    try {
+      const resp = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}`);
+      if (!resp.ok) return;
+      const body = await resp.json();
+      if (body.snapshot) setData(body.snapshot as WorkspacePayload);
+    } catch {
+      /* the panel surfaces its own errors; a failed refresh is non-fatal */
+    }
   };
 
   const reloadFeatureRequests = async () => {
@@ -1965,6 +1982,10 @@ export const ProductWorkspacePage: React.FC<{
       </section>
       )}
 
+      {workspaceId && (
+        <MechanicsPanel workspaceId={workspaceId} onSnapshotReload={reloadWorkspaceSnapshot} />
+      )}
+
       <section className="card home-card">
         <h2>Missing information / gaps</h2>
         <p className="muted">
@@ -2069,6 +2090,11 @@ export const ProductWorkspacePage: React.FC<{
                         onChange={handleFileChange}
                       />
                     </label>
+                    {item.slotId && (
+                      <a className="button button-ghost" href={`#slot-${item.slotId}`}>
+                        Open in product inputs
+                      </a>
+                    )}
                     <button type="button" className="button button-ghost" onClick={handleRerunClick}>
                       Rerun understanding
                     </button>

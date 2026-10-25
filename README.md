@@ -31,6 +31,19 @@ The public API is limited to:
   objects.
 - `POST /api/workspaces/{workspace_id}/documents` — upload a document.
 - `POST /api/workspaces/{workspace_id}/analyze` — analyze the workspace.
+- `GET /api/workspaces/{workspace_id}/mechanics-panel` — the product-input
+  slots (COI schedule, surrender schedule, policy/admin fees, NAR factor,
+  corridor, crediting) with status, values in force, provenance, the
+  gap → slot mapping, and the slot change log.
+- `PUT /api/workspaces/{workspace_id}/mechanics-panel/{slot_id}` — replace a
+  slot's table (`rows` or pasted `csvText`) or set the NAR factor (`factor`),
+  validated by the same validators ingestion uses; invalid input is rejected
+  whole. Each edit is recorded in the change log and marks the saved
+  projection stale until analysis is re-run.
+- `POST /api/workspaces/{workspace_id}/mechanics-panel/{slot_id}/table-file`
+  — upload a CSV/TSV replacement table for a slot.
+- `GET /api/workspaces/{workspace_id}/mechanics-panel/history` — the slot
+  change log (audit trail), newest first.
 - `GET /api/workspaces/{workspace_id}/feature-requests` — list workspace
   feature requests.
 - `POST /api/workspaces/{workspace_id}/feature-requests` — create a workspace
