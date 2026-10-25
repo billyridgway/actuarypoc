@@ -51,6 +51,7 @@ from actuarypoc.domain.ul_requirements import get_ul_requirement_definitions
 from actuarypoc.domain.capabilities import CapabilityAssessmentItem, get_ul_capabilities
 from actuarypoc.domain.projection_graph import compile_projection_graph
 from actuarypoc.domain.projection_ledger import build_projection_ledger, build_rate_tables_in_force
+from actuarypoc.domain import rule_bank as _rule_bank
 from actuarypoc.domain.requirements_classification import (
     Applicability as ReqApplicability,
     Evidence as ReqEvidence,
@@ -91,6 +92,11 @@ from actuarypoc.extract.workspace_mechanics_corrections import (
     reapply_corrections as _reapply_corrections,
     suggest_variant as _suggest_correction_variant,
     variants_for_slot as _correction_variants_for_slot,
+)
+from actuarypoc.extract.workspace_mechanics_proposals import (
+    apply_proposal as _apply_proposal,
+    dismiss_proposal as _dismiss_proposal,
+    generate_proposals as _generate_proposals,
 )
 from actuarypoc.agents.pmr_ai import summarise_pmr, propose_decision
 from actuarypoc.agents.scenario_ai import generate_scenarios_for_product
@@ -2548,6 +2554,12 @@ def api_get_mechanics_panel(workspace_id: str) -> Dict[str, Any]:
         slot_view["correctionVariants"] = (
             _correction_variants_for_slot(slot_def) if slot_def else []
         )
+    # Phase 4: extraction proposals (deterministic signals from the
+    # filing's tables and slices, each with page evidence, confirmed
+    # through the proposal routes below) and the rule-bank catalog the
+    # slots and corrections resolve through.
+    panel["proposals"] = _workspace_proposals(workspace_id, artifact)
+    panel["ruleBank"] = _rule_bank.bank_catalog()
     panel["workspaceId"] = workspace_id
     return panel
 
@@ -2668,6 +2680,11 @@ class MechanicsCorrectionRequest(BaseModel):  # type: ignore[misc]
     text: Optional[str] = None
     who: Optional[str] = None
     confirmed: bool = False
+
+
+class ProposalActionRequest(BaseModel):  # type: ignore[misc]
+    confirmed: bool = False
+    who: Optional[str] = None
 
 
 def _correction_spec(payload: MechanicsCorrectionRequest) -> Dict[str, Any]:
@@ -2830,6 +2847,154 @@ def api_apply_mechanics_correction(
         "change": change,
         "projectionStale": False,
         "mapped": False,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: extraction proposals
+#
+# Deterministic proposals generated from the workspace's extracted
+# mechanics and Phase 0 document slices (filed table candidates +
+# prose switch signals), each with page evidence.  A proposal applies
+# only on explicit confirmation, through the same paths as the manual
+# action it mirrors; dismissals persist on the artifact.
+# ---------------------------------------------------------------------------
+
+
+def _load_workspace_slices(workspace_id: str) -> List[Dict[str, Any]]:
+    """Load the workspace's Phase 0 document slices from the object store.
+
+    Best-effort: a workspace without slices (or with an unreadable
+    slices object) still gets its filed-table proposals.
+    """
+
+    ws = get_workspace(workspace_id) or {}
+    snapshot = ws.get("latest_snapshot_json") or {}
+    if not isinstance(snapshot, dict):
+        snapshot = {}
+    slices: List[Dict[str, Any]] = []
+    client = None
+    for record in snapshot.get("documentMaps") or []:
+        key = (record or {}).get("slicesKey")
+        if not key:
+            continue
+        response = None
+        try:
+            if client is None:
+                client = get_minio_client()
+            response = client.get_object(get_bucket_name(), key)
+            payload = json.loads(response.read().decode("utf-8"))
+            slices.extend(payload.get("slices") or [])
+        except Exception:  # noqa: BLE001 - proposals degrade to table-only
+            continue
+        finally:
+            if response is not None:
+                response.close()
+                response.release_conn()
+    return slices
+
+
+def _workspace_proposals(
+    workspace_id: str, artifact: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    return _generate_proposals(artifact, _load_workspace_slices(workspace_id))
+
+
+def _find_workspace_proposal(
+    workspace_id: str, artifact: Dict[str, Any], proposal_id: str
+) -> Optional[Dict[str, Any]]:
+    for proposal in _workspace_proposals(workspace_id, artifact):
+        if proposal.get("id") == proposal_id:
+            return proposal
+    return None
+
+
+@app.get("/api/workspaces/{workspace_id}/mechanics-panel/proposals")
+def api_list_mechanics_proposals(workspace_id: str) -> Dict[str, Any]:
+    """Return the pending extraction proposals for the workspace."""
+
+    if get_workspace(workspace_id) is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    artifact = load_workspace_executable_mechanics(workspace_id) or {}
+    return {"proposals": _workspace_proposals(workspace_id, artifact)}
+
+
+@app.post("/api/workspaces/{workspace_id}/mechanics-panel/proposals/{proposal_id}/confirm")
+def api_confirm_mechanics_proposal(
+    workspace_id: str, proposal_id: str, payload: ProposalActionRequest
+) -> Dict[str, Any]:
+    """Apply a proposal — only with ``confirmed: true``.
+
+    The confirm-back discipline from Phase 3: without confirmation the
+    endpoint refuses and returns the proposal's restated change, so
+    the user always agrees to the actuarial-language version of what
+    will happen before it happens.
+    """
+
+    ws = get_workspace(workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    artifact = load_workspace_executable_mechanics(workspace_id) or {}
+    proposal = _find_workspace_proposal(workspace_id, artifact, proposal_id)
+    if proposal is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Proposal not found (it may already have been applied or dismissed)",
+        )
+    if not payload.confirmed:
+        raise HTTPException(status_code=400, detail={
+            "code": "confirmation_required",
+            "message": "Confirm the restated proposal before it is applied.",
+            "confirmBack": proposal["confirmBack"],
+        })
+    who = str(payload.who or "workspace_user")
+    at = _correction_now()
+    try:
+        outcome = _apply_proposal(
+            artifact, proposal, workspace_id=workspace_id, who=who, at=at
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    updated = outcome["artifact"]
+    updated["objectKey"] = store_workspace_executable_mechanics(workspace_id, updated)
+    append_workspace_mechanics_change(workspace_id, outcome["change"])
+    set_workspace_projection_stale(workspace_id, stale=True, slots=[proposal["slot"]])
+    return {
+        "applied": True,
+        "proposal": proposal,
+        "change": outcome["change"],
+        "panel": api_get_mechanics_panel(workspace_id),
+    }
+
+
+@app.post("/api/workspaces/{workspace_id}/mechanics-panel/proposals/{proposal_id}/dismiss")
+def api_dismiss_mechanics_proposal(
+    workspace_id: str, proposal_id: str, payload: ProposalActionRequest
+) -> Dict[str, Any]:
+    """Dismiss a proposal; the dismissal persists on the artifact."""
+
+    if get_workspace(workspace_id) is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    artifact = load_workspace_executable_mechanics(workspace_id) or {}
+    proposal = _find_workspace_proposal(workspace_id, artifact, proposal_id)
+    if proposal is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Proposal not found (it may already have been applied or dismissed)",
+        )
+    who = str(payload.who or "workspace_user")
+    at = _correction_now()
+    outcome = _dismiss_proposal(
+        artifact, proposal, workspace_id=workspace_id, who=who, at=at
+    )
+    updated = outcome["artifact"]
+    updated["objectKey"] = store_workspace_executable_mechanics(workspace_id, updated)
+    append_workspace_mechanics_change(workspace_id, outcome["change"])
+    return {
+        "dismissed": True,
+        "proposal": proposal,
+        "change": outcome["change"],
+        "proposals": _workspace_proposals(workspace_id, updated),
     }
 
 
@@ -10863,11 +11028,15 @@ def _run_ul_projection(
     # are deterministic switches the loop applies — COI deduction timing
     # and the NAR definition — never model interpretations.
     mech_settings = executable.get("_settings") or {}
+    # Phase 4 (the rule bank): the settings the loop honours are exactly
+    # the banked switch ids — an unbanked timing or definition is not a
+    # setting the loop can apply, so it falls back to the default
+    # banked switch rather than improvising a meaning.
     coi_timing = str(mech_settings.get("coiTiming") or "beginning")
-    if coi_timing not in {"beginning", "middle", "end"}:
+    if coi_timing not in _rule_bank.COI_TIMING_SWITCHES:
         coi_timing = "beginning"
     nar_definition = str(mech_settings.get("narDefinition") or "factor_adjusted")
-    if nar_definition not in {"factor_adjusted", "unadjusted"}:
+    if nar_definition not in _rule_bank.NAR_DEFINITION_SWITCHES:
         nar_definition = "factor_adjusted"
     coi_timing_correction = mech_settings.get("coiTimingCorrection") or None
     nar_definition_correction = mech_settings.get("narDefinitionCorrection") or None
@@ -10950,7 +11119,7 @@ def _run_ul_projection(
         # block so the derivation can show both.
         effective_nar_factor = 1.0 if nar_definition == "unadjusted" else nar_factor
         corridor_percentage = float((corridor_row or {}).get("percentage") or 1.0)
-        monthly_interest_rate = (1.0 + guaranteed_rate) ** (1.0 / 12.0) - 1.0
+        monthly_interest_rate = _rule_bank.monthly_crediting_rate(guaranteed_rate)
         payment_interval = max(1, int(round(12.0 / freq)))
         guaranteed_interest = 0.0
         coi_charge = 0.0
@@ -10968,7 +11137,9 @@ def _run_ul_projection(
             month_premium_load = 0.0
             for fee_index, fee_row in enumerate(fee_rows):
                 if fee_row.get("fee_unit") == "percent_premium":
-                    row_load = gross_premium * float(fee_row["amount"])
+                    row_load = _rule_bank.premium_load_for_row(
+                        float(fee_row["amount"]), gross_premium
+                    )
                     month_premium_load += row_load
                     fee_amounts[fee_index] += row_load
             premium_load += month_premium_load
@@ -10976,44 +11147,42 @@ def _run_ul_projection(
 
             monthly_fee = 0.0
             for fee_index, fee_row in enumerate(fee_rows):
-                amount = float(fee_row["amount"])
-                fee_unit = fee_row["fee_unit"]
-                row_fee = 0.0
-                if fee_unit == "monthly_fixed":
-                    row_fee = amount
-                elif fee_unit == "modal_fixed" and payment_due:
-                    row_fee = amount
-                elif fee_unit == "per_1000_face_annual":
-                    row_fee = face_amount / 1000.0 * amount / 12.0
-                elif fee_unit == "annual_fixed":
-                    row_fee = amount / 12.0
+                # Phase 4: every fee unit dispatches through its banked
+                # switch (fees.unit.*) — no inline unit arithmetic.
+                row_fee = _rule_bank.monthly_fee_for_unit(
+                    fee_row["fee_unit"],
+                    float(fee_row["amount"]),
+                    face_amount=face_amount,
+                    payment_due=payment_due,
+                )
                 monthly_fee += row_fee
                 fee_amounts[fee_index] += row_fee
             if not fee_rows:
-                monthly_fee = config.policy_fee_annual / 12.0
+                monthly_fee = _rule_bank.fee_fallback_monthly(config.policy_fee_annual)
 
             def _month_coi(value: float) -> Tuple[float, float]:
                 """Monthly COI measured at an in-month account value.
 
-                Returns (charge, COI net amount at risk).  The NAR uses
-                the year's corridor percentage and the effective NAR
-                factor (the filed factor, or 1.0 under the corrected
-                unadjusted definition).
+                Returns (charge, COI net amount at risk).  Phase 4: the
+                NAR is computed by the banked NAR-definition switch in
+                force and the charge by the banked rate-unit switch for
+                the row's unit — an unbanked unit raises rather than
+                being improvised.  With no COI row in force, the charge
+                is the banked placeholder (coi.placeholder.flat_face).
                 """
 
                 month_db = max(face_amount, corridor_percentage * value)
-                nar = max(month_db / effective_nar_factor - value, 0.0)
+                nar = _rule_bank.coi_nar_for_definition(
+                    nar_definition, month_db, value, nar_factor
+                )
                 if coi_row:
-                    rate = float(coi_row["rate"])
-                    unit = coi_row["rate_unit"]
-                    if unit == "per_1000_monthly":
-                        charge = nar / 1000.0 * rate
-                    elif unit == "per_1000_annual":
-                        charge = nar / 1000.0 * rate / 12.0
-                    else:
-                        charge = nar * rate / 12.0
+                    charge = _rule_bank.coi_charge_for_unit(
+                        coi_row["rate_unit"], float(coi_row["rate"]), nar
+                    )
                 else:
-                    charge = face_amount * coi_rate / 12.0
+                    charge = _rule_bank.coi_placeholder_monthly_charge(
+                        face_amount, coi_rate
+                    )
                 return charge, nar
 
             def _track_nar(nar: float) -> None:
@@ -11021,43 +11190,23 @@ def _run_ul_projection(
                 coi_nar_min = nar if coi_nar_min is None else min(coi_nar_min, nar)
                 coi_nar_max = nar if coi_nar_max is None else max(coi_nar_max, nar)
 
-            # COI deduction timing (Phase 3 correction switch; the
-            # default "beginning" is exactly the historical sequence:
-            # COI measured on the post-premium value and deducted,
-            # together with the month's fees, before interest is
-            # credited).  Fees keep their position in every variant —
-            # only the COI deduction moves.
+            # COI deduction timing (Phase 3 correction switch; Phase 4:
+            # the three sequences are banked timing_step switches —
+            # coi.timing.beginning / .middle / .end — and the loop
+            # dispatches to the bank.  The default "beginning" is
+            # exactly the historical sequence.  Fees keep their
+            # position in every variant — only the COI deduction moves.)
             policy_fee += monthly_fee
-            if coi_timing == "end":
-                policy_value = max(policy_value - monthly_fee, 0.0)
-                month_interest = policy_value * monthly_interest_rate
-                policy_value += month_interest
-                guaranteed_interest += month_interest
-                month_coi, charge_nar = _month_coi(policy_value)
-                _track_nar(charge_nar)
-                coi_charge += month_coi
-                policy_value = max(policy_value - month_coi, 0.0)
-            elif coi_timing == "middle":
-                first_coi, first_nar = _month_coi(policy_value)
-                _track_nar(first_nar)
-                first_half = first_coi / 2.0
-                policy_value = max(policy_value - first_half - monthly_fee, 0.0)
-                month_interest = policy_value * monthly_interest_rate
-                policy_value += month_interest
-                guaranteed_interest += month_interest
-                second_coi, second_nar = _month_coi(policy_value)
-                _track_nar(second_nar)
-                second_half = second_coi / 2.0
-                coi_charge += first_half + second_half
-                policy_value = max(policy_value - second_half, 0.0)
-            else:  # "beginning" — the historical sequence, unchanged.
-                month_coi, charge_nar = _month_coi(policy_value)
-                _track_nar(charge_nar)
-                coi_charge += month_coi
-                policy_value = max(policy_value - month_coi - monthly_fee, 0.0)
-                month_interest = policy_value * monthly_interest_rate
-                policy_value += month_interest
-                guaranteed_interest += month_interest
+            policy_value, month_interest, month_coi = _rule_bank.coi_step_for_timing(
+                coi_timing,
+                policy_value,
+                monthly_fee,
+                monthly_interest_rate,
+                _month_coi,
+                _track_nar,
+            )
+            guaranteed_interest += month_interest
+            coi_charge += month_coi
 
         # Surrender charge. A loaded schedule is applied exactly on the
         # basis it states (percent of account value, percent of face, per
@@ -11083,23 +11232,24 @@ def _run_ul_projection(
             charge_unit = surrender_row["charge_unit"]
             surrender_applied["basis"] = "table"
             surrender_applied["chargeUnit"] = charge_unit
+            # Phase 4: the charge itself is computed by the banked
+            # basis switch for the row's unit (surrender.basis.*).
+            surrender_charge = _rule_bank.surrender_charge_for_unit(
+                charge_unit, charge, policy_value, face_amount
+            )
             if charge_unit == "percent_account_value":
-                surrender_charge = policy_value * charge
                 surrender_applied["percent"] = charge
                 surrender_applied["base"] = "account_value"
                 surrender_applied["baseAmount"] = policy_value
             elif charge_unit == "percent_face":
-                surrender_charge = face_amount * charge
                 surrender_applied["percent"] = charge
                 surrender_applied["base"] = "face_amount"
                 surrender_applied["baseAmount"] = face_amount
             elif charge_unit == "per_1000_face":
-                surrender_charge = face_amount / 1000.0 * charge
                 surrender_applied["perThousand"] = charge
                 surrender_applied["base"] = "face_amount"
                 surrender_applied["baseAmount"] = face_amount
             else:
-                surrender_charge = charge
                 surrender_applied["base"] = "fixed"
                 surrender_applied["baseAmount"] = charge
         elif surrender_rows:
@@ -11116,20 +11266,20 @@ def _run_ul_projection(
                 surrender_charge = 0.0
             else:
                 fallback_years["surrender"].append(year)
-                if year <= surrender_period_years:
-                    remaining = surrender_period_years - year + 1
-                    surrender_pct = max_surrender_pct * (remaining / surrender_period_years)
-                    surrender_charge = policy_value * surrender_pct
+                surrender_charge, surrender_pct = _rule_bank.surrender_placeholder_charge(
+                    year, policy_value,
+                    period_years=surrender_period_years, max_pct=max_surrender_pct,
+                )
+                if surrender_pct is not None:
                     surrender_applied["basis"] = "placeholder"
                     surrender_applied["percent"] = surrender_pct
                     surrender_applied["base"] = "account_value"
                     surrender_applied["baseAmount"] = policy_value
-                else:
-                    surrender_charge = 0.0
         elif year <= surrender_period_years:
-            remaining = surrender_period_years - year + 1
-            surrender_pct = max_surrender_pct * (remaining / surrender_period_years)
-            surrender_charge = policy_value * surrender_pct
+            surrender_charge, surrender_pct = _rule_bank.surrender_placeholder_charge(
+                year, policy_value,
+                period_years=surrender_period_years, max_pct=max_surrender_pct,
+            )
             surrender_applied["basis"] = "placeholder"
             surrender_applied["percent"] = surrender_pct
             surrender_applied["base"] = "account_value"
@@ -11164,9 +11314,20 @@ def _run_ul_projection(
                 summary["correctedAt"] = provenance.get("correctedAt")
                 summary["correctionText"] = provenance.get("correctionText")
                 summary["confirmBack"] = provenance.get("confirmBack")
+            # Phase 4: a row materialised from a banded schedule names
+            # its band, so the ledger derivation can name it too.
+            if provenance.get("band"):
+                summary["band"] = provenance.get("band")
             return summary
 
         surrender_applied["source"] = source_summary(surrender_row)
+        if surrender_applied.get("basis") == "table":
+            surrender_applied["basisSwitch"] = _rule_bank.surrender_switch_id(
+                str(surrender_applied.get("chargeUnit") or "")
+            )
+            surrender_applied["band"] = (surrender_applied.get("source") or {}).get("band")
+        elif surrender_applied.get("basis") == "placeholder":
+            surrender_applied["basisSwitch"] = "surrender.placeholder.linear_account_value"
         applied_mechanics: Dict[str, Any] = {
             "coi": {
                 "basis": "table" if coi_row else "placeholder",
@@ -11185,6 +11346,16 @@ def _run_ul_projection(
                 "monthlyNarMax": coi_nar_max,
                 "flatRate": coi_rate,
                 "source": source_summary(coi_row),
+                # Phase 4: the banked switches this year's COI ran
+                # through, recorded so the derivation (and any audit)
+                # can name them.
+                "rateSwitch": (
+                    _rule_bank.coi_rate_switch_id(str(coi_row.get("rate_unit")))
+                    if coi_row else "coi.placeholder.flat_face"
+                ),
+                "timingSwitch": _rule_bank.coi_timing_switch_id(coi_timing),
+                "narSwitch": _rule_bank.nar_switch_id(nar_definition),
+                "band": (source_summary(coi_row) or {}).get("band") if coi_row else None,
             },
             "fees": [
                 {
@@ -11195,6 +11366,7 @@ def _run_ul_projection(
                     "flowsTo": "premium_load" if fee_row.get("fee_unit") == "percent_premium" else "policy_fee",
                     "basis": "table",
                     "source": source_summary(fee_row),
+                    "unitSwitch": _rule_bank.fee_switch_id(str(fee_row.get("fee_unit"))),
                 }
                 for index, fee_row in enumerate(fee_rows)
             ] or [
@@ -11206,10 +11378,14 @@ def _run_ul_projection(
                     "flowsTo": "policy_fee",
                     "basis": "fallback",
                     "source": None,
+                    "unitSwitch": "fees.fallback.configured_annual",
                 }
             ],
             "surrender": surrender_applied,
-            "crediting": {"guaranteedRate": guaranteed_rate},
+            "crediting": {
+                "guaranteedRate": guaranteed_rate,
+                "switch": "crediting.guaranteed_annual",
+            },
             "nar": {
                 "factor": effective_nar_factor,
                 "filedFactor": nar_factor,

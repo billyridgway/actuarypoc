@@ -71,7 +71,29 @@ def _source_view(source: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     for key in ("correctedBy", "correctedAt", "correctionText", "confirmBack"):
         if source.get(key) is not None:
             view[key] = source.get(key)
+    # Phase 4: a row from a banded schedule names its band.
+    if source.get("band") is not None:
+        view["band"] = source.get("band")
     return view
+
+
+def _band_sentence(band: Optional[Dict[str, Any]]) -> str:
+    """The derivation sentence naming a banded schedule's band."""
+
+    if not band:
+        return ""
+    label = band.get("label") or f"years {band.get('fromYear')}–{band.get('toYear')}"
+    return (
+        f" This year's row comes from band {band.get('index')} of the banded "
+        f"schedule in force ({label})."
+    )
+
+
+def _band_input(band: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not band:
+        return None
+    label = band.get("label") or f"years {band.get('fromYear')}–{band.get('toYear')}"
+    return _input("Schedule band", f"band {band.get('index')} ({label})")
 
 
 def _correction_inputs(citation: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -175,6 +197,7 @@ def _coi_component(row: Dict[str, Any], applied: Dict[str, Any]) -> Dict[str, An
             "the 12 monthly charges.",
         )
         formula += timing_sentence
+        formula += _band_sentence(coi.get("band"))
         inputs = [
             _input("COI rate applied", coi.get("rate"), unit or None),
             _input("NAR factor", coi.get("narFactor")),
@@ -182,6 +205,9 @@ def _coi_component(row: Dict[str, Any], applied: Dict[str, Any]) -> Dict[str, An
             _input("Monthly COI net amount at risk (highest month)", coi.get("monthlyNarMax"), "USD"),
             _input("Face amount", row.get("faceAmount"), "USD"),
         ]
+        band_input = _band_input(coi.get("band"))
+        if band_input is not None:
+            inputs.append(band_input)
         if coi.get("narDefinition") == "unadjusted":
             formula += (
                 " Per the NAR definition in force, the filed NAR factor"
@@ -302,6 +328,18 @@ def _fee_components(row: Dict[str, Any], applied: Dict[str, Any]) -> List[Dict[s
 
 
 def _surrender_component(row: Dict[str, Any], applied: Dict[str, Any]) -> Dict[str, Any]:
+    component = _surrender_component_inner(row, applied)
+    # Phase 4: when the year's row came from a banded schedule, the
+    # derivation names the band that produced it.
+    band = (applied.get("surrender") or {}).get("band")
+    band_input = _band_input(band)
+    if band_input is not None:
+        component["formula"] = str(component.get("formula") or "") + _band_sentence(band)
+        component["inputs"] = list(component.get("inputs") or []) + [band_input]
+    return component
+
+
+def _surrender_component_inner(row: Dict[str, Any], applied: Dict[str, Any]) -> Dict[str, Any]:
     surrender = applied.get("surrender") or {}
     amount = float(row.get("surrenderCharge") or 0.0)
     ending = float(row.get("endingPolicyValue") or row.get("policyValue") or 0.0)
@@ -597,6 +635,7 @@ def build_rate_tables_in_force(
                 "tobacco_status": row.get("tobacco_status"),
                 "rate": row.get("rate"),
                 "rate_unit": row.get("rate_unit"),
+                "band": (row.get("provenance") or {}).get("band"),
             }
             for row in coi_rows
         ],
@@ -620,6 +659,7 @@ def build_rate_tables_in_force(
                 "duration": row.get("duration"),
                 "charge": row.get("charge"),
                 "charge_unit": row.get("charge_unit"),
+                "band": (row.get("provenance") or {}).get("band"),
             }
             for row in surrender_rows
         ],
