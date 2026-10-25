@@ -5,6 +5,13 @@ from __future__ import annotations
 This is intentionally minimal and product-agnostic for v0.1. It mirrors the
 pattern used by the assumptions extractor but targets ProductMechanic-shaped
 JSON objects instead of AssumptionSets.
+
+Since the slice-extraction upgrade (see ``docs/slice-extraction-plan.md``),
+extraction is dispatched per document slice and merged; the single-call
+core below is shared by both the slice dispatcher
+(``actuarypoc.extract.slice_extraction``) and the ``from_text`` entry
+point, which now slices its input instead of truncating it to 50,000
+chars.
 """
 
 from typing import Any, Dict, List, Optional
@@ -15,6 +22,21 @@ import os
 from openai import OpenAI
 
 from actuarypoc.domain.product_mechanics import FilingSource, ProductMechanic
+
+
+def _client_timeout() -> float:
+    """Per-call client timeout (seconds).
+
+    Extraction-length generations against a slow local model must fail
+    fast and measurably instead of hanging until a proxy gives up
+    (observed: ~378 s Cloudflare 524s through the public facade). The
+    in-cluster route has no proxy ceiling, so this timeout is the bound.
+    """
+
+    try:
+        return float(os.getenv("ACTUARYPOC_EXTRACT_TIMEOUT_S", "180"))
+    except ValueError:
+        return 180.0
 
 
 def _build_mechanics_system_prompt() -> str:
@@ -85,54 +107,8 @@ def _strip_code_fence(raw: str) -> str:
     return s.strip()
 
 
-def extract_mechanics_from_text(
-    *,
-    product_code: str,
-    text: str,
-    model: Optional[str] = None,
-) -> List[ProductMechanic]:
-    """Use OpenAI to extract ProductMechanic candidates from raw filing text.
-
-    Returns a list of ProductMechanic instances. Failures raise RuntimeError
-    so that callers can surface a clear error to reviewers.
-    """
-
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is not set in the environment")
-
-    client = OpenAI(api_key=api_key)
-    model = model or os.getenv("MECHANICS_EXTRACT_MODEL", os.getenv("ASSUMPTION_EXTRACT_MODEL", "gpt-4o-mini"))
-
-    code_norm = (product_code or "").strip().upper()
-    if not code_norm:
-        raise ValueError("product_code is required")
-
-    system_prompt = _build_mechanics_system_prompt()
-
-    user_content = (
-        f"Target product_code: {code_norm}\n\n"
-        "Extract a concise set of ProductMechanic objects for this product.\n\n"
-        "=== FILING TEXT START ===\n"
-        f"{text[:50000]}\n"
-        "=== FILING TEXT END ===\n"
-    )
-
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content},
-        ],
-        temperature=0.2,
-    )
-
-    raw = resp.choices[0].message.content or ""
-    cleaned = _strip_code_fence(raw)
-    try:
-        data = json.loads(cleaned)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"LLM response was not valid JSON: {exc}\nRaw: {raw}") from exc
+def _parse_mechanics_payload(data: Any, *, product_code: str) -> List[ProductMechanic]:
+    """Build ProductMechanic objects from a decoded JSON payload."""
 
     if not isinstance(data, list):
         raise RuntimeError(f"Expected a JSON array of mechanics, got: {type(data)}")
@@ -162,7 +138,7 @@ def extract_mechanics_from_text(
         try:
             mech = ProductMechanic(
                 id=str(item.get("id")),
-                product_code=code_norm,
+                product_code=product_code,
                 name=str(item.get("name")),
                 type=str(item.get("type")),
                 description=str(item.get("description")),
@@ -181,3 +157,95 @@ def extract_mechanics_from_text(
         mechanics.append(mech)
 
     return mechanics
+
+
+def _extract_mechanics_single_call(
+    *,
+    product_code: str,
+    text: str,
+    model: Optional[str] = None,
+) -> List[ProductMechanic]:
+    """One model call over one text block (a slice dispatch unit).
+
+    This is the exact prompt/parse behaviour the pre-slice extractor had;
+    it is shared by every dispatch path so output shape cannot drift.
+    Failures raise RuntimeError.
+    """
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is not set in the environment")
+
+    client = OpenAI(api_key=api_key, timeout=_client_timeout())
+    model = model or os.getenv("MECHANICS_EXTRACT_MODEL", os.getenv("ASSUMPTION_EXTRACT_MODEL", "gpt-4o-mini"))
+
+    code_norm = (product_code or "").strip().upper()
+    if not code_norm:
+        raise ValueError("product_code is required")
+
+    system_prompt = _build_mechanics_system_prompt()
+
+    user_content = (
+        f"Target product_code: {code_norm}\n\n"
+        "Extract a concise set of ProductMechanic objects for this product.\n\n"
+        "=== FILING TEXT START ===\n"
+        f"{text}\n"
+        "=== FILING TEXT END ===\n"
+    )
+
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ],
+        temperature=0.2,
+    )
+
+    raw = resp.choices[0].message.content or ""
+    cleaned = _strip_code_fence(raw)
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"LLM response was not valid JSON: {exc}\nRaw: {raw}") from exc
+
+    return _parse_mechanics_payload(data, product_code=code_norm)
+
+
+def extract_mechanics_from_text(
+    *,
+    product_code: str,
+    text: str,
+    model: Optional[str] = None,
+) -> List[ProductMechanic]:
+    """Extract ProductMechanic candidates from raw filing text.
+
+    The text is sliced into bounded, page-less windows and extraction is
+    dispatched per window and merged (see
+    ``docs/slice-extraction-plan.md``) — the whole text is covered; the
+    historical ``text[:50000]`` truncation is gone.
+
+    Returns a list of ProductMechanic instances. When every dispatch
+    unit fails, the first failure is raised as RuntimeError so callers
+    keep the historical fail-loud contract.
+    """
+
+    from actuarypoc.extract.document_map import build_document_map
+    from actuarypoc.extract.slice_extraction import extract_mechanics_from_slices
+
+    code_norm = (product_code or "").strip().upper()
+    if not code_norm:
+        raise ValueError("product_code is required")
+
+    doc_map = build_document_map(
+        doc_id="text",
+        document_hint="provided text",
+        pages=[text or ""],
+        paged=False,
+    )
+    result = extract_mechanics_from_slices(
+        product_code=code_norm, slices=doc_map.slices, model=model
+    )
+    if result["failed_units"] and not result["succeeded_units"]:
+        raise RuntimeError(result["failed_units"][0]["error"])
+    return result["mechanics"]

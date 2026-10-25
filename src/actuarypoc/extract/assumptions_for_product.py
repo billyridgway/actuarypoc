@@ -28,6 +28,11 @@ from actuarypoc.extract.assumptions_extractor import (
     extract_product_metadata_from_text,
     read_document_text,
 )
+from actuarypoc.extract.document_map import DocumentMap, build_document_map
+from actuarypoc.extract.slice_extraction import (
+    extract_assumption_set_from_slices,
+    extract_product_metadata_from_slices,
+)
 from actuarypoc.storage.minio_client import get_bucket_name, get_minio_client
 
 
@@ -151,6 +156,73 @@ def load_filing_text_from_minio(
     return combined
 
 
+def load_filing_slices_from_minio(
+    *, product_code: str, filing_id: Optional[str] = None, max_docs: int = 8
+) -> List[DocumentMap]:
+    """Build document maps for a product's MinIO filings (no truncation).
+
+    Each discovered document is downloaded to a temp file and mapped
+    page-by-page; the combined text is never joined or truncated. Returns
+    one DocumentMap per readable document, in discovery order.
+    """
+
+    from PyPDF2 import PdfReader
+
+    bucket = get_bucket_name()
+    docs = discover_docs_for_product(
+        product_code=product_code, filing_id=filing_id, max_docs=max_docs
+    )
+    if not docs:
+        raise RuntimeError(f"No filing documents found in MinIO for product_code '{product_code}'.")
+
+    maps: List[DocumentMap] = []
+    with tempfile.TemporaryDirectory(prefix="slice_filing_") as tmpdir_str:
+        tmpdir = Path(tmpdir_str)
+        for name in docs:
+            try:
+                local_path = _download_minio_object(bucket, name, tmpdir)
+                suffix = local_path.suffix.lower()
+                if suffix == ".pdf":
+                    reader = PdfReader(str(local_path))
+
+                    def _pages(reader=reader):
+                        for page in reader.pages:
+                            try:
+                                yield page.extract_text() or ""
+                            except Exception:
+                                yield ""
+
+                    maps.append(
+                        build_document_map(
+                            doc_id=name,
+                            document_hint=Path(name).name,
+                            pages=_pages(),
+                            object_path=name,
+                            paged=True,
+                        )
+                    )
+                elif suffix in {".txt", ".md"}:
+                    text = local_path.read_text(encoding="utf-8", errors="replace")
+                    maps.append(
+                        build_document_map(
+                            doc_id=name,
+                            document_hint=Path(name).name,
+                            pages=[text],
+                            object_path=name,
+                            paged=False,
+                        )
+                    )
+            except Exception:
+                # Best-effort: skip unreadable documents (matches the
+                # legacy loader's behaviour).
+                continue
+    return maps
+
+
+def _all_slices(maps: List[DocumentMap]):
+    return [sl for m in maps for sl in m.slices]
+
+
 def generate_assumption_set_for_product(
     *,
     product_code: str,
@@ -161,6 +233,7 @@ def generate_assumption_set_for_product(
     auto_upsert: bool = True,
     feedback: Optional[str] = None,
     previous: Optional[Dict[str, Any]] = None,
+    use_slices: bool = True,
 ) -> AssumptionSet:
     """Derive a draft AssumptionSet for a product from its filings.
 
@@ -170,6 +243,12 @@ def generate_assumption_set_for_product(
     - calls the OpenAI-backed extraction helper to construct an AssumptionSet,
     - optionally upserts it into the MinIO-backed registry.
 
+    With ``use_slices=True`` (default) extraction is dispatched per
+    document slice over the full filings and merged; ``use_slices=False``
+    keeps the legacy single-call blob path (truncated to 50,000 chars)
+    as an explicit A/B / rollback valve. Reviewer-feedback calls always
+    use the single-call path, since feedback concerns one draft.
+
     The returned AssumptionSet is a draft: status/is_current can be
     promoted later via the existing approval workflow.
     """
@@ -178,22 +257,36 @@ def generate_assumption_set_for_product(
     if not code_norm:
         raise ValueError("product_code is required")
 
-    text = load_filing_text_from_minio(product_code=code_norm, filing_id=filing_id)
-
     # Stable-ish default id if caller does not provide one.
     if not set_id:
         base = code_norm.replace(" ", "-").lower()
         set_id = f"{base}-v1"
 
-    asn = extract_assumption_set_from_text(
-        product_code=code_norm,
-        text=text,
-        set_id=set_id,
-        description_hint=description_hint,
-        model=model,
-        feedback=feedback,
-        previous=previous,
-    )
+    if use_slices and feedback is None and previous is None:
+        maps = load_filing_slices_from_minio(product_code=code_norm, filing_id=filing_id)
+        result = extract_assumption_set_from_slices(
+            product_code=code_norm,
+            set_id=set_id,
+            slices=_all_slices(maps),
+            description_hint=description_hint,
+            model=model,
+        )
+        if result["assumption_set"] is None:
+            if result["failed_units"]:
+                raise RuntimeError(result["failed_units"][0]["error"])
+            raise RuntimeError("Assumption extraction produced no result")
+        asn = result["assumption_set"]
+    else:
+        text = load_filing_text_from_minio(product_code=code_norm, filing_id=filing_id)
+        asn = extract_assumption_set_from_text(
+            product_code=code_norm,
+            text=text,
+            set_id=set_id,
+            description_hint=description_hint,
+            model=model,
+            feedback=feedback,
+            previous=previous,
+        )
 
     if auto_upsert:
         asn = upsert_assumption_set(asn)
@@ -208,21 +301,33 @@ def generate_product_metadata_from_minio(
     model: Optional[str] = None,
     feedback: Optional[str] = None,
     previous: Optional[Dict[str, Any]] = None,
+    use_slices: bool = True,
 ) -> Dict[str, Any]:
     """Derive basic product metadata from filings in MinIO.
 
     This uses the same filing-discovery logic as AssumptionSet extraction
     but returns a lightweight dict suitable for pre-filling the Product
     Review UI (carrier_name, product_name, product_code, product_type,
-    primary_filing_id).
+    primary_filing_id). With ``use_slices=True`` (default) the full
+    filings are searched slice-by-slice, so metadata stated late in a
+    filing is found; ``use_slices=False`` keeps the legacy blob path.
     """
 
     code_norm = (product_code or "").strip().upper()
     if not code_norm:
         raise ValueError("product_code is required")
 
-    text = load_filing_text_from_minio(product_code=code_norm, filing_id=filing_id)
-    meta = extract_product_metadata_from_text(text=text, model=model, feedback=feedback, previous=previous)
+    if use_slices and feedback is None and previous is None:
+        maps = load_filing_slices_from_minio(product_code=code_norm, filing_id=filing_id)
+        result = extract_product_metadata_from_slices(
+            slices=_all_slices(maps), model=model
+        )
+        if result["failed_units"] and not result["succeeded_units"]:
+            raise RuntimeError(result["failed_units"][0]["error"])
+        meta = result["metadata"]
+    else:
+        text = load_filing_text_from_minio(product_code=code_norm, filing_id=filing_id)
+        meta = extract_product_metadata_from_text(text=text, model=model, feedback=feedback, previous=previous)
 
     # Ensure the hinted product_code is surfaced when the filing is
     # ambiguous or uses slightly different labelling.

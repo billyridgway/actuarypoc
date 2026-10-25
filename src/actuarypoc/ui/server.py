@@ -1980,6 +1980,76 @@ def api_workspace_analyze(workspace_id: str) -> Dict[str, Any]:
     # requirements and capability assessment without requiring additional
     # API calls.
     snapshot = _apply_workspace_document_evidence(snapshot, docs_for_inventory)
+
+    # Slice-extraction stage (additive; see docs/slice-extraction-plan.md):
+    # document maps + slice-fed extractors + the deterministic table
+    # channel run over the workspace's own documents. The stage records
+    # its own failures in the snapshot and must never fail this route.
+    slice_run: Optional[Dict[str, Any]] = None
+    try:
+        from actuarypoc.extract.slice_pipeline import run_workspace_slice_extraction
+
+        slice_run = run_workspace_slice_extraction(
+            workspace_id=workspace_id,
+            documents=docs_for_inventory,
+            product_code_hint=(snapshot.get("product") or {}).get("code"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logging.warning("[workspace-analysis] slice extraction stage failed: %s", exc)
+        snapshot["sliceExtraction"] = {
+            "status": "failed",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    if slice_run is not None:
+        slice_report = slice_run["sliceExtraction"]
+        snapshot["sliceExtraction"] = slice_report
+        snapshot["documentMaps"] = slice_run["documentMaps"]
+        snapshot["extractedTables"] = slice_run["extractedTables"]
+        snapshot["extractedMechanics"] = slice_run["extractedMechanics"]
+        snapshot["extractedAssumptionSet"] = slice_run["extractedAssumptionSet"]
+        facts = snapshot.get("extractedFacts") or []
+        for fill in slice_run["fact_fills"]:
+            applied = False
+            for fact in facts:
+                if fact.get("label") != fill["label"]:
+                    continue
+                applied = True
+                if fact.get("value") in (None, ""):
+                    fact.update(
+                        {
+                            "value": fill["value"],
+                            "source": fill["source"],
+                            "confidence": 0.8,
+                            "status": "extracted",
+                            "provenanceKind": "slice_extraction",
+                        }
+                    )
+                elif str(fact.get("value")).strip().lower() != str(fill["value"]).strip().lower():
+                    # Never silently mix two identities: keep the
+                    # snapshot's value and record the conflict.
+                    slice_report["conflicts"].append(
+                        {
+                            "label": fill["label"],
+                            "snapshotValue": fact.get("value"),
+                            "documentValue": fill["value"],
+                            "source": fill["source"],
+                        }
+                    )
+                break
+            if not applied:
+                facts.append(
+                    {
+                        "label": fill["label"],
+                        "value": fill["value"],
+                        "source": fill["source"],
+                        "confidence": 0.8,
+                        "status": "extracted",
+                        "provenanceKind": "slice_extraction",
+                    }
+                )
+        facts.extend(slice_run["appended_facts"])
+        snapshot["extractedFacts"] = facts
+
     executable_request = {
         "_workspaceExecutableMechanics": mechanics_artifact.get("usable") or {}
     }
@@ -1998,6 +2068,21 @@ def api_workspace_analyze(workspace_id: str) -> Dict[str, Any]:
     _reconcile_workspace_readiness(snapshot)
     snapshot["requirementsCandidates"] = _build_requirements_candidates(snapshot)
     snapshot["productUnderstanding"] = _build_product_understanding(snapshot)
+    if slice_run is not None:
+        # Additive understanding entries sourced from the slice run.
+        understanding = snapshot["productUnderstanding"]
+        facts_by_label = {
+            f.get("label"): f
+            for f in snapshot.get("extractedFacts") or []
+            if isinstance(f, dict)
+        }
+        if (facts_by_label.get("Carrier") or {}).get("value"):
+            understanding["carrier"] = facts_by_label["Carrier"]["value"]
+        if (facts_by_label.get("Filing context") or {}).get("value"):
+            understanding["filingContext"] = facts_by_label["Filing context"]["value"]
+        understanding["sliceExtractionStatus"] = (
+            snapshot.get("sliceExtraction") or {}
+        ).get("status")
     snapshot["capabilityAssessment"] = _build_capability_assessment(snapshot)
     snapshot["projectionGraph"] = _compile_snapshot_projection_graph(snapshot)
 
