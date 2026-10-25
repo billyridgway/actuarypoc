@@ -1,6 +1,7 @@
 import React from "react";
 import { ProjectionLedger } from "./ProjectionLedger";
 import { MechanicsPanel } from "./MechanicsPanel";
+import { ValidationPanel } from "./ValidationPanel";
 
 interface WorkspaceAssumption {
   name?: string;
@@ -1985,6 +1986,8 @@ export const ProductWorkspacePage: React.FC<{
       {workspaceId && (
         <MechanicsPanel workspaceId={workspaceId} onSnapshotReload={reloadWorkspaceSnapshot} />
       )}
+
+      {workspaceId && <ValidationPanel workspaceId={workspaceId} />}
 
       <section className="card home-card">
         <h2>Missing information / gaps</h2>

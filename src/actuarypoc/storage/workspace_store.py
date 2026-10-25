@@ -42,6 +42,14 @@ def _mechanics_changes_key(workspace_id: str) -> str:
     return f"workspaces/{workspace_id}/analysis/mechanics-changes.json"
 
 
+def _validation_pack_key(workspace_id: str, pack_id: str) -> str:
+    return f"workspaces/{workspace_id}/validation/packs/{pack_id}.json"
+
+
+def _validation_run_key(workspace_id: str, run_id: str) -> str:
+    return f"workspaces/{workspace_id}/validation/runs/{run_id}.json"
+
+
 def _client_and_bucket() -> tuple[Any, str]:
     client = get_minio_client()
     ensure_bucket(client)
@@ -201,6 +209,78 @@ def append_workspace_mechanics_change(
     changes.append(change)
     _write_json(_mechanics_changes_key(workspace_id), {"changes": changes})
     return changes
+
+
+def store_workspace_validation_pack(
+    workspace_id: str, pack: Dict[str, Any]
+) -> str:
+    """Persist a validation pack (Phase 5) under the workspace prefix."""
+
+    if get_workspace(workspace_id) is None:
+        raise ValueError("workspace does not exist")
+    pack_id = str((pack or {}).get("id") or "")
+    if not pack_id:
+        raise ValueError("validation pack has no id")
+    key = _validation_pack_key(workspace_id, pack_id)
+    _write_json(key, pack)
+    return key
+
+
+def load_workspace_validation_pack(
+    workspace_id: str, pack_id: str
+) -> Optional[Dict[str, Any]]:
+    return _read_json(_validation_pack_key(workspace_id, pack_id))
+
+
+def list_workspace_validation_packs(workspace_id: str) -> List[Dict[str, Any]]:
+    packs = _list_json(f"workspaces/{workspace_id}/validation/packs/")
+    return sorted(
+        packs, key=lambda row: (str(row.get("createdAt") or ""), str(row.get("name") or ""))
+    )
+
+
+def delete_workspace_validation_pack(workspace_id: str, pack_id: str) -> bool:
+    if load_workspace_validation_pack(workspace_id, pack_id) is None:
+        return False
+    client, bucket = _client_and_bucket()
+    client.remove_object(bucket, _validation_pack_key(workspace_id, pack_id))
+    return True
+
+
+def store_workspace_validation_run(
+    workspace_id: str, run: Dict[str, Any]
+) -> str:
+    """Persist one validation run report (Phase 5) for the run history."""
+
+    if get_workspace(workspace_id) is None:
+        raise ValueError("workspace does not exist")
+    run_id = str((run or {}).get("id") or "")
+    if not run_id:
+        raise ValueError("validation run has no id")
+    key = _validation_run_key(workspace_id, run_id)
+    _write_json(key, run)
+    return key
+
+
+def load_workspace_validation_run(
+    workspace_id: str, run_id: str
+) -> Optional[Dict[str, Any]]:
+    return _read_json(_validation_run_key(workspace_id, run_id))
+
+
+def list_workspace_validation_runs(
+    workspace_id: str, pack_id: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """Return stored validation runs, newest first (optionally per pack)."""
+
+    runs = _list_json(f"workspaces/{workspace_id}/validation/runs/")
+    if pack_id is not None:
+        runs = [run for run in runs if run.get("packId") == pack_id]
+    return sorted(
+        runs,
+        key=lambda row: (str(row.get("ranAt") or ""), str(row.get("id") or "")),
+        reverse=True,
+    )
 
 
 def set_workspace_projection_stale(
