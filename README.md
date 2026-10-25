@@ -57,6 +57,18 @@ The public API is limited to:
 The projection engine executes only **banked** calculation variations —
 see `docs/rule-bank.md` for the rule bank, its governance (a variation
 enters as code + tests in this repo), and the proposal principles.
+- `GET|POST /api/workspaces/{workspace_id}/validation-packs` — Phase 5
+  validation packs: list/create test-case packs stored with the
+  workspace (see `docs/validation-packs.md` for the format).
+- `GET|PUT|DELETE /api/workspaces/{workspace_id}/validation-packs/{pack_id}`
+  — read, replace, or delete one pack.
+- `POST /api/workspaces/{workspace_id}/validation-packs/{pack_id}/run` —
+  run the pack through the projection ledger and store the run report.
+- `GET /api/workspaces/{workspace_id}/validation-packs/{pack_id}/runs` —
+  the pack's run history (the regression record).
+- `GET /api/workspaces/{workspace_id}/validation-runs/{run_id}` and
+  `GET .../validation-runs/{run_id}/report.txt` — one stored run report
+  as JSON or as a human-readable audit rendering.
 - `GET /api/workspaces/{workspace_id}/feature-requests` — list workspace
   feature requests.
 - `POST /api/workspaces/{workspace_id}/feature-requests` — create a workspace

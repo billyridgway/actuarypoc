@@ -1372,6 +1372,17 @@ details > summary {
   color: #5b21b6;
 }
 
+/* Phase 5 (validation harness): diff rows highlight mismatches; a
+   missing actual is marked but quieter than an outright failure. */
+.validation-row--fail td {
+  background: #fef2f2;
+}
+
+.validation-row--missing td {
+  background: #fffbeb;
+  color: #92400e;
+}
+
 .basis-tag--corrected {
   background: #dbeafe;
   border-color: #3b82f6;

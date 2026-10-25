@@ -98,6 +98,13 @@ from actuarypoc.extract.workspace_mechanics_proposals import (
     dismiss_proposal as _dismiss_proposal,
     generate_proposals as _generate_proposals,
 )
+from actuarypoc.extract.workspace_validation_packs import (
+    PackValidationError as _PackValidationError,
+    pack_summary as _validation_pack_summary,
+    render_report_text as _render_validation_report_text,
+    run_validation_pack as _run_validation_pack,
+    validate_pack as _validate_pack,
+)
 from actuarypoc.agents.pmr_ai import summarise_pmr, propose_decision
 from actuarypoc.agents.scenario_ai import generate_scenarios_for_product
 from actuarypoc.agents.synthetic_coi_ai import (
@@ -144,6 +151,13 @@ from actuarypoc.storage.workspace_store import (
     load_workspace_mechanics_changes,
     append_workspace_mechanics_change,
     set_workspace_projection_stale,
+    store_workspace_validation_pack,
+    load_workspace_validation_pack,
+    list_workspace_validation_packs,
+    delete_workspace_validation_pack,
+    store_workspace_validation_run,
+    load_workspace_validation_run,
+    list_workspace_validation_runs,
 )
 
 try:  # FastAPI can be configured with either Pydantic v1 or v2
@@ -2996,6 +3010,236 @@ def api_dismiss_mechanics_proposal(
         "change": outcome["change"],
         "proposals": _workspace_proposals(workspace_id, updated),
     }
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 (the validation harness): test-case packs
+#
+# Eddy (Aug 7, 2026): actuaries work from test cases with expected
+# results — "refine, refine until it matches" — and three systems
+# (admin, illustration, actuarial models) must agree.  A pack is a
+# versioned document stored with the workspace: named cases whose
+# expectations each carry their source (filing page, illustration,
+# admin-system export) and a tolerance.  Running a pack executes each
+# case through the same projection path as POST /projection and diffs
+# the Phase 1 ledger against the expectations cell by cell; the run
+# report (JSON + a human-readable rendering) is stored with the
+# workspace as an audit artifact and as the regression record —
+# re-running after a slot edit, a correction, or a bank change shows
+# exactly what moved.
+# ---------------------------------------------------------------------------
+
+
+class ValidationPackRunRequest(BaseModel):  # type: ignore[misc]
+    who: Optional[str] = None
+
+
+def _pack_or_404(workspace_id: str, pack_id: str) -> Dict[str, Any]:
+    pack = load_workspace_validation_pack(workspace_id, pack_id)
+    if pack is None:
+        raise HTTPException(status_code=404, detail="Validation pack not found")
+    return pack
+
+
+def _validate_pack_or_400(payload: Any) -> Dict[str, Any]:
+    try:
+        return _validate_pack(payload)
+    except _PackValidationError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "invalid_validation_pack", "problems": exc.problems},
+        ) from exc
+
+
+def _validation_project_case(product_code: str) -> Callable[..., Dict[str, Any]]:
+    """The runner's projection callable: the existing ledger path.
+
+    Mirrors POST /projection's request construction exactly — same
+    inputs mapping, same mechanics view — so a validation actual is
+    the same number the product shows, produced the same way.
+    """
+
+    def project(inputs: Dict[str, Any], mechanics_view: Dict[str, Any]) -> Dict[str, Any]:
+        request = {
+            "age": inputs.get("issueAge"),
+            "faceAmount": inputs.get("faceAmount"),
+            "premiumMode": inputs.get("premiumMode") or "ANNUAL",
+            "modalPremium": inputs.get("modalPremium"),
+            "sex": inputs.get("sex"),
+            "riskClass": inputs.get("riskClass"),
+            "tobaccoStatus": inputs.get("tobaccoStatus"),
+            "policyFeeAnnual": inputs.get("policyFeeAnnual"),
+            "_workspaceExecutableMechanics": mechanics_view,
+        }
+        projection, _mechanics, _warnings, _notes, _gaps = _build_ul_projection_view(
+            product_code, request
+        )
+        if projection is None:
+            raise ValueError("Projection is not available for this product")
+        return projection
+
+    return project
+
+
+@app.get("/api/workspaces/{workspace_id}/validation-packs")
+def api_list_validation_packs(workspace_id: str) -> Dict[str, Any]:
+    """List the workspace's validation packs, each with its last run."""
+
+    if get_workspace(workspace_id) is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    runs = list_workspace_validation_runs(workspace_id)
+    last_run_by_pack: Dict[str, Dict[str, Any]] = {}
+    for run in runs:  # newest first — the first per pack is its last run
+        last_run_by_pack.setdefault(str(run.get("packId") or ""), run)
+    packs = [
+        _validation_pack_summary(pack, last_run=last_run_by_pack.get(str(pack.get("id") or "")))
+        for pack in list_workspace_validation_packs(workspace_id)
+    ]
+    return {"packs": packs}
+
+
+@app.post("/api/workspaces/{workspace_id}/validation-packs")
+def api_create_validation_pack(
+    workspace_id: str, payload: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Create a validation pack from a pack document (validated whole)."""
+
+    if get_workspace(workspace_id) is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    pack = _validate_pack_or_400(payload)
+    now = _correction_now()
+    pack["createdBy"] = str(payload.get("createdBy") or "workspace_user")
+    pack["createdAt"] = now
+    pack["updatedAt"] = now
+    pack["objectKey"] = store_workspace_validation_pack(workspace_id, pack)
+    return {"pack": pack}
+
+
+@app.get("/api/workspaces/{workspace_id}/validation-packs/{pack_id}")
+def api_get_validation_pack(workspace_id: str, pack_id: str) -> Dict[str, Any]:
+    if get_workspace(workspace_id) is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    return {"pack": _pack_or_404(workspace_id, pack_id)}
+
+
+@app.put("/api/workspaces/{workspace_id}/validation-packs/{pack_id}")
+def api_replace_validation_pack(
+    workspace_id: str, pack_id: str, payload: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Replace a pack's document (id and creation record are kept)."""
+
+    if get_workspace(workspace_id) is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    existing = _pack_or_404(workspace_id, pack_id)
+    pack = _validate_pack_or_400(payload)
+    if pack["id"] != pack_id:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Pack id mismatch: the document names {pack['id']}, the URL names {pack_id}",
+        )
+    pack["createdBy"] = existing.get("createdBy")
+    pack["createdAt"] = existing.get("createdAt")
+    pack["updatedAt"] = _correction_now()
+    pack["objectKey"] = store_workspace_validation_pack(workspace_id, pack)
+    return {"pack": pack}
+
+
+@app.delete("/api/workspaces/{workspace_id}/validation-packs/{pack_id}")
+def api_delete_validation_pack(workspace_id: str, pack_id: str) -> Dict[str, Any]:
+    if get_workspace(workspace_id) is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    if not delete_workspace_validation_pack(workspace_id, pack_id):
+        raise HTTPException(status_code=404, detail="Validation pack not found")
+    return {"deleted": True, "packId": pack_id}
+
+
+@app.post("/api/workspaces/{workspace_id}/validation-packs/{pack_id}/run")
+def api_run_validation_pack(
+    workspace_id: str, pack_id: str, payload: ValidationPackRunRequest
+) -> Dict[str, Any]:
+    """Run a pack against the workspace's current mechanics state.
+
+    Deterministic, no model involvement: each case executes through
+    the projection path and the report diffs the Phase 1 ledger
+    against the pack's expectations.  The report is stored with the
+    workspace (run history) and returned in full.
+    """
+
+    ws = get_workspace(workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    product_type = str(ws.get("inferred_product_type") or "UL")
+    if not _is_ul_product_type(product_type):
+        raise HTTPException(
+            status_code=400, detail="Validation packs are available only for UL workspaces"
+        )
+    pack = _pack_or_404(workspace_id, pack_id)
+    product_code = str(ws.get("inferred_product_code") or "ICC18 P18PR UL")
+    artifact = load_workspace_executable_mechanics(workspace_id) or {}
+    previous_runs = list_workspace_validation_runs(workspace_id, pack_id=pack_id)
+    try:
+        report = _run_validation_pack(
+            pack,
+            project_case=_validation_project_case(product_code),
+            workspace_mechanics_view=_executable_mechanics_view(artifact),
+            workspace_id=workspace_id,
+            product_code=pack.get("productCode") or product_code,
+            who=str(payload.who or "workspace_user"),
+            at=_correction_now(),
+            previous_run=previous_runs[0] if previous_runs else None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    report["objectKey"] = store_workspace_validation_run(workspace_id, report)
+    return {"report": report}
+
+
+@app.get("/api/workspaces/{workspace_id}/validation-packs/{pack_id}/runs")
+def api_list_validation_pack_runs(workspace_id: str, pack_id: str) -> Dict[str, Any]:
+    """The pack's run history, newest first (the regression record)."""
+
+    if get_workspace(workspace_id) is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    _pack_or_404(workspace_id, pack_id)
+    runs = [
+        {
+            "id": run.get("id"),
+            "packId": run.get("packId"),
+            "ranAt": run.get("ranAt"),
+            "ranBy": run.get("ranBy"),
+            "summary": run.get("summary"),
+            "changeVsPreviousRun": run.get("changeVsPreviousRun"),
+        }
+        for run in list_workspace_validation_runs(workspace_id, pack_id=pack_id)
+    ]
+    return {"runs": runs}
+
+
+@app.get("/api/workspaces/{workspace_id}/validation-runs/{run_id}")
+def api_get_validation_run(workspace_id: str, run_id: str) -> Dict[str, Any]:
+    """One stored run report as JSON (the audit artifact)."""
+
+    if get_workspace(workspace_id) is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    run = load_workspace_validation_run(workspace_id, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Validation run not found")
+    return {"report": run}
+
+
+@app.get("/api/workspaces/{workspace_id}/validation-runs/{run_id}/report.txt")
+def api_get_validation_run_report_text(workspace_id: str, run_id: str) -> Response:
+    """One stored run report as a human-readable plain-text rendering."""
+
+    if get_workspace(workspace_id) is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    run = load_workspace_validation_run(workspace_id, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Validation run not found")
+    return Response(
+        content=_render_validation_report_text(run),
+        media_type="text/plain; charset=utf-8",
+    )
 
 
 @app.post("/api/workspaces/{workspace_id}/projection")
