@@ -36,6 +36,7 @@ _SOURCE_KIND_LABELS = {
     "filed": "Filed table",
     "synthetic": "Synthetic table",
     "workspace_table": "Workspace table",
+    "corrected": "Corrected",
     "placeholder": "Placeholder",
     "scenario": "Scenario input",
     "calculated": "Calculated",
@@ -48,6 +49,8 @@ def _kind_from_source(source: Optional[Dict[str, Any]]) -> str:
         return "filed"
     if source_type == "ai_synthetic":
         return "synthetic"
+    if source_type == "correction":
+        return "corrected"
     if source:
         return "workspace_table"
     return "workspace_table"
@@ -56,13 +59,36 @@ def _kind_from_source(source: Optional[Dict[str, Any]]) -> str:
 def _source_view(source: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if not source:
         return None
-    return {
+    view = {
         "filename": source.get("filename"),
         "page": source.get("page"),
         "tableHeading": source.get("tableHeading"),
         "valueBasis": source.get("valueBasis"),
         "sourceType": source.get("sourceType"),
     }
+    # Phase 3: a corrected line cites its correction (who / when / the
+    # user's own words) so the override is auditable from the ledger.
+    for key in ("correctedBy", "correctedAt", "correctionText", "confirmBack"):
+        if source.get(key) is not None:
+            view[key] = source.get(key)
+    return view
+
+
+def _correction_inputs(citation: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Ledger inputs citing a correction record (who / when / words)."""
+
+    if not citation:
+        return []
+    inputs: List[Dict[str, Any]] = []
+    if citation.get("confirmBack"):
+        inputs.append(_input("Correction applied", citation.get("confirmBack")))
+    elif citation.get("text"):
+        inputs.append(_input("Correction applied", citation.get("text")))
+    if citation.get("who"):
+        inputs.append(_input("Corrected by", citation.get("who")))
+    if citation.get("at"):
+        inputs.append(_input("Correction recorded", citation.get("at")))
+    return inputs
 
 
 def _input(label: str, value: Any, unit: Optional[str] = None) -> Dict[str, Any]:
@@ -115,9 +141,31 @@ _COI_FORMULAS = {
 }
 
 
+_COI_TIMING_SENTENCES = {
+    "beginning": (
+        " The COI charge is deducted at the beginning of each month, before "
+        "interest is credited."
+    ),
+    "middle": (
+        " The COI charge is deducted in the middle of each month: half before "
+        "interest is credited and half after, with the net amount at risk "
+        "re-measured at each step."
+    ),
+    "end": (
+        " The COI charge is deducted at the end of each month, after interest "
+        "is credited, with the net amount at risk measured on the "
+        "post-interest value."
+    ),
+}
+
+
 def _coi_component(row: Dict[str, Any], applied: Dict[str, Any]) -> Dict[str, Any]:
     coi = applied.get("coi") or {}
     amount = float(row.get("coiCharge") or 0.0)
+    timing = str(coi.get("timing") or "beginning")
+    timing_sentence = _COI_TIMING_SENTENCES.get(timing, "")
+    timing_correction = coi.get("timingCorrection") or None
+    nar_correction = coi.get("narDefinitionCorrection") or None
     if coi.get("basis") == "table":
         unit = str(coi.get("rateUnit") or "")
         formula = _COI_FORMULAS.get(
@@ -126,6 +174,7 @@ def _coi_component(row: Dict[str, Any], applied: Dict[str, Any]) -> Dict[str, An
             "(death benefit / NAR factor - account value). The year's charge is the sum of "
             "the 12 monthly charges.",
         )
+        formula += timing_sentence
         inputs = [
             _input("COI rate applied", coi.get("rate"), unit or None),
             _input("NAR factor", coi.get("narFactor")),
@@ -133,9 +182,24 @@ def _coi_component(row: Dict[str, Any], applied: Dict[str, Any]) -> Dict[str, An
             _input("Monthly COI net amount at risk (highest month)", coi.get("monthlyNarMax"), "USD"),
             _input("Face amount", row.get("faceAmount"), "USD"),
         ]
+        if coi.get("narDefinition") == "unadjusted":
+            formula += (
+                " Per the NAR definition in force, the filed NAR factor"
+                + (f" of {coi.get('narFactorFiled')}" if coi.get("narFactorFiled") is not None else "")
+                + " is not applied: the COI net amount at risk is the death benefit "
+                "minus the account value."
+            )
+            inputs.append(_input("Filed NAR factor (not applied)", coi.get("narFactorFiled")))
+        inputs.extend(_correction_inputs(timing_correction))
+        inputs.extend(_correction_inputs(nar_correction))
+        basis = (
+            "corrected"
+            if (timing_correction or nar_correction)
+            else _kind_from_source(coi.get("source"))
+        )
         return _component(
             "coi", "Cost of insurance (COI)", amount, formula, inputs,
-            _kind_from_source(coi.get("source")), coi.get("source"),
+            basis, coi.get("source"),
         )
     formula = (
         "Placeholder - no COI table is in force for this scenario: each month, "
@@ -143,10 +207,15 @@ def _coi_component(row: Dict[str, Any], applied: Dict[str, Any]) -> Dict[str, An
         "is the table rate multiplied by the net amount at risk; this placeholder is not, "
         "so it stays flat and does not move with the account value."
     )
+    formula += timing_sentence
     inputs = [
         _input("Flat placeholder rate (annual, of face amount)", coi.get("flatRate"), "rate"),
         _input("Face amount", row.get("faceAmount"), "USD"),
     ]
+    # A timing correction on a placeholder COI is cited, but the basis
+    # stays "placeholder": the rate is still not a filed rate, and that
+    # remains the line's dominant honesty signal.
+    inputs.extend(_correction_inputs(timing_correction))
     return _component("coi", "Cost of insurance (COI)", amount, formula, inputs, "placeholder")
 
 
@@ -239,6 +308,63 @@ def _surrender_component(row: Dict[str, Any], applied: Dict[str, Any]) -> Dict[s
     basis = str(surrender.get("basis") or "")
     unit = str(surrender.get("chargeUnit") or "")
     percent = surrender.get("percent")
+    source = surrender.get("source") or {}
+    if basis == "table" and _kind_from_source(source) == "corrected":
+        # Phase 3: a corrected schedule states its own basis in its
+        # derivation and cites the correction; what it replaced is
+        # preserved in the correction record and the change history.
+        citation = {
+            "who": source.get("correctedBy"),
+            "at": source.get("correctedAt"),
+            "text": source.get("correctionText"),
+            "confirmBack": source.get("confirmBack"),
+        }
+        override_note = (
+            " This schedule is a workspace correction and overrides the schedule "
+            "previously in force; the value it replaced is preserved in the "
+            "correction record and the change history."
+        )
+        inputs = _correction_inputs(citation)
+        if unit == "percent_account_value":
+            return _component(
+                "surrender_charge", "Surrender charge", amount,
+                "Surrender charge = corrected schedule percentage x ending account value."
+                + override_note,
+                [
+                    _input("Schedule percentage", percent, "rate"),
+                    _input("Ending account value", ending, "USD"),
+                ] + inputs,
+                "corrected", source,
+            )
+        if unit == "percent_face":
+            return _component(
+                "surrender_charge", "Surrender charge", amount,
+                "Surrender charge = corrected schedule percentage x face amount."
+                + override_note,
+                [
+                    _input("Schedule percentage", percent, "rate"),
+                    _input("Face amount", row.get("faceAmount"), "USD"),
+                ] + inputs,
+                "corrected", source,
+            )
+        if unit == "per_1000_face":
+            return _component(
+                "surrender_charge", "Surrender charge", amount,
+                "Surrender charge = (face amount / 1,000) x corrected schedule charge "
+                "per $1,000 of face amount." + override_note,
+                [
+                    _input("Schedule charge per $1,000 of face", surrender.get("perThousand"), "USD"),
+                    _input("Face amount", row.get("faceAmount"), "USD"),
+                ] + inputs,
+                "corrected", source,
+            )
+        return _component(
+            "surrender_charge", "Surrender charge", amount,
+            "Surrender charge = the corrected fixed amount for this duration."
+            + override_note,
+            [_input("Corrected fixed charge", amount, "USD")] + inputs,
+            "corrected", source,
+        )
     if basis == "table" and unit == "percent_account_value":
         return _component(
             "surrender_charge", "Surrender charge", amount,
@@ -434,7 +560,7 @@ def _table_status(rows: Sequence[Dict[str, Any]]) -> str:
     if not rows:
         return "placeholder"
     kinds = {_kind_from_source(row.get("provenance")) for row in rows}
-    for kind in ("filed", "synthetic", "workspace_table"):
+    for kind in ("corrected", "filed", "synthetic", "workspace_table"):
         if kind in kinds:
             return kind
     return "workspace_table"

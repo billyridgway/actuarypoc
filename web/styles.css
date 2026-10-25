@@ -1372,6 +1372,43 @@ details > summary {
   color: #5b21b6;
 }
 
+.basis-tag--corrected {
+  background: #dbeafe;
+  border-color: #3b82f6;
+  color: #1e40af;
+}
+
+.slot-correction {
+  margin-top: 1rem;
+  border-top: 1px dashed var(--border);
+  padding-top: 0.75rem;
+}
+
+.slot-correction-active {
+  background: #dbeafe;
+  border: 1px solid #3b82f6;
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.75rem;
+}
+
+.slot-correction-param {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0.25rem 0.75rem 0.25rem 0;
+}
+
+.slot-correction-actions {
+  margin-top: 0.5rem;
+}
+
+.slot-correction-confirm {
+  margin-top: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.75rem;
+}
+
 .rate-tables {
   margin-top: 1.25rem;
 }
