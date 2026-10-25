@@ -39,6 +39,8 @@ interface SlotView {
   }>;
   editedInWorkspace?: boolean;
   lastEdit?: { at?: string | null; who?: string | null } | null;
+  correction?: CorrectionView | null;
+  correctionVariants?: CorrectionVariant[];
 }
 
 interface ChangeRecord {
@@ -50,10 +52,40 @@ interface ChangeRecord {
   summary: string;
 }
 
+interface CorrectionView {
+  id: string;
+  slot?: string;
+  mechanic?: string;
+  variant: string;
+  params?: Record<string, any>;
+  who?: string;
+  at?: string;
+  text?: string | null;
+  confirmBack: string;
+  replacedStatus?: string | null;
+  replacedDescription?: string | null;
+  replacedWasFiled?: boolean;
+}
+
+interface CorrectionVariant {
+  id: string;
+  label: string;
+  /** Names of the parameters the variant takes (the form is per-variant). */
+  params: string[];
+}
+
 interface PanelPayload {
   workspaceId: string;
   slots: SlotView[];
   changeLog: ChangeRecord[];
+  corrections: CorrectionView[];
+  correctionRequests: Array<{
+    id: string;
+    title: string;
+    description: string;
+    status: string;
+    createdAt?: string | null;
+  }>;
   projectionStale: boolean;
   projectionStaleSince?: string | null;
   projectionStaleSlots: string[];
@@ -84,6 +116,8 @@ const statusClass = (status: string): string => {
       return "basis-tag basis-tag--filed";
     case "synthetic":
       return "basis-tag basis-tag--synthetic";
+    case "corrected":
+      return "basis-tag basis-tag--corrected";
     case "missing":
       return "basis-tag basis-tag--placeholder";
     default:
@@ -96,6 +130,8 @@ const provenanceText = (slot: SlotView): string => {
   for (const source of slot.provenance ?? []) {
     if (source.sourceType === "workspace_edit") {
       parts.push("Workspace edit");
+    } else if (source.sourceType === "correction") {
+      parts.push("Workspace correction");
     } else if (source.filename) {
       parts.push(
         source.page != null ? `${source.filename} (p. ${source.page})` : source.filename,
@@ -156,6 +192,13 @@ export const MechanicsPanel: React.FC<{
   const [pasteText, setPasteText] = React.useState<Record<string, string>>({});
   const [feeForm, setFeeForm] = React.useState({ component: "policy_fee", amount: "", feeUnit: "annual_fixed" });
   const [narFactor, setNarFactor] = React.useState<string>("");
+  // Phase 3 ("This should be…"): per-slot correction form state. A
+  // correction is previewed first — the server restates it in actuarial
+  // language — and only applied when the user confirms that statement.
+  const [corrVariant, setCorrVariant] = React.useState<Record<string, string>>({});
+  const [corrParams, setCorrParams] = React.useState<Record<string, Record<string, string>>>({});
+  const [corrText, setCorrText] = React.useState<Record<string, string>>({});
+  const [corrPreview, setCorrPreview] = React.useState<Record<string, any>>({});
 
   const loadPanel = React.useCallback(async () => {
     try {
@@ -300,6 +343,125 @@ export const MechanicsPanel: React.FC<{
 
   const slotLabel = (slotId: string): string =>
     panel?.slots.find((s) => s.id === slotId)?.label || slotId;
+
+  const postCorrection = async (
+    slotId: string,
+    suffix: string,
+    payload: Record<string, any>,
+  ): Promise<any> => {
+    const resp = await fetch(
+      `/api/workspaces/${encodeURIComponent(workspaceId)}/mechanics-panel/${encodeURIComponent(slotId)}/corrections${suffix}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      },
+    );
+    const text = await resp.text();
+    let body: any = null;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      /* keep raw text */
+    }
+    if (!resp.ok) {
+      const detail = body?.detail;
+      const message =
+        (typeof detail === "string" ? detail : detail?.message) ||
+        text ||
+        `Request failed (HTTP ${resp.status})`;
+      throw new Error(message);
+    }
+    return body;
+  };
+
+  const correctionPayload = (slot: SlotView): Record<string, any> => {
+    const variantId = corrVariant[slot.id] ?? "";
+    const raw = corrParams[slot.id] ?? {};
+    const params: Record<string, any> = {};
+    if (variantId === "surrender_basis") {
+      params.basis = raw.basis || "percent_account_value";
+      // The percentage field is entered as a percentage ("8" for 8%).
+      if (params.basis === "flat_amount") {
+        if (raw.amount) params.amount = Number(raw.amount);
+      } else if (raw.percent) {
+        params.percent = Number(raw.percent) / 100;
+      }
+      if (raw.gradingYears) params.gradingYears = Number(raw.gradingYears);
+    } else if (variantId === "coi_timing") {
+      params.timing = raw.timing || "end";
+    } else if (variantId === "nar_definition") {
+      params.definition = raw.definition || "unadjusted";
+    }
+    return {
+      variant: variantId || null,
+      params,
+      text: (corrText[slot.id] ?? "").trim() || null,
+    };
+  };
+
+  const handlePreviewCorrection = async (slot: SlotView) => {
+    setBusySlot(slot.id);
+    setMessage(null);
+    setError(null);
+    try {
+      const body = await postCorrection(slot.id, "/preview", correctionPayload(slot));
+      setCorrPreview((prev) => ({ ...prev, [slot.id]: body }));
+    } catch (err: any) {
+      setError(err?.message || "Could not preview the correction.");
+    } finally {
+      setBusySlot(null);
+    }
+  };
+
+  const handleApplyCorrection = async (slot: SlotView) => {
+    const preview = corrPreview[slot.id];
+    setBusySlot(slot.id);
+    setMessage(null);
+    setError(null);
+    try {
+      const payload = preview?.suggested
+        ? {
+            variant: preview.suggestion.variant,
+            params: preview.suggestion.params,
+            text: (corrText[slot.id] ?? "").trim() || null,
+            confirmed: true,
+          }
+        : { ...correctionPayload(slot), confirmed: true };
+      const body = await postCorrection(slot.id, "", payload);
+      setMessage(body.correction?.confirmBack || "Correction applied.");
+      setCorrPreview((prev) => ({ ...prev, [slot.id]: null }));
+      await loadPanel();
+    } catch (err: any) {
+      setError(err?.message || "Could not apply the correction.");
+    } finally {
+      setBusySlot(null);
+    }
+  };
+
+  const handleRecordCorrectionNote = async (slot: SlotView) => {
+    setBusySlot(slot.id);
+    setMessage(null);
+    setError(null);
+    try {
+      const body = await postCorrection(slot.id, "", {
+        variant: null,
+        params: {},
+        text: (corrText[slot.id] ?? "").trim() || null,
+      });
+      setMessage(
+        body.featureRequest
+          ? "Recorded as a product note / feature request — the projection is unchanged."
+          : "Recorded.",
+      );
+      setCorrPreview((prev) => ({ ...prev, [slot.id]: null }));
+      await loadPanel();
+    } catch (err: any) {
+      setError(err?.message || "Could not record the correction.");
+    } finally {
+      setBusySlot(null);
+    }
+  };
 
   return (
     <section className="card home-card" id="mechanics-panel">
@@ -470,8 +632,218 @@ export const MechanicsPanel: React.FC<{
               </button>
             </div>
           )}
+          <div className="slot-correction">
+            <h4>This should be…</h4>
+            {slot.correction && (
+              <p className="slot-correction-active">
+                <strong>Correction in force:</strong> {slot.correction.confirmBack}
+                {slot.correction.replacedWasFiled
+                  ? " It overrides the filed values; the filed values are preserved in the correction record and the change history."
+                  : ""}
+              </p>
+            )}
+            <p className="muted">
+              If this calculation is wrong, say what it should be. You will see the change
+              restated in actuarial language and nothing is applied until you confirm it.
+            </p>
+            {(slot.correctionVariants ?? []).length > 0 && (
+              <select
+                value={corrVariant[slot.id] ?? ""}
+                onChange={(e) => {
+                  setCorrVariant((prev) => ({ ...prev, [slot.id]: e.target.value }));
+                  setCorrPreview((prev) => ({ ...prev, [slot.id]: null }));
+                }}
+              >
+                <option value="">Choose what should change…</option>
+                {(slot.correctionVariants ?? []).map((variant) => (
+                  <option key={variant.id} value={variant.id}>
+                    {variant.label}
+                  </option>
+                ))}
+              </select>
+            )}
+            {(corrVariant[slot.id] ?? "") === "surrender_basis" && (
+              <div className="slot-correction-params">
+                <label className="slot-correction-param">
+                  Charge basis
+                  <select
+                    value={(corrParams[slot.id] ?? {}).basis ?? "percent_account_value"}
+                    onChange={(e) =>
+                      setCorrParams((prev) => ({
+                        ...prev,
+                        [slot.id]: { ...(prev[slot.id] ?? {}), basis: e.target.value },
+                      }))
+                    }
+                  >
+                    <option value="percent_account_value">% of account value</option>
+                    <option value="percent_face">% of face amount</option>
+                    <option value="flat_amount">Flat amount</option>
+                  </select>
+                </label>
+                {((corrParams[slot.id] ?? {}).basis ?? "percent_account_value") === "flat_amount" ? (
+                  <label className="slot-correction-param">
+                    Amount in year 1 ($)
+                    <input
+                      type="number"
+                      min="0"
+                      step="any"
+                      value={(corrParams[slot.id] ?? {}).amount ?? ""}
+                      onChange={(e) =>
+                        setCorrParams((prev) => ({
+                          ...prev,
+                          [slot.id]: { ...(prev[slot.id] ?? {}), amount: e.target.value },
+                        }))
+                      }
+                    />
+                  </label>
+                ) : (
+                  <label className="slot-correction-param">
+                    Percentage in year 1 (%)
+                    <input
+                      type="number"
+                      min="0"
+                      step="any"
+                      value={(corrParams[slot.id] ?? {}).percent ?? ""}
+                      onChange={(e) =>
+                        setCorrParams((prev) => ({
+                          ...prev,
+                          [slot.id]: { ...(prev[slot.id] ?? {}), percent: e.target.value },
+                        }))
+                      }
+                    />
+                  </label>
+                )}
+                <label className="slot-correction-param">
+                  Grading years (to 0)
+                  <input
+                    type="number"
+                    min="1"
+                    max="40"
+                    step="1"
+                    value={(corrParams[slot.id] ?? {}).gradingYears ?? ""}
+                    onChange={(e) =>
+                      setCorrParams((prev) => ({
+                        ...prev,
+                        [slot.id]: { ...(prev[slot.id] ?? {}), gradingYears: e.target.value },
+                      }))
+                    }
+                  />
+                </label>
+              </div>
+            )}
+            {(corrVariant[slot.id] ?? "") === "coi_timing" && (
+              <label className="slot-correction-param">
+                Deduct the COI charge
+                <select
+                  value={(corrParams[slot.id] ?? {}).timing ?? "end"}
+                  onChange={(e) =>
+                    setCorrParams((prev) => ({
+                      ...prev,
+                      [slot.id]: { ...(prev[slot.id] ?? {}), timing: e.target.value },
+                    }))
+                  }
+                >
+                  <option value="beginning">At the beginning of the month, before interest</option>
+                  <option value="middle">In the middle of the month, half before and half after interest</option>
+                  <option value="end">At the end of the month, after interest</option>
+                </select>
+              </label>
+            )}
+            {(corrVariant[slot.id] ?? "") === "nar_definition" && (
+              <label className="slot-correction-param">
+                Net amount at risk is
+                <select
+                  value={(corrParams[slot.id] ?? {}).definition ?? "unadjusted"}
+                  onChange={(e) =>
+                    setCorrParams((prev) => ({
+                      ...prev,
+                      [slot.id]: { ...(prev[slot.id] ?? {}), definition: e.target.value },
+                    }))
+                  }
+                >
+                  <option value="unadjusted">Death benefit − account value (no NAR factor)</option>
+                  <option value="factor_adjusted">Death benefit ÷ NAR factor − account value</option>
+                </select>
+              </label>
+            )}
+            <textarea
+              className="slot-paste"
+              rows={2}
+              placeholder="…or describe the correction in your own words. Your words are kept word-for-word; anything that does not match a known change is recorded as a product note, never dropped."
+              value={corrText[slot.id] ?? ""}
+              onChange={(e) => setCorrText((prev) => ({ ...prev, [slot.id]: e.target.value }))}
+            />
+            <div className="slot-correction-actions">
+              <button
+                type="button"
+                className="button button-secondary"
+                disabled={
+                  busySlot === slot.id ||
+                  (!((corrVariant[slot.id] ?? "") !== "") && !(corrText[slot.id] ?? "").trim())
+                }
+                onClick={() => void handlePreviewCorrection(slot)}
+              >
+                Preview correction
+              </button>
+            </div>
+            {corrPreview[slot.id] && (
+              <div className="slot-correction-confirm">
+                <p>
+                  <strong>Please confirm:</strong> {corrPreview[slot.id].confirmBack}
+                </p>
+                {corrPreview[slot.id].mapped && (
+                  <button
+                    type="button"
+                    className="button"
+                    disabled={busySlot === slot.id}
+                    onClick={() => void handleApplyCorrection(slot)}
+                  >
+                    Confirm and apply
+                  </button>
+                )}
+                {corrPreview[slot.id].suggested && (
+                  <button
+                    type="button"
+                    className="button"
+                    disabled={busySlot === slot.id}
+                    onClick={() => void handleApplyCorrection(slot)}
+                  >
+                    Yes — apply it that way
+                  </button>
+                )}
+                {!corrPreview[slot.id].mapped && !corrPreview[slot.id].suggested && (
+                  <button
+                    type="button"
+                    className="button"
+                    disabled={busySlot === slot.id}
+                    onClick={() => void handleRecordCorrectionNote(slot)}
+                  >
+                    Record as a note
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
         </div>
       ))}
+      {panel && panel.correctionRequests.length > 0 && (
+        <div className="slot-history">
+          <h3>Corrections recorded as notes</h3>
+          <p className="muted">
+            These corrections did not match a known calculation change, so they were
+            captured word-for-word as product notes / feature requests. The projection is
+            unchanged by them.
+          </p>
+          <ul className="muted">
+            {panel.correctionRequests.map((request) => (
+              <li key={request.id}>
+                <strong>{request.title}</strong> — {request.status}
+                {request.createdAt ? ` · ${request.createdAt}` : ""}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       {panel && panel.changeLog.length > 0 && (
         <div className="slot-history">
           <h3>Change history</h3>

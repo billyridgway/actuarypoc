@@ -67,6 +67,7 @@ STATUS_LABELS: Dict[str, str] = {
     "filed_pending_review": "Filed (pending review)",
     "synthetic": "Synthetic",
     "workspace_table": "Workspace table",
+    "corrected": "Corrected",
     "configured": "Configured",
     "missing": "Missing",
 }
@@ -115,6 +116,10 @@ def _provenance_views(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def _slot_status(artifact: Dict[str, Any], mechanic: str) -> str:
     """Derive a slot's status from the mechanics artifact's own state."""
 
+    # Phase 3: an active correction outranks every other state — it is
+    # the actuary's explicit statement of how the calculation should work.
+    if mechanic in (artifact.get("corrections") or {}):
+        return "corrected"
     edits = artifact.get("workspaceEdits") or {}
     if mechanic in edits:
         return "workspace_table"
@@ -204,6 +209,32 @@ def _crediting_view(snapshot: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def correction_view(record: Dict[str, Any]) -> Dict[str, Any]:
+    """The panel view of one active correction (Phase 3)."""
+
+    replaces = (record or {}).get("replaces") or {}
+    return {
+        "id": record.get("id"),
+        "slot": record.get("slot"),
+        "mechanic": record.get("mechanic"),
+        "variant": record.get("variant"),
+        "params": record.get("params"),
+        "text": record.get("text"),
+        "who": record.get("who"),
+        "at": record.get("at"),
+        "confirmBack": record.get("confirmBack"),
+        "replaces": {
+            "status": replaces.get("status"),
+            "description": replaces.get("description"),
+        },
+        # Flattened for the panel UI: a filed override must be loud.
+        "replacedStatus": replaces.get("status"),
+        "replacedDescription": replaces.get("description"),
+        "replacedWasFiled": replaces.get("status")
+        in {"filed_accepted", "filed_pending_review"},
+    }
+
+
 def build_slot_view(
     artifact: Dict[str, Any], slot: Dict[str, Any], snapshot: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
@@ -216,6 +247,7 @@ def build_slot_view(
     edits = artifact.get("workspaceEdits") or {}
     edit = edits.get(mechanic) or {}
     status = _slot_status(artifact, mechanic)
+    correction = (artifact.get("corrections") or {}).get(mechanic)
     view: Dict[str, Any] = {
         "id": slot["id"],
         "mechanic": mechanic,
@@ -234,6 +266,7 @@ def build_slot_view(
             {"at": edit.get("updatedAt"), "who": edit.get("updatedBy")}
             if mechanic in edits else None
         ),
+        "correction": correction_view(correction) if correction else None,
     }
     if slot["kind"] == "scalar":
         view["value"] = (usable_rows[0].get("factor") if usable_rows else None)
@@ -247,11 +280,18 @@ def build_mechanics_panel(
     gaps: Optional[List[Dict[str, Any]]] = None,
     changes: Optional[List[Dict[str, Any]]] = None,
     workspace: Optional[Dict[str, Any]] = None,
+    correction_requests: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Assemble the full panel payload for one workspace."""
 
     artifact = artifact or {}
     workspace = workspace or {}
+    corrections = [
+        correction_view(record)
+        for record in (artifact.get("corrections") or {}).values()
+        if isinstance(record, dict)
+    ]
+    corrections.sort(key=lambda record: str(record.get("at") or ""), reverse=True)
     return {
         "workspaceId": workspace.get("id"),
         "slots": [
@@ -259,6 +299,8 @@ def build_mechanics_panel(
         ],
         "gaps": annotate_gap_items(list(gaps or [])),
         "changeLog": list(reversed(list(changes or [])))[:50],
+        "corrections": corrections,
+        "correctionRequests": list(correction_requests or []),
         "projectionStale": bool(workspace.get("projection_stale")),
         "projectionStaleSince": workspace.get("projection_stale_since"),
         "projectionStaleSlots": list(workspace.get("projection_stale_slots") or []),
@@ -554,6 +596,7 @@ __all__ = [
     "annotate_gap_items",
     "build_mechanics_panel",
     "build_slot_view",
+    "correction_view",
     "parse_table_bytes",
     "validate_table_rows",
     "apply_table_edit",

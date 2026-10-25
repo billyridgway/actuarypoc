@@ -52,6 +52,8 @@ const basisClass = (basis?: string): string => {
       return "basis-tag basis-tag--synthetic";
     case "placeholder":
       return "basis-tag basis-tag--placeholder";
+    case "corrected":
+      return "basis-tag basis-tag--corrected";
     default:
       return "basis-tag";
   }

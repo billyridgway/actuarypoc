@@ -77,9 +77,20 @@ from actuarypoc.extract.workspace_mechanics_panel import (
     apply_table_edit as _apply_table_edit,
     build_mechanics_panel as _build_mechanics_panel,
     build_slot_view as _build_slot_view,
+    correction_view as _correction_view,
     parse_table_bytes as _parse_slot_table_bytes,
     reapply_workspace_edits as _reapply_workspace_edits,
     validate_table_rows as _validate_slot_table_rows,
+)
+from actuarypoc.extract.workspace_mechanics_corrections import (
+    CORRECTION_REQUEST_CAPABILITY_ID as _CORRECTION_REQUEST_CAPABILITY_ID,
+    apply_correction as _apply_correction,
+    build_note_change as _build_correction_note_change,
+    executable_mechanics_view as _executable_mechanics_view,
+    preview_correction as _preview_correction,
+    reapply_corrections as _reapply_corrections,
+    suggest_variant as _suggest_correction_variant,
+    variants_for_slot as _correction_variants_for_slot,
 )
 from actuarypoc.agents.pmr_ai import summarise_pmr, propose_decision
 from actuarypoc.agents.scenario_ai import generate_scenarios_for_product
@@ -1751,10 +1762,11 @@ def _apply_active_synthetic_mechanics(snapshot: Dict[str, Any], workspace_id: st
         (artifact.get("synthetic") or {})
         or (artifact.get("reviews") or {})
         or (artifact.get("workspaceEdits") or {})
+        or (artifact.get("corrections") or {})
     ):
         return snapshot
     request = dict((snapshot.get("illustration") or {}).get("request") or {})
-    request["_workspaceExecutableMechanics"] = artifact.get("usable") or {}
+    request["_workspaceExecutableMechanics"] = _executable_mechanics_view(artifact)
     product_code = str((snapshot.get("product") or {}).get("code") or "ICC18 P18PR UL")
     projection, mechanics, warnings, notes, gaps = _build_ul_projection_view(product_code, request)
     if projection is not None:
@@ -2010,6 +2022,12 @@ def api_workspace_analyze(workspace_id: str) -> Dict[str, Any]:
     mechanics_artifact = _reapply_workspace_edits(
         mechanics_artifact, prior_artifact.get("workspaceEdits")
     )
+    # Phase 3: corrections are durable statements of how the calculation
+    # should work — re-apply them after the edits (corrections outrank
+    # edits) so a re-run never silently discards them either.
+    mechanics_artifact = _reapply_corrections(
+        mechanics_artifact, prior_artifact.get("corrections")
+    )
     mechanics_artifact["workspaceId"] = workspace_id
     mechanics_artifact["objectKey"] = store_workspace_executable_mechanics(
         workspace_id, mechanics_artifact
@@ -2110,7 +2128,7 @@ def api_workspace_analyze(workspace_id: str) -> Dict[str, Any]:
         snapshot["extractedFacts"] = facts
 
     executable_request = {
-        "_workspaceExecutableMechanics": mechanics_artifact.get("usable") or {}
+        "_workspaceExecutableMechanics": _executable_mechanics_view(mechanics_artifact)
     }
     projection, mechanics, warnings, notes, gaps = _build_ul_projection_view(
         "ICC18 P18PR UL", executable_request
@@ -2513,9 +2531,23 @@ def api_get_mechanics_panel(workspace_id: str) -> Dict[str, Any]:
         snapshot = {}
     gaps = ((snapshot.get("gaps") or {}).get("items")) or []
     changes = load_workspace_mechanics_changes(workspace_id)
+    correction_requests = [
+        _feature_request_to_api(row)
+        for row in list_feature_requests(workspace_id)
+        if (row or {}).get("capability_id") == _CORRECTION_REQUEST_CAPABILITY_ID
+    ]
     panel = _build_mechanics_panel(
-        artifact, snapshot=snapshot, gaps=gaps, changes=changes, workspace=ws
+        artifact, snapshot=snapshot, gaps=gaps, changes=changes, workspace=ws,
+        correction_requests=correction_requests,
     )
+    # Phase 3: each slot advertises the correction variants it supports
+    # (structured pickers for "This should be…"); free text is always
+    # available and is previewed/captured by the correction routes.
+    for slot_view in panel.get("slots") or []:
+        slot_def = _SLOT_BY_ID.get(slot_view.get("id") or "")
+        slot_view["correctionVariants"] = (
+            _correction_variants_for_slot(slot_def) if slot_def else []
+        )
     panel["workspaceId"] = workspace_id
     return panel
 
@@ -2614,6 +2646,193 @@ async def api_upload_mechanics_slot_table(
     return _persist_slot_edit(workspace_id, slot, outcome)
 
 
+# ---------------------------------------------------------------------------
+# Phase 3 (corrections in plain English): "This should be…"
+#
+# Eddy (Aug 7, 2026): when the math is wrong, the actuary tells the
+# product — in the product — what the calculation should be.  A
+# correction is previewed first: the server restates it in actuarial
+# language (the confirm-back) and nothing applies until the user
+# confirms that exact statement.  Applied corrections are stored as
+# override records on the mechanics artifact (provenance, the user's
+# own words, what they replaced), take effect on the next re-run, and
+# are labelled "corrected" in the Phase 1 ledger.  Free text that maps
+# to no known variant is captured as a feature request — never dropped,
+# never guessed at.
+# ---------------------------------------------------------------------------
+
+
+class MechanicsCorrectionRequest(BaseModel):  # type: ignore[misc]
+    variant: Optional[str] = None
+    params: Optional[Dict[str, Any]] = None
+    text: Optional[str] = None
+    who: Optional[str] = None
+    confirmed: bool = False
+
+
+def _correction_spec(payload: MechanicsCorrectionRequest) -> Dict[str, Any]:
+    return {
+        "variant": payload.variant,
+        "params": payload.params or {},
+        "text": payload.text,
+    }
+
+
+def _correction_now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+@app.post("/api/workspaces/{workspace_id}/mechanics-panel/{slot_id}/corrections/preview")
+def api_preview_mechanics_correction(
+    workspace_id: str, slot_id: str, payload: MechanicsCorrectionRequest
+) -> Dict[str, Any]:
+    """Restate a proposed correction in actuarial language (no writes).
+
+    With a structured variant, the response is the confirm-back the
+    user must agree to before applying.  With free text alone, the
+    response says whether the text maps to a known variant (a
+    suggestion the user may accept) or will be captured as a note.
+    """
+
+    if get_workspace(workspace_id) is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    slot = _slot_or_404(slot_id)
+    who = str(payload.who or "workspace_user")
+    text = str(payload.text or "").strip()
+    artifact = load_workspace_executable_mechanics(workspace_id) or {}
+    if payload.variant:
+        try:
+            preview = _preview_correction(
+                artifact, slot, _correction_spec(payload), who=who, at=_correction_now()
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        preview["variants"] = _correction_variants_for_slot(slot)
+        return preview
+    if text:
+        suggestion = _suggest_correction_variant(slot, text)
+        if suggestion is not None:
+            try:
+                preview = _preview_correction(
+                    artifact, slot,
+                    {"variant": suggestion["variant"], "params": suggestion["params"], "text": text},
+                    who=who, at=_correction_now(),
+                )
+            except ValueError:
+                preview = None
+            if preview is not None:
+                preview["suggestion"] = suggestion
+                preview["mapped"] = False
+                preview["suggested"] = True
+                return preview
+        return {
+            "mapped": False,
+            "suggested": False,
+            "suggestion": None,
+            "confirmBack": (
+                f"This does not match a known correction type for {slot['label']}. "
+                f"It will be recorded word-for-word as a product note / feature "
+                f"request: “{text}” — the projection will not change."
+            ),
+            "variants": _correction_variants_for_slot(slot),
+        }
+    raise HTTPException(
+        status_code=400,
+        detail="Choose a correction type or describe the correction in your own words",
+    )
+
+
+@app.post("/api/workspaces/{workspace_id}/mechanics-panel/{slot_id}/corrections")
+def api_apply_mechanics_correction(
+    workspace_id: str, slot_id: str, payload: MechanicsCorrectionRequest
+) -> Dict[str, Any]:
+    """Apply a confirmed correction, or capture an unmapped one as a note.
+
+    A structured variant is applied only with ``confirmed: true`` —
+    the confirm-back discipline: the user agrees to the restated
+    change before it touches the projection.  Free text with no
+    variant is stored as a workspace feature request (the existing
+    mechanism) plus a change-log record; the projection is unchanged.
+    """
+
+    ws = get_workspace(workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    slot = _slot_or_404(slot_id)
+    who = str(payload.who or "workspace_user")
+    at = _correction_now()
+    text = str(payload.text or "").strip()
+    artifact = load_workspace_executable_mechanics(workspace_id) or {}
+
+    if payload.variant:
+        spec = _correction_spec(payload)
+        try:
+            preview = _preview_correction(artifact, slot, spec, who=who, at=at)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not payload.confirmed:
+            raise HTTPException(status_code=400, detail={
+                "code": "confirmation_required",
+                "message": "Confirm the restated correction before it is applied.",
+                "confirmBack": preview["confirmBack"],
+            })
+        try:
+            outcome = _apply_correction(
+                artifact, slot, spec, workspace_id=workspace_id, who=who, at=at
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        updated = outcome["artifact"]
+        updated["objectKey"] = store_workspace_executable_mechanics(workspace_id, updated)
+        append_workspace_mechanics_change(workspace_id, outcome["change"])
+        set_workspace_projection_stale(workspace_id, stale=True, slots=[slot["id"]])
+        return {
+            "slot": _build_slot_view(updated, slot),
+            "correction": _correction_view(outcome["correction"]),
+            "change": outcome["change"],
+            "projectionStale": True,
+            "mapped": True,
+        }
+
+    if not text:
+        raise HTTPException(
+            status_code=400,
+            detail="Choose a correction type or describe the correction in your own words",
+        )
+    product_code = (
+        ws.get("inferred_product_code")
+        or ws.get("inferred_primary_product_code")
+        or "ICC18 P18PR UL"
+    )
+    row = create_feature_request(
+        workspace_id=workspace_id,
+        product_code=product_code,
+        capability_id=_CORRECTION_REQUEST_CAPABILITY_ID,
+        title=f"Correction for {slot['label']} (not yet mapped to a calculation change)",
+        description=(
+            f"{who} corrected {slot['label']} in their own words:\n\n“{text}”\n\n"
+            "The text does not match a known correction variant, so no "
+            "calculation changed. It is captured here so the correction "
+            "is never lost; mapping it to a variant is follow-up work."
+        ),
+        status="proposed",
+        source_reference=slot["id"],
+    )
+    if row is None:
+        raise HTTPException(status_code=503, detail="Feature request storage is not available")
+    change = _build_correction_note_change(
+        workspace_id=workspace_id, slot=slot, who=who, at=at,
+        text=text, feature_request_id=row.get("id"),
+    )
+    append_workspace_mechanics_change(workspace_id, change)
+    return {
+        "featureRequest": _feature_request_to_api(row),
+        "change": change,
+        "projectionStale": False,
+        "mapped": False,
+    }
+
+
 @app.post("/api/workspaces/{workspace_id}/projection")
 def api_workspace_projection(
     workspace_id: str, payload: WorkspaceProjectionRequest
@@ -2649,7 +2868,7 @@ def api_workspace_projection(
         "policyFeeAnnual": payload.policyFeeAnnual,
     }
     artifact = load_workspace_executable_mechanics(workspace_id) or {}
-    request["_workspaceExecutableMechanics"] = artifact.get("usable") or {}
+    request["_workspaceExecutableMechanics"] = _executable_mechanics_view(artifact)
     selector_issues = _selector_match_issues(request["_workspaceExecutableMechanics"], request)
     if selector_issues and not payload.allowSelectorFallback:
         raise HTTPException(status_code=409, detail={
@@ -9794,6 +10013,48 @@ def build_ul_projection_explanation(
                 source_detail=prov_coi_rate.get("name") or None,
             ),
         ]
+    # Phase 3: state the COI timing and any correction in force on the
+    # COI step too — the step text mirrors the ledger derivation so an
+    # auditor sees the same story in both places.
+    coi_applied_expl = applied_mechanics.get("coi") or {}
+    coi_timing_expl = str(coi_applied_expl.get("timing") or "beginning")
+    if coi_timing_expl == "middle":
+        coi_formula_text += (
+            " The COI charge is deducted in the middle of each month: half before "
+            "interest is credited and half after, with the net amount at risk "
+            "re-measured at each step."
+        )
+    elif coi_timing_expl == "end":
+        coi_formula_text += (
+            " The COI charge is deducted at the end of each month, after interest "
+            "is credited, with the net amount at risk measured on the post-interest value."
+        )
+    else:
+        coi_formula_text += (
+            " The COI charge is deducted at the beginning of each month, before "
+            "interest is credited."
+        )
+    if coi_applied_expl.get("narDefinition") == "unadjusted":
+        coi_formula_text += (
+            " Per the NAR definition in force, the filed NAR factor is not applied: "
+            "the COI net amount at risk is the death benefit minus the account value."
+        )
+    for _coi_citation in (
+        coi_applied_expl.get("timingCorrection"),
+        coi_applied_expl.get("narDefinitionCorrection"),
+    ):
+        if _coi_citation:
+            coi_step_inputs.append(_explained_value(
+                label="Correction applied",
+                value=_coi_citation.get("confirmBack") or _coi_citation.get("text"),
+                source="Workspace correction",
+            ))
+            if _coi_citation.get("who"):
+                coi_step_inputs.append(_explained_value(
+                    label="Corrected by",
+                    value=_coi_citation.get("who"),
+                    source="Workspace correction",
+                ))
     steps.append(
         {
             "id": "coi_charge_deducted",
@@ -9943,6 +10204,27 @@ def build_ul_projection_explanation(
                 source_detail=prov_surrender.get("name") or None,
             ),
         ]
+    # Phase 3: a corrected surrender schedule says so on the step, and
+    # cites the correction (the filed value it replaced is preserved in
+    # the correction record and the change history).
+    surrender_source_expl = surrender_applied.get("source") or {}
+    if surrender_source_expl.get("sourceType") == "correction":
+        surrender_formula_text += (
+            " This schedule is a workspace correction and overrides the schedule "
+            "previously in force; the value it replaced is preserved in the "
+            "correction record and the change history."
+        )
+        surrender_step_inputs.append(_explained_value(
+            label="Correction applied",
+            value=surrender_source_expl.get("confirmBack") or surrender_source_expl.get("correctionText"),
+            source="Workspace correction",
+        ))
+        if surrender_source_expl.get("correctedBy"):
+            surrender_step_inputs.append(_explained_value(
+                label="Corrected by",
+                value=surrender_source_expl.get("correctedBy"),
+                source="Workspace correction",
+            ))
     steps.append(
         {
             "id": "surrender_charge",
@@ -10575,6 +10857,21 @@ def _run_ul_projection(
     coi_rate = config.coi_rate_flat
     executable = config.executable_mechanics or {}
 
+    # Phase 3 (corrections in plain English): correction settings ride
+    # inside the executable mechanics under "_settings" (see
+    # workspace_mechanics_corrections.executable_mechanics_view).  They
+    # are deterministic switches the loop applies — COI deduction timing
+    # and the NAR definition — never model interpretations.
+    mech_settings = executable.get("_settings") or {}
+    coi_timing = str(mech_settings.get("coiTiming") or "beginning")
+    if coi_timing not in {"beginning", "middle", "end"}:
+        coi_timing = "beginning"
+    nar_definition = str(mech_settings.get("narDefinition") or "factor_adjusted")
+    if nar_definition not in {"factor_adjusted", "unadjusted"}:
+        nar_definition = "factor_adjusted"
+    coi_timing_correction = mech_settings.get("coiTimingCorrection") or None
+    nar_definition_correction = mech_settings.get("narDefinitionCorrection") or None
+
     def _matches(row: Dict[str, Any], field: str, actual: Any) -> bool:
         expected = row.get(field)
         return expected in {None, "", "ANY", "All"} or (
@@ -10647,6 +10944,11 @@ def _run_ul_projection(
         if not corridor_row:
             fallback_years["corridor"].append(year)
         nar_factor = float((nar_row or {}).get("factor") or 1.0)
+        # Phase 3: under the corrected "unadjusted" NAR definition the
+        # filed factor is not applied to the COI net amount at risk; the
+        # filed factor itself stays recorded on the applied-mechanics
+        # block so the derivation can show both.
+        effective_nar_factor = 1.0 if nar_definition == "unadjusted" else nar_factor
         corridor_percentage = float((corridor_row or {}).get("percentage") or 1.0)
         monthly_interest_rate = (1.0 + guaranteed_rate) ** (1.0 / 12.0) - 1.0
         payment_interval = max(1, int(round(12.0 / freq)))
@@ -10690,27 +10992,72 @@ def _run_ul_projection(
             if not fee_rows:
                 monthly_fee = config.policy_fee_annual / 12.0
 
-            death_benefit = max(face_amount, corridor_percentage * policy_value)
-            charge_nar = max(death_benefit / nar_factor - policy_value, 0.0)
-            coi_nar_min = charge_nar if coi_nar_min is None else min(coi_nar_min, charge_nar)
-            coi_nar_max = charge_nar if coi_nar_max is None else max(coi_nar_max, charge_nar)
-            if coi_row:
-                rate = float(coi_row["rate"])
-                unit = coi_row["rate_unit"]
-                if unit == "per_1000_monthly":
-                    month_coi = charge_nar / 1000.0 * rate
-                elif unit == "per_1000_annual":
-                    month_coi = charge_nar / 1000.0 * rate / 12.0
+            def _month_coi(value: float) -> Tuple[float, float]:
+                """Monthly COI measured at an in-month account value.
+
+                Returns (charge, COI net amount at risk).  The NAR uses
+                the year's corridor percentage and the effective NAR
+                factor (the filed factor, or 1.0 under the corrected
+                unadjusted definition).
+                """
+
+                month_db = max(face_amount, corridor_percentage * value)
+                nar = max(month_db / effective_nar_factor - value, 0.0)
+                if coi_row:
+                    rate = float(coi_row["rate"])
+                    unit = coi_row["rate_unit"]
+                    if unit == "per_1000_monthly":
+                        charge = nar / 1000.0 * rate
+                    elif unit == "per_1000_annual":
+                        charge = nar / 1000.0 * rate / 12.0
+                    else:
+                        charge = nar * rate / 12.0
                 else:
-                    month_coi = charge_nar * rate / 12.0
-            else:
-                month_coi = face_amount * coi_rate / 12.0
-            coi_charge += month_coi
+                    charge = face_amount * coi_rate / 12.0
+                return charge, nar
+
+            def _track_nar(nar: float) -> None:
+                nonlocal coi_nar_min, coi_nar_max
+                coi_nar_min = nar if coi_nar_min is None else min(coi_nar_min, nar)
+                coi_nar_max = nar if coi_nar_max is None else max(coi_nar_max, nar)
+
+            # COI deduction timing (Phase 3 correction switch; the
+            # default "beginning" is exactly the historical sequence:
+            # COI measured on the post-premium value and deducted,
+            # together with the month's fees, before interest is
+            # credited).  Fees keep their position in every variant —
+            # only the COI deduction moves.
             policy_fee += monthly_fee
-            policy_value = max(policy_value - month_coi - monthly_fee, 0.0)
-            month_interest = policy_value * monthly_interest_rate
-            policy_value += month_interest
-            guaranteed_interest += month_interest
+            if coi_timing == "end":
+                policy_value = max(policy_value - monthly_fee, 0.0)
+                month_interest = policy_value * monthly_interest_rate
+                policy_value += month_interest
+                guaranteed_interest += month_interest
+                month_coi, charge_nar = _month_coi(policy_value)
+                _track_nar(charge_nar)
+                coi_charge += month_coi
+                policy_value = max(policy_value - month_coi, 0.0)
+            elif coi_timing == "middle":
+                first_coi, first_nar = _month_coi(policy_value)
+                _track_nar(first_nar)
+                first_half = first_coi / 2.0
+                policy_value = max(policy_value - first_half - monthly_fee, 0.0)
+                month_interest = policy_value * monthly_interest_rate
+                policy_value += month_interest
+                guaranteed_interest += month_interest
+                second_coi, second_nar = _month_coi(policy_value)
+                _track_nar(second_nar)
+                second_half = second_coi / 2.0
+                coi_charge += first_half + second_half
+                policy_value = max(policy_value - second_half, 0.0)
+            else:  # "beginning" — the historical sequence, unchanged.
+                month_coi, charge_nar = _month_coi(policy_value)
+                _track_nar(charge_nar)
+                coi_charge += month_coi
+                policy_value = max(policy_value - month_coi - monthly_fee, 0.0)
+                month_interest = policy_value * monthly_interest_rate
+                policy_value += month_interest
+                guaranteed_interest += month_interest
 
         # Surrender charge. A loaded schedule is applied exactly on the
         # basis it states (percent of account value, percent of face, per
@@ -10802,13 +11149,22 @@ def _run_ul_projection(
             if not row:
                 return None
             provenance = row.get("provenance") or {}
-            return {
+            summary: Dict[str, Any] = {
                 "filename": provenance.get("filename"),
                 "page": provenance.get("page"),
                 "tableHeading": provenance.get("tableHeading"),
                 "valueBasis": provenance.get("valueBasis"),
                 "sourceType": provenance.get("sourceType"),
             }
+            # Phase 3: correction provenance rides along so the ledger
+            # can cite the correction (who / when / the user's words)
+            # on every line the corrected schedule produced.
+            if provenance.get("sourceType") == "correction":
+                summary["correctedBy"] = provenance.get("correctedBy")
+                summary["correctedAt"] = provenance.get("correctedAt")
+                summary["correctionText"] = provenance.get("correctionText")
+                summary["confirmBack"] = provenance.get("confirmBack")
+            return summary
 
         surrender_applied["source"] = source_summary(surrender_row)
         applied_mechanics: Dict[str, Any] = {
@@ -10816,7 +11172,15 @@ def _run_ul_projection(
                 "basis": "table" if coi_row else "placeholder",
                 "rate": float(coi_row["rate"]) if coi_row else None,
                 "rateUnit": coi_row.get("rate_unit") if coi_row else None,
-                "narFactor": nar_factor,
+                # The factor actually applied to the COI net amount at
+                # risk (1.0 under the corrected unadjusted definition);
+                # the filed factor in force stays beside it.
+                "narFactor": effective_nar_factor,
+                "narFactorFiled": nar_factor,
+                "narDefinition": nar_definition,
+                "narDefinitionCorrection": nar_definition_correction,
+                "timing": coi_timing,
+                "timingCorrection": coi_timing_correction,
                 "monthlyNarMin": coi_nar_min,
                 "monthlyNarMax": coi_nar_max,
                 "flatRate": coi_rate,
@@ -10847,7 +11211,10 @@ def _run_ul_projection(
             "surrender": surrender_applied,
             "crediting": {"guaranteedRate": guaranteed_rate},
             "nar": {
-                "factor": nar_factor,
+                "factor": effective_nar_factor,
+                "filedFactor": nar_factor,
+                "definition": nar_definition,
+                "definitionCorrection": nar_definition_correction,
                 "corridorPercentage": corridor_percentage,
                 "corridorBasis": "table" if corridor_row else "default",
             },
@@ -10878,8 +11245,8 @@ def _run_ul_projection(
                 "surrenderValue": surrender_value,
                 "deathBenefit": death_benefit,
                 "netAmountAtRisk": net_amount_at_risk,
-                "coiNetAmountAtRisk": max(death_benefit / nar_factor - cash_value, 0.0),
-                "narFactor": nar_factor,
+                "coiNetAmountAtRisk": max(death_benefit / effective_nar_factor - cash_value, 0.0),
+                "narFactor": effective_nar_factor,
                 "minimumDeathBenefitPercentage": corridor_percentage,
                 "faceAmount": face_amount,
                 "appliedClassification": {
