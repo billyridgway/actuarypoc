@@ -1,4 +1,5 @@
 import React from "react";
+import { ProjectionLedger } from "./ProjectionLedger";
 
 interface WorkspaceAssumption {
   name?: string;
@@ -658,64 +659,6 @@ export const ProjectionLogicGraph: React.FC<{
 
 type ProjectionSeriesKey = "cumulativePremium" | "cashValue" | "surrenderValue" | "deathBenefit";
 interface ProjectionSeriesSpec { key: ProjectionSeriesKey; label: string; color: string }
-export interface ProjectionCrossover {
-  kind: "crossing" | "touch" | "overlap_range";
-  first: ProjectionSeriesSpec;
-  second: ProjectionSeriesSpec;
-  year: number;
-  endYear?: number;
-  value: number;
-}
-
-export const findProjectionCrossovers = (
-  rows: WorkspaceRow[], series: ProjectionSeriesSpec[],
-): ProjectionCrossover[] => {
-  const events: ProjectionCrossover[] = [];
-  for (let firstIndex = 0; firstIndex < series.length; firstIndex += 1) {
-    for (let secondIndex = firstIndex + 1; secondIndex < series.length; secondIndex += 1) {
-      const first = series[firstIndex];
-      const second = series[secondIndex];
-      const differences = rows.map((row) => Number(row[first.key] ?? 0) - Number(row[second.key] ?? 0));
-      const isNear = (index: number) => {
-        const scale = Math.max(Math.abs(Number(rows[index]?.[first.key] ?? 0)), Math.abs(Number(rows[index]?.[second.key] ?? 0)), 1);
-        return Math.abs(differences[index]) <= Math.max(1, scale * 0.001);
-      };
-      const inRange = new Set<number>();
-      for (let index = 1; index < rows.length;) {
-        if (!isNear(index)) { index += 1; continue; }
-        const start = index;
-        while (index + 1 < rows.length && isNear(index + 1)) index += 1;
-        if (index > start) {
-          for (let member = start; member <= index; member += 1) inRange.add(member);
-          events.push({
-            kind: "overlap_range", first, second,
-            year: Number(rows[start].year ?? start + 1),
-            endYear: Number(rows[index].year ?? index + 1),
-            value: (Number(rows[start][first.key] ?? 0) + Number(rows[start][second.key] ?? 0)) / 2,
-          });
-        }
-        index += 1;
-      }
-      for (let index = 1; index < rows.length; index += 1) {
-        if (inRange.has(index) || inRange.has(index - 1)) continue;
-        const previous = differences[index - 1];
-        const current = differences[index];
-        if (previous * current < 0) {
-          const fraction = Math.abs(previous) / (Math.abs(previous) + Math.abs(current));
-          const previousYear = Number(rows[index - 1].year ?? index);
-          const currentYear = Number(rows[index].year ?? index + 1);
-          const firstPrevious = Number(rows[index - 1][first.key] ?? 0);
-          const firstCurrent = Number(rows[index][first.key] ?? 0);
-          events.push({ kind: "crossing", first, second, year: previousYear + fraction * (currentYear - previousYear), value: firstPrevious + fraction * (firstCurrent - firstPrevious) });
-        } else if (isNear(index) && Math.max(Math.abs(Number(rows[index][first.key] ?? 0)), Math.abs(Number(rows[index][second.key] ?? 0))) > 1) {
-          events.push({ kind: "touch", first, second, year: Number(rows[index].year ?? index + 1), value: (Number(rows[index][first.key] ?? 0) + Number(rows[index][second.key] ?? 0)) / 2 });
-        }
-      }
-    }
-  }
-  return events.sort((a, b) => a.year - b.year);
-};
-
 export const ProjectionChart: React.FC<{ rows: WorkspaceRow[] }> = ({ rows }) => {
   const width = 720;
   const height = 280;
@@ -747,7 +690,6 @@ export const ProjectionChart: React.FC<{ rows: WorkspaceRow[] }> = ({ rows }) =>
     left + ((year - minYear) / Math.max(maxYear - minYear, 1)) * (width - left - right);
   const y = (value: number) => top + (1 - value / maxValue) * (height - top - bottom);
   const ticks = [0, 0.25, 0.5, 0.75, 1];
-  const crossovers = findProjectionCrossovers(rows, visibleSeries).slice(0, 12);
   const hoveredRow = hoveredIndex == null ? null : rows[hoveredIndex];
   const hoveredYear = Number(hoveredRow?.year ?? minYear);
   const hoveredX = x(hoveredYear);
@@ -793,14 +735,6 @@ export const ProjectionChart: React.FC<{ rows: WorkspaceRow[] }> = ({ rows }) =>
             .join(" ");
           return <polyline key={item.key} points={points} fill="none" stroke={item.color} strokeWidth="3" />;
         })}
-        {crossovers.map((event, index) => {
-          const startX = x(event.year);
-          if (event.kind === "overlap_range" && event.endYear != null) {
-            const endX = x(event.endYear);
-            return <line key={`${event.first.key}-${event.second.key}-${event.year}`} x1={startX} x2={endX} y1={y(event.value)} y2={y(Number(rows.find((row) => Number(row.year) === event.endYear)?.[event.first.key] ?? event.value))} className="projection-chart__overlap" />;
-          }
-          return <g key={`${event.first.key}-${event.second.key}-${event.year}`}><circle cx={startX} cy={y(event.value)} r="6" className="projection-chart__crossover-marker" /><text x={startX} y={y(event.value) + 3} textAnchor="middle" className="projection-chart__crossover-number">{index + 1}</text></g>;
-        })}
         {hoveredRow && (
           <g className="projection-chart__hover">
             <line x1={hoveredX} x2={hoveredX} y1={top} y2={height - bottom} className="projection-chart__cursor" />
@@ -828,19 +762,6 @@ export const ProjectionChart: React.FC<{ rows: WorkspaceRow[] }> = ({ rows }) =>
           </button>
         ))}
       </div>
-      {crossovers.length > 0 && (
-        <div className="projection-chart__events" aria-label="Important projection intersections">
-          <strong>Important intersections</strong>
-          <div>{crossovers.map((event, index) => (
-            <span key={`${event.first.key}-${event.second.key}-${event.year}`}>
-              <b>{event.kind === "overlap_range" ? "↔" : index + 1}</b>
-              {event.kind === "overlap_range"
-                ? `${event.first.label} and ${event.second.label} overlap from year ${Math.round(event.year)}${event.endYear && event.endYear !== event.year ? ` through ${Math.round(event.endYear)}` : ""}`
-                : `${event.first.label} and ${event.second.label} ${event.kind === "crossing" ? "cross" : "meet"} near year ${event.year.toFixed(1)} at ${formatCurrency(event.value)}`}
-            </span>
-          ))}</div>
-        </div>
-      )}
     </div>
   );
 };
@@ -2412,6 +2333,9 @@ export const ProductWorkspacePage: React.FC<{
             {illustration.rows && illustration.rows.length > 0 && (
               <>
                 <h3>Projected values</h3>
+                {/* Phase 1 (show the math): the auditable ledger is the
+                    primary view; the chart is secondary. */}
+                <ProjectionLedger ledger={illustration.ledger} rateTables={illustration.rateTables} fallbackRows={illustration.rows} />
                 <ProjectionChart rows={illustration.rows} />
                 <p>
                   <button type="button" className="button button-secondary" onClick={downloadProjectionCsv}>
@@ -2432,72 +2356,6 @@ export const ProductWorkspacePage: React.FC<{
                     </article>
                   ))}
                 </div>
-                <details>
-                  <summary>{illustration.rows.length}-year annual projection ledger</summary>
-                  <div className="table-scroll projection-ledger projection-ledger--desktop">
-                    <table className="kv-table">
-                      <thead>
-                        <tr>
-                          <th>Year</th>
-                          <th>Age</th>
-                          <th>Opening value</th>
-                          <th>Premium</th>
-                          <th>Cumulative premium</th>
-                          <th>Premium load</th>
-                          <th>COI</th>
-                          <th>Policy fee</th>
-                          <th>Interest</th>
-                          <th>Ending value</th>
-                          <th>Surrender charge</th>
-                          <th>Cash surrender value</th>
-                          <th>Death benefit</th>
-                          <th>Net amount at risk</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {illustration.rows.map((row, idx) => (
-                          <tr key={row.year ?? idx}>
-                            <td>{row.year}</td>
-                            <td>{row.attainedAge ?? ""}</td>
-                            <td>{formatCurrency(row.openingPolicyValue)}</td>
-                            <td>{formatCurrency(row.annualPremium)}</td>
-                            <td>{formatCurrency(row.cumulativePremium)}</td>
-                            <td>{formatCurrency(row.premiumLoad)}</td>
-                            <td>{formatCurrency(row.coiCharge)}</td>
-                            <td>{formatCurrency(row.policyFee)}</td>
-                            <td>{formatCurrency(row.guaranteedInterest)}</td>
-                            <td>{formatCurrency(row.endingPolicyValue ?? row.policyValue)}</td>
-                            <td>{formatCurrency(row.surrenderCharge)}</td>
-                            <td>{formatCurrency(row.surrenderValue)}</td>
-                            <td>{formatCurrency(row.deathBenefit)}</td>
-                            <td>{formatCurrency(row.netAmountAtRisk)}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                  <div className="projection-ledger-cards">
-                    {illustration.rows.map((row, idx) => (
-                      <article className="projection-ledger-card" key={row.year ?? idx}>
-                        <h4>Year {row.year} · Age {row.attainedAge ?? "—"}</h4>
-                        <dl>
-                          <div><dt>Opening value</dt><dd>{formatCurrency(row.openingPolicyValue)}</dd></div>
-                          <div><dt>Premium</dt><dd>{formatCurrency(row.annualPremium)}</dd></div>
-                          <div><dt>Cumulative premium</dt><dd>{formatCurrency(row.cumulativePremium)}</dd></div>
-                          <div><dt>Premium load</dt><dd>{formatCurrency(row.premiumLoad)}</dd></div>
-                          <div><dt>COI</dt><dd>{formatCurrency(row.coiCharge)}</dd></div>
-                          <div><dt>Policy fee</dt><dd>{formatCurrency(row.policyFee)}</dd></div>
-                          <div><dt>Interest</dt><dd>{formatCurrency(row.guaranteedInterest)}</dd></div>
-                          <div><dt>Ending value</dt><dd>{formatCurrency(row.endingPolicyValue ?? row.policyValue)}</dd></div>
-                          <div><dt>Surrender charge</dt><dd>{formatCurrency(row.surrenderCharge)}</dd></div>
-                          <div><dt>Cash surrender value</dt><dd>{formatCurrency(row.surrenderValue)}</dd></div>
-                          <div><dt>Death benefit</dt><dd>{formatCurrency(row.deathBenefit)}</dd></div>
-                          <div><dt>Net amount at risk</dt><dd>{formatCurrency(row.netAmountAtRisk)}</dd></div>
-                        </dl>
-                      </article>
-                    ))}
-                  </div>
-                </details>
               </>
             )}
           </>

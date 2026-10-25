@@ -50,6 +50,7 @@ from actuarypoc.domain.life_product_models import (
 from actuarypoc.domain.ul_requirements import get_ul_requirement_definitions
 from actuarypoc.domain.capabilities import CapabilityAssessmentItem, get_ul_capabilities
 from actuarypoc.domain.projection_graph import compile_projection_graph
+from actuarypoc.domain.projection_ledger import build_projection_ledger, build_rate_tables_in_force
 from actuarypoc.domain.requirements_classification import (
     Applicability as ReqApplicability,
     Evidence as ReqEvidence,
@@ -718,6 +719,12 @@ def _build_ul_projection_view(
             "sampleRows": sample_rows,
             "modelStatus": "diagnostic",
             "mechanicsExecution": projection.get("mechanicsExecution") or {},
+            # Phase 1 (show the math): the auditable ledger, the rate
+            # tables in force, and the row reconciliation now travel with
+            # every projection view.
+            "ledger": projection.get("ledger"),
+            "rateTables": projection.get("rateTables"),
+            "reconciliation": projection.get("reconciliation"),
         }
 
         me = illustration.get("mechanicsExplanation")
@@ -755,7 +762,7 @@ def _build_ul_projection_view(
                 }
             )
 
-        if _has_warning("Surrender charges use a simple declining schedule"):
+        if _has_warning("Surrender charges use a simplified placeholder schedule"):
             gap_items.append(
                 {
                     "id": "surrender_schedule_placeholder",
@@ -763,9 +770,10 @@ def _build_ul_projection_view(
                     "severity": "medium",
                     "status": "placeholder",
                     "whyItMatters": (
-                        "Surrender values are based on a simplified declining schedule, "
-                        "not the filed surrender charge pattern, so early duration values "
-                        "may be materially different from production illustrations."
+                        "Surrender values are based on a simplified placeholder schedule "
+                        "(a declining percentage of account value), not the filed surrender "
+                        "charge pattern, so early duration values may be materially "
+                        "different from production illustrations."
                     ),
                     "suggestedUploads": [
                         "surrender charge schedule",
@@ -9273,7 +9281,7 @@ class UlCoiConfig:
 class UlSurrenderConfig:
     """Per-year surrender charge configuration for UL-style projections."""
 
-    surrender_pct_of_face: List[float]
+    surrender_pct_of_account_value: List[float]
     schedule_id: Optional[str] = None
 
 
@@ -9493,28 +9501,94 @@ def build_ul_projection_explanation(
         }
     )
 
-    # 3. COI charge deducted
+    # 3. COI charge deducted. Phase 1: the stated formula must match the
+    # basis the engine actually applied this year (table rate x net amount
+    # at risk, or the labelled flat placeholder) — the previous text always
+    # claimed a flat fraction of face, which Eddy flagged as inaccurate.
+    applied_mechanics = target_row.get("appliedMechanics") or {}
+    coi_applied = applied_mechanics.get("coi") or {}
+    if coi_applied.get("basis") == "table":
+        coi_unit = str(coi_applied.get("rateUnit") or "")
+        coi_formula_text = {
+            "per_1000_monthly": (
+                "Each month: COI charge = (COI net amount at risk / 1,000) x monthly rate per $1,000 "
+                "from the COI table in force. COI net amount at risk = death benefit / NAR factor - "
+                "account value. The year's charge is the sum of the 12 monthly charges."
+            ),
+            "per_1000_annual": (
+                "Each month: COI charge = (COI net amount at risk / 1,000) x (annual rate per $1,000 / 12) "
+                "from the COI table in force. COI net amount at risk = death benefit / NAR factor - "
+                "account value. The year's charge is the sum of the 12 monthly charges."
+            ),
+            "percent_nar_annual": (
+                "Each month: COI charge = COI net amount at risk x (annual rate / 12) from the COI "
+                "table in force. COI net amount at risk = death benefit / NAR factor - account value. "
+                "The year's charge is the sum of the 12 monthly charges."
+            ),
+        }.get(
+            coi_unit,
+            "COI charge = COI table rate x COI net amount at risk (death benefit / NAR factor - "
+            "account value), applied monthly and summed for the year.",
+        )
+        coi_step_inputs = [
+            _explained_value(
+                label="COI rate applied",
+                value=coi_applied.get("rate"),
+                unit=coi_unit or "rate",
+                source=(coi_applied.get("source") or {}).get("filename") or "COI table in force",
+            ),
+            _explained_value(
+                label="NAR factor",
+                value=coi_applied.get("narFactor"),
+                source="Projection row",
+            ),
+            _explained_value(
+                label="Monthly COI net amount at risk (lowest month)",
+                value=coi_applied.get("monthlyNarMin"),
+                unit="USD",
+                source="Projection row",
+            ),
+            _explained_value(
+                label="Monthly COI net amount at risk (highest month)",
+                value=coi_applied.get("monthlyNarMax"),
+                unit="USD",
+                source="Projection row",
+            ),
+            _explained_value(
+                label="Face amount",
+                value=face_amount,
+                unit="USD",
+                source="Projection row",
+            ),
+        ]
+    else:
+        coi_formula_text = (
+            "Placeholder - no COI table is in force: COI charge is a flat fraction of face amount "
+            "for this draft Promise UL projection. A filed COI charge is the table rate multiplied "
+            "by the net amount at risk."
+        )
+        coi_step_inputs = [
+            _explained_value(
+                label="Face amount",
+                value=face_amount,
+                unit="USD",
+                source="Projection row",
+            ),
+            _explained_value(
+                label="COI rate (flat placeholder)",
+                value=coi_rate,
+                unit="rate",
+                source=_prov_source(prov_coi_rate),
+                source_detail=prov_coi_rate.get("name") or None,
+            ),
+        ]
     steps.append(
         {
             "id": "coi_charge_deducted",
             "order": 3,
             "title": "COI charge deducted",
-            "formulaText": "COI charge is a flat fraction of face amount for this draft Promise UL projection.",
-            "inputs": [
-                _explained_value(
-                    label="Face amount",
-                    value=face_amount,
-                    unit="USD",
-                    source="Projection row",
-                ),
-                _explained_value(
-                    label="COI rate (flat)",
-                    value=coi_rate,
-                    unit="rate",
-                    source=_prov_source(prov_coi_rate),
-                    source_detail=prov_coi_rate.get("name") or None,
-                ),
-            ],
+            "formulaText": coi_formula_text,
+            "inputs": coi_step_inputs,
             "result": _explained_value(
                 label="COI charge deducted",
                 value=coi_charge,
@@ -9602,22 +9676,68 @@ def build_ul_projection_explanation(
         }
     )
 
-    # 7. Surrender charge
+    # 7. Surrender charge. Phase 1: state the basis the engine actually
+    # applied this year instead of always claiming a percentage of face.
+    surrender_applied = applied_mechanics.get("surrender") or {}
+    surrender_basis = str(surrender_applied.get("basis") or "")
+    surrender_unit = str(surrender_applied.get("chargeUnit") or "")
+    if surrender_basis == "table" and surrender_unit == "percent_account_value":
+        surrender_formula_text = "Surrender charge = schedule percentage x ending account value."
+        surrender_step_inputs = [
+            _explained_value(label="Schedule percentage", value=surrender_applied.get("percent"), unit="rate", source="Surrender schedule in force"),
+            _explained_value(label="Ending account value", value=end_policy_value, unit="USD", source="Projection row"),
+        ]
+    elif surrender_basis == "table" and surrender_unit == "percent_face":
+        surrender_formula_text = (
+            "Surrender charge = schedule percentage x face amount, exactly as the schedule "
+            "in force states its charges."
+        )
+        surrender_step_inputs = [
+            _explained_value(label="Schedule percentage", value=surrender_applied.get("percent"), unit="rate", source="Surrender schedule in force"),
+            _explained_value(label="Face amount", value=face_amount, unit="USD", source="Projection row"),
+        ]
+    elif surrender_basis == "table" and surrender_unit == "per_1000_face":
+        surrender_formula_text = (
+            "Surrender charge = (face amount / 1,000) x schedule charge per $1,000 of face "
+            "amount, exactly as the schedule in force states."
+        )
+        surrender_step_inputs = [
+            _explained_value(label="Schedule charge per $1,000 of face", value=surrender_applied.get("perThousand"), unit="USD", source="Surrender schedule in force"),
+            _explained_value(label="Face amount", value=face_amount, unit="USD", source="Projection row"),
+        ]
+    elif surrender_basis == "table":
+        surrender_formula_text = "Surrender charge = the fixed amount stated in the schedule in force for this duration."
+        surrender_step_inputs = [
+            _explained_value(label="Schedule fixed charge", value=surrender_charge, unit="USD", source="Surrender schedule in force"),
+        ]
+    elif surrender_basis == "expired":
+        surrender_formula_text = "No surrender charge applies this year: the surrender charge period has ended."
+        surrender_step_inputs = [
+            _explained_value(label="Ending account value", value=end_policy_value, unit="USD", source="Projection row"),
+        ]
+    else:
+        surrender_formula_text = (
+            "Placeholder - no surrender schedule is in force: surrender charge = placeholder "
+            "percentage x ending account value. The placeholder percentage declines linearly "
+            "over the surrender period."
+        )
+        surrender_step_inputs = [
+            _explained_value(label="Placeholder percentage this year", value=surrender_applied.get("percent"), unit="rate", source="Placeholder schedule"),
+            _explained_value(label="Ending account value", value=end_policy_value, unit="USD", source="Projection row"),
+            _explained_value(
+                label="Surrender schedule",
+                value=prov_surrender.get("value"),
+                source=_prov_source(prov_surrender),
+                source_detail=prov_surrender.get("name") or None,
+            ),
+        ]
     steps.append(
         {
             "id": "surrender_charge",
             "order": 7,
             "title": "Surrender charge",
-            "formulaText": "Draft surrender charge based on a declining percentage of face amount over the surrender period.",
-            "inputs": [
-                _explained_value(label="Face amount", value=face_amount, unit="USD", source="Projection row"),
-                _explained_value(
-                    label="Surrender schedule",
-                    value=prov_surrender.get("value"),
-                    source=_prov_source(prov_surrender),
-                    source_detail=prov_surrender.get("name") or None,
-                ),
-            ],
+            "formulaText": surrender_formula_text,
+            "inputs": surrender_step_inputs,
             "result": _explained_value(
                 label="Surrender charge",
                 value=surrender_charge,
@@ -9949,20 +10069,20 @@ def load_ul_runtime_config(product_code: str) -> UlRuntimeConfig:
 
     surrender_period_years = 19
     max_surrender_pct = 0.10
-    surrender_pct_of_face: List[float] = []
+    surrender_pct_of_account_value: List[float] = []
     for year in range(1, horizon_years + 1):
         if year <= surrender_period_years:
             remaining = surrender_period_years - year + 1
             pct = max_surrender_pct * (remaining / surrender_period_years)
         else:
             pct = 0.0
-        surrender_pct_of_face.append(pct)
+        surrender_pct_of_account_value.append(pct)
 
     policy_fee_curve = [0.0 for _ in range(horizon_years)]
 
     crediting_cfg = UlCreditingConfig(guaranteed_rates=guaranteed_rates)
     coi_cfg = UlCoiConfig(basis="face", coi_rates=coi_rates, table_id=None)
-    surrender_cfg = UlSurrenderConfig(surrender_pct_of_face=surrender_pct_of_face, schedule_id=None)
+    surrender_cfg = UlSurrenderConfig(surrender_pct_of_account_value=surrender_pct_of_account_value, schedule_id=None)
     fees_cfg = UlFeeConfig(policy_fee_annual=policy_fee_curve, premium_load_pct=0.0)
     death_benefit_cfg = UlDeathBenefitConfig(option_type="level")
 
@@ -9993,7 +10113,7 @@ def load_ul_runtime_config(product_code: str) -> UlRuntimeConfig:
         },
         {
             "name": "Surrender schedule",
-            "value": f"{max_surrender_pct:.2%} over {surrender_period_years} years (declining, % of face)",
+            "value": f"{max_surrender_pct:.2%} over {surrender_period_years} years (declining, % of account value)",
             "source": "Placeholder",
         },
         {
@@ -10007,7 +10127,7 @@ def load_ul_runtime_config(product_code: str) -> UlRuntimeConfig:
         guaranteed_rate=guaranteed_rate,
         coi_rate_flat=coi_flat,  # flat 40 bps of face per year.
         surrender_period_years=surrender_period_years,
-        max_surrender_pct=max_surrender_pct,  # 10% of face in early durations, declining.
+        max_surrender_pct=max_surrender_pct,  # 10% of account value in early durations, declining.
         policy_fee_annual=0.0,
         crediting=crediting_cfg,
         coi=coi_cfg,
@@ -10074,19 +10194,19 @@ def validate_ul_runtime_config(config: UlRuntimeConfig, horizon_years: int) -> L
 
     # Surrender: per-year schedule vs scalar surrender_period_years/max_surrender_pct.
     surr_cfg = config.surrender
-    if surr_cfg is None or not isinstance(surr_cfg.surrender_pct_of_face, list):
+    if surr_cfg is None or not isinstance(surr_cfg.surrender_pct_of_account_value, list):
         warnings.append(
-            "UL config: surrender.surrender_pct_of_face is missing; engine will fall back to scalar "
+            "UL config: surrender.surrender_pct_of_account_value is missing; engine will fall back to scalar "
             "surrender_period_years/max_surrender_pct."
         )
     else:
-        if len(surr_cfg.surrender_pct_of_face) != horizon_years:
+        if len(surr_cfg.surrender_pct_of_account_value) != horizon_years:
             warnings.append(
-                "UL config: surrender.surrender_pct_of_face has length "
-                f"{len(surr_cfg.surrender_pct_of_face)} (expected {horizon_years})."
+                "UL config: surrender.surrender_pct_of_account_value has length "
+                f"{len(surr_cfg.surrender_pct_of_account_value)} (expected {horizon_years})."
             )
         # Only attempt a shape check when the lengths match.
-        if len(surr_cfg.surrender_pct_of_face) == horizon_years:
+        if len(surr_cfg.surrender_pct_of_account_value) == horizon_years:
             expected: List[float] = []
             for year in range(1, horizon_years + 1):
                 if year <= config.surrender_period_years:
@@ -10098,10 +10218,10 @@ def validate_ul_runtime_config(config: UlRuntimeConfig, horizon_years: int) -> L
 
             if any(
                 not _isclose(actual, exp)
-                for actual, exp in zip(surr_cfg.surrender_pct_of_face, expected)
+                for actual, exp in zip(surr_cfg.surrender_pct_of_account_value, expected)
             ):
                 warnings.append(
-                    "UL config: surrender.surrender_pct_of_face does not match the linear schedule implied by "
+                    "UL config: surrender.surrender_pct_of_account_value does not match the linear schedule implied by "
                     "surrender_period_years/max_surrender_pct; engine is still using the scalar schedule."
                 )
 
@@ -10321,34 +10441,47 @@ def _run_ul_projection(
         guaranteed_interest = 0.0
         coi_charge = 0.0
         death_benefit = face_amount
+        # Phase 1 (show the math): track exactly what the loop applied this
+        # year so the ledger can derive each number from the same record the
+        # arithmetic used — the explanation can never drift from the math.
+        fee_amounts: List[float] = [0.0] * len(fee_rows)
+        coi_nar_min: Optional[float] = None
+        coi_nar_max: Optional[float] = None
 
         for month in range(1, 13):
             payment_due = (month - 1) % payment_interval == 0
             gross_premium = modal_premium if payment_due else 0.0
-            month_premium_load = sum(
-                gross_premium * float(row["amount"])
-                for row in fee_rows if row.get("fee_unit") == "percent_premium"
-            )
+            month_premium_load = 0.0
+            for fee_index, fee_row in enumerate(fee_rows):
+                if fee_row.get("fee_unit") == "percent_premium":
+                    row_load = gross_premium * float(fee_row["amount"])
+                    month_premium_load += row_load
+                    fee_amounts[fee_index] += row_load
             premium_load += month_premium_load
             policy_value += gross_premium - month_premium_load
 
             monthly_fee = 0.0
-            for fee_row in fee_rows:
+            for fee_index, fee_row in enumerate(fee_rows):
                 amount = float(fee_row["amount"])
                 fee_unit = fee_row["fee_unit"]
+                row_fee = 0.0
                 if fee_unit == "monthly_fixed":
-                    monthly_fee += amount
+                    row_fee = amount
                 elif fee_unit == "modal_fixed" and payment_due:
-                    monthly_fee += amount
+                    row_fee = amount
                 elif fee_unit == "per_1000_face_annual":
-                    monthly_fee += face_amount / 1000.0 * amount / 12.0
+                    row_fee = face_amount / 1000.0 * amount / 12.0
                 elif fee_unit == "annual_fixed":
-                    monthly_fee += amount / 12.0
+                    row_fee = amount / 12.0
+                monthly_fee += row_fee
+                fee_amounts[fee_index] += row_fee
             if not fee_rows:
                 monthly_fee = config.policy_fee_annual / 12.0
 
             death_benefit = max(face_amount, corridor_percentage * policy_value)
             charge_nar = max(death_benefit / nar_factor - policy_value, 0.0)
+            coi_nar_min = charge_nar if coi_nar_min is None else min(coi_nar_min, charge_nar)
+            coi_nar_max = charge_nar if coi_nar_max is None else max(coi_nar_max, charge_nar)
             if coi_row:
                 rate = float(coi_row["rate"])
                 unit = coi_row["rate_unit"]
@@ -10367,19 +10500,49 @@ def _run_ul_projection(
             policy_value += month_interest
             guaranteed_interest += month_interest
 
-        # Placeholder surrender charge schedule: linear decline from
-        # max_surrender_pct of face down to 0 over the surrender period.
+        # Surrender charge. A loaded schedule is applied exactly on the
+        # basis it states (percent of account value, percent of face, per
+        # $1,000 of face, or fixed). The placeholder used when no schedule
+        # is in force is a linear decline of max_surrender_pct of the
+        # *account value* down to 0 over the surrender period — Eddy
+        # (Aug 7, 2026): a surrender charge is a percentage of the ending
+        # value, not a flat amount and not a percentage of face.
         surrender_rows = list(executable.get("surrender") or [])
         surrender_row = _select(surrender_rows, year, attained_age)
+        surrender_applied: Dict[str, Any] = {
+            "basis": "expired",
+            "chargeUnit": None,
+            "percent": None,
+            "perThousand": None,
+            "base": None,
+            "baseAmount": None,
+            "tableLoaded": bool(surrender_rows),
+            "source": None,
+        }
         if surrender_row:
             charge = float(surrender_row["charge"])
             charge_unit = surrender_row["charge_unit"]
-            if charge_unit == "percent_face":
+            surrender_applied["basis"] = "table"
+            surrender_applied["chargeUnit"] = charge_unit
+            if charge_unit == "percent_account_value":
+                surrender_charge = policy_value * charge
+                surrender_applied["percent"] = charge
+                surrender_applied["base"] = "account_value"
+                surrender_applied["baseAmount"] = policy_value
+            elif charge_unit == "percent_face":
                 surrender_charge = face_amount * charge
+                surrender_applied["percent"] = charge
+                surrender_applied["base"] = "face_amount"
+                surrender_applied["baseAmount"] = face_amount
             elif charge_unit == "per_1000_face":
                 surrender_charge = face_amount / 1000.0 * charge
+                surrender_applied["perThousand"] = charge
+                surrender_applied["base"] = "face_amount"
+                surrender_applied["baseAmount"] = face_amount
             else:
                 surrender_charge = charge
+                surrender_applied["base"] = "fixed"
+                surrender_applied["baseAmount"] = charge
         elif surrender_rows:
             compatible = [
                 row for row in surrender_rows
@@ -10397,13 +10560,21 @@ def _run_ul_projection(
                 if year <= surrender_period_years:
                     remaining = surrender_period_years - year + 1
                     surrender_pct = max_surrender_pct * (remaining / surrender_period_years)
-                    surrender_charge = face_amount * surrender_pct
+                    surrender_charge = policy_value * surrender_pct
+                    surrender_applied["basis"] = "placeholder"
+                    surrender_applied["percent"] = surrender_pct
+                    surrender_applied["base"] = "account_value"
+                    surrender_applied["baseAmount"] = policy_value
                 else:
                     surrender_charge = 0.0
         elif year <= surrender_period_years:
             remaining = surrender_period_years - year + 1
             surrender_pct = max_surrender_pct * (remaining / surrender_period_years)
-            surrender_charge = face_amount * surrender_pct
+            surrender_charge = policy_value * surrender_pct
+            surrender_applied["basis"] = "placeholder"
+            surrender_applied["percent"] = surrender_pct
+            surrender_applied["base"] = "account_value"
+            surrender_applied["baseAmount"] = policy_value
         else:
             surrender_charge = 0.0
         if not surrender_row and not surrender_rows:
@@ -10424,7 +10595,51 @@ def _run_ul_projection(
                 "page": provenance.get("page"),
                 "tableHeading": provenance.get("tableHeading"),
                 "valueBasis": provenance.get("valueBasis"),
+                "sourceType": provenance.get("sourceType"),
             }
+
+        surrender_applied["source"] = source_summary(surrender_row)
+        applied_mechanics: Dict[str, Any] = {
+            "coi": {
+                "basis": "table" if coi_row else "placeholder",
+                "rate": float(coi_row["rate"]) if coi_row else None,
+                "rateUnit": coi_row.get("rate_unit") if coi_row else None,
+                "narFactor": nar_factor,
+                "monthlyNarMin": coi_nar_min,
+                "monthlyNarMax": coi_nar_max,
+                "flatRate": coi_rate,
+                "source": source_summary(coi_row),
+            },
+            "fees": [
+                {
+                    "component": fee_row.get("component") or "policy_fee",
+                    "feeUnit": fee_row.get("fee_unit"),
+                    "amount": fee_amounts[index],
+                    "rate": float(fee_row["amount"]) if fee_row.get("fee_unit") == "percent_premium" else None,
+                    "flowsTo": "premium_load" if fee_row.get("fee_unit") == "percent_premium" else "policy_fee",
+                    "basis": "table",
+                    "source": source_summary(fee_row),
+                }
+                for index, fee_row in enumerate(fee_rows)
+            ] or [
+                {
+                    "component": "policy_fee",
+                    "feeUnit": "annual_fixed",
+                    "amount": policy_fee,
+                    "rate": None,
+                    "flowsTo": "policy_fee",
+                    "basis": "fallback",
+                    "source": None,
+                }
+            ],
+            "surrender": surrender_applied,
+            "crediting": {"guaranteedRate": guaranteed_rate},
+            "nar": {
+                "factor": nar_factor,
+                "corridorPercentage": corridor_percentage,
+                "corridorBasis": "table" if corridor_row else "default",
+            },
+        }
 
         years.append(year)
         rows.append(
@@ -10462,6 +10677,7 @@ def _run_ul_projection(
                 },
                 "coiSource": source_summary(coi_row),
                 "monthlyExpenseSources": [source_summary(row) for row in monthly_expense_rows],
+                "appliedMechanics": applied_mechanics,
                 "status": None,
             }
         )
@@ -10572,6 +10788,17 @@ def build_ul_illustration_for_product(product_code: str, request: Dict[str, Any]
     horizon_years = 30
     projection, normalised_request = _run_ul_projection(request=request, config=cfg, horizon_years=horizon_years)
 
+    # Phase 1 (show the math): attach the auditable roll-forward ledger and
+    # the full rate tables in force. Both are pure transforms over the
+    # executed projection + loaded mechanics; they do not affect the math.
+    projection["ledger"] = build_projection_ledger(projection)
+    projection["rateTables"] = build_rate_tables_in_force(
+        cfg.executable_mechanics,
+        coi_rate_flat=cfg.coi_rate_flat,
+        max_surrender_pct=cfg.max_surrender_pct,
+        surrender_period_years=cfg.surrender_period_years,
+    )
+
     # v0.1 Mechanics Validation Surface (UL): build a lightweight
     # mechanics trace for Year 1 using the existing projection results.
     # This is intentionally read-only and must not affect projection
@@ -10615,7 +10842,7 @@ def build_ul_illustration_for_product(product_code: str, request: Dict[str, Any]
         )
     if not executable.get("surrender"):
         warnings.append(
-            "Surrender charges use a simple declining schedule over 19 years because no complete executable schedule is loaded."
+            "Surrender charges use a simplified placeholder schedule (a percentage of account value declining over 19 years) because no complete executable schedule is loaded."
         )
     elif (execution.get("surrender") or {}).get("fallbackYears"):
         warnings.append(
@@ -10783,7 +11010,7 @@ def build_ul_illustration_for_product(product_code: str, request: Dict[str, Any]
         {
             "id": "surrender_schedule",
             "label": "Surrender charge schedule",
-            "value": f"{len(executable.get('surrender') or [])} executable rows" if executable.get("surrender") else f"{cfg.max_surrender_pct:.2%} of face declining over {cfg.surrender_period_years} years",
+            "value": f"{len(executable.get('surrender') or [])} executable rows" if executable.get("surrender") else f"{cfg.max_surrender_pct:.2%} of account value declining over {cfg.surrender_period_years} years",
             "status": (
                 "synthetic_assumption"
                 if any((row.get("provenance") or {}).get("sourceType") == "ai_synthetic" for row in (executable.get("surrender") or []))
