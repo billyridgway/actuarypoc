@@ -72,6 +72,30 @@ interface CorrectionVariant {
   label: string;
   /** Names of the parameters the variant takes (the form is per-variant). */
   params: string[];
+  /** Phase 4: the rule-bank switches this variant resolves through. */
+  bankSwitches?: string[];
+}
+
+interface ProposalView {
+  id: string;
+  kind: "filed_table" | "switch_setting";
+  slot: string;
+  label: string;
+  confirmBack: string;
+  switch?: string | null;
+  evidence?: {
+    filename?: string | null;
+    page?: number | null;
+    heading?: string | null;
+    snippet?: string | null;
+  } | null;
+}
+
+interface RuleBankSwitch {
+  id: string;
+  mechanic: string;
+  kind: string;
+  description: string;
 }
 
 interface PanelPayload {
@@ -89,7 +113,32 @@ interface PanelPayload {
   projectionStale: boolean;
   projectionStaleSince?: string | null;
   projectionStaleSlots: string[];
+  /** Phase 4: pending extraction proposals + the rule-bank catalog. */
+  proposals?: ProposalView[];
+  ruleBank?: RuleBankSwitch[];
 }
+
+/** One editable row of a banded (piecewise) schedule correction. */
+interface BandRow {
+  fromYear: string;
+  toYear: string; // "" = open-ended (the final band)
+  unit: string;
+  value: string;
+  gradeTo: string; // "" = constant across the band
+}
+
+const SURRENDER_BAND_UNITS = [
+  { value: "percent_account_value", label: "% of account value" },
+  { value: "percent_face", label: "% of face amount" },
+  { value: "per_1000_face", label: "$ per $1,000 of face" },
+  { value: "fixed", label: "Flat $" },
+];
+
+const COI_BAND_UNITS = [
+  { value: "per_1000_monthly", label: "per $1,000 of NAR, monthly" },
+  { value: "per_1000_annual", label: "per $1,000 of NAR, annual" },
+  { value: "percent_nar_annual", label: "% of NAR, annual" },
+];
 
 const ROW_COLUMNS = [
   "component",
@@ -199,6 +248,24 @@ export const MechanicsPanel: React.FC<{
   const [corrParams, setCorrParams] = React.useState<Record<string, Record<string, string>>>({});
   const [corrText, setCorrText] = React.useState<Record<string, string>>({});
   const [corrPreview, setCorrPreview] = React.useState<Record<string, any>>({});
+  // Phase 4: banded-schedule editor state (per slot) and the busy flag
+  // for proposal confirm/dismiss actions.
+  const [corrBands, setCorrBands] = React.useState<Record<string, BandRow[]>>({});
+  const [busyProposal, setBusyProposal] = React.useState<string | null>(null);
+
+  const bandsFor = (slot: SlotView): BandRow[] => {
+    const existing = corrBands[slot.id];
+    if (existing && existing.length > 0) return existing;
+    const unit = slot.id === "coi" ? "per_1000_monthly" : "percent_account_value";
+    return [
+      { fromYear: "1", toYear: "10", unit, value: "", gradeTo: "" },
+      { fromYear: "11", toYear: "", unit, value: "", gradeTo: "" },
+    ];
+  };
+
+  const updateBands = (slot: SlotView, rows: BandRow[]) => {
+    setCorrBands((prev) => ({ ...prev, [slot.id]: rows }));
+  };
 
   const loadPanel = React.useCallback(async () => {
     try {
@@ -392,6 +459,23 @@ export const MechanicsPanel: React.FC<{
       params.timing = raw.timing || "end";
     } else if (variantId === "nar_definition") {
       params.definition = raw.definition || "unadjusted";
+    } else if (variantId === "surrender_banded" || variantId === "coi_banded") {
+      // Percentage-based band values are entered as percentages
+      // ("8" for 8%) and converted to fractions, like the basis form.
+      const convert = (unit: string, rawValue: string): number => {
+        const n = Number(rawValue);
+        return unit.startsWith("percent") ? n / 100 : n;
+      };
+      params.bands = bandsFor(slot).map((band) => {
+        const out: Record<string, any> = {
+          fromYear: Number(band.fromYear),
+          toYear: band.toYear.trim() === "" ? null : Number(band.toYear),
+          unit: band.unit,
+          value: convert(band.unit, band.value),
+        };
+        if (band.gradeTo.trim() !== "") out.gradeTo = convert(band.unit, band.gradeTo);
+        return out;
+      });
     }
     return {
       variant: variantId || null,
@@ -439,6 +523,49 @@ export const MechanicsPanel: React.FC<{
     }
   };
 
+  // Phase 4: extraction proposals. Confirming sends confirmed: true —
+  // the server refuses anything less and returns the restated change;
+  // dismissing persists so the proposal does not come back.
+  const postProposal = async (proposalId: string, action: "confirm" | "dismiss") => {
+    setBusyProposal(proposalId);
+    setMessage(null);
+    setError(null);
+    try {
+      const resp = await fetch(
+        `/api/workspaces/${encodeURIComponent(workspaceId)}/mechanics-panel/proposals/${encodeURIComponent(proposalId)}/${action}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(action === "confirm" ? { confirmed: true } : {}),
+        },
+      );
+      const text = await resp.text();
+      let body: any = null;
+      try {
+        body = JSON.parse(text);
+      } catch {
+        /* keep raw text */
+      }
+      if (!resp.ok) {
+        const detail = body?.detail;
+        throw new Error(
+          (typeof detail === "string" ? detail : detail?.message) || text || `Request failed (HTTP ${resp.status})`,
+        );
+      }
+      setMessage(
+        action === "confirm"
+          ? body.proposal?.confirmBack || "Proposal applied."
+          : "Proposal dismissed — it will not be suggested again.",
+      );
+      await loadPanel();
+      if (action === "confirm" && onSnapshotReload) onSnapshotReload();
+    } catch (err: any) {
+      setError(err?.message || "Proposal action failed.");
+    } finally {
+      setBusyProposal(null);
+    }
+  };
+
   const handleRecordCorrectionNote = async (slot: SlotView) => {
     setBusySlot(slot.id);
     setMessage(null);
@@ -481,6 +608,48 @@ export const MechanicsPanel: React.FC<{
           <button type="button" className="button" disabled={rerunning} onClick={handleRerun}>
             {rerunning ? "Re-running…" : "Re-run analysis"}
           </button>
+        </div>
+      )}
+      {panel && (panel.proposals ?? []).length > 0 && (
+        <div className="slot-card" id="extraction-proposals">
+          <h3>Suggested from the filing</h3>
+          <p className="muted">
+            These were read from the filing's tables and text, with the page each came from.
+            Nothing is applied until you confirm it — confirming restates the change below
+            exactly as it will take effect.
+          </p>
+          {(panel.proposals ?? []).map((proposal) => (
+            <div key={proposal.id} className="slot-candidate">
+              <p>
+                <strong>{proposal.label}</strong>
+                {proposal.switch ? <span className="basis-tag">{proposal.switch}</span> : null}
+              </p>
+              {proposal.evidence && (
+                <p className="muted">
+                  Evidence: {proposal.evidence.filename || "the filing"}
+                  {proposal.evidence.page != null ? `, p. ${proposal.evidence.page}` : ""}
+                  {proposal.evidence.snippet ? <> — “{proposal.evidence.snippet}”</> : null}
+                </p>
+              )}
+              <p className="muted">{proposal.confirmBack}</p>
+              <button
+                type="button"
+                className="button"
+                disabled={busyProposal === proposal.id}
+                onClick={() => void postProposal(proposal.id, "confirm")}
+              >
+                Confirm and apply
+              </button>{" "}
+              <button
+                type="button"
+                className="button button-secondary"
+                disabled={busyProposal === proposal.id}
+                onClick={() => void postProposal(proposal.id, "dismiss")}
+              >
+                Dismiss
+              </button>
+            </div>
+          ))}
         </div>
       )}
       {panel?.slots.map((slot) => (
@@ -766,6 +935,126 @@ export const MechanicsPanel: React.FC<{
                 </select>
               </label>
             )}
+            {((corrVariant[slot.id] ?? "") === "surrender_banded" ||
+              (corrVariant[slot.id] ?? "") === "coi_banded") && (
+              <div className="slot-correction-params">
+                <p className="muted">
+                  Bands must start at year 1 and join up with no gaps or overlaps; only the
+                  last band may be open-ended. Percentage values are entered as percentages
+                  (8 means 8%). “Grading to” is optional — leave it blank for a constant band.
+                </p>
+                {bandsFor(slot).map((band, index) => {
+                  const units = slot.id === "coi" ? COI_BAND_UNITS : SURRENDER_BAND_UNITS;
+                  const rows = bandsFor(slot);
+                  return (
+                    <div key={index} className="slot-band-row">
+                      <label className="slot-correction-param">
+                        From year
+                        <input
+                          type="number"
+                          min="1"
+                          step="1"
+                          value={band.fromYear}
+                          onChange={(e) =>
+                            updateBands(slot, rows.map((r, i) => (i === index ? { ...r, fromYear: e.target.value } : r)))
+                          }
+                        />
+                      </label>
+                      <label className="slot-correction-param">
+                        To year (blank = onward)
+                        <input
+                          type="number"
+                          min="1"
+                          step="1"
+                          value={band.toYear}
+                          onChange={(e) =>
+                            updateBands(slot, rows.map((r, i) => (i === index ? { ...r, toYear: e.target.value } : r)))
+                          }
+                        />
+                      </label>
+                      <label className="slot-correction-param">
+                        Basis
+                        <select
+                          value={band.unit}
+                          onChange={(e) =>
+                            updateBands(slot, rows.map((r, i) => (i === index ? { ...r, unit: e.target.value } : r)))
+                          }
+                        >
+                          {units.map((unit) => (
+                            <option key={unit.value} value={unit.value}>
+                              {unit.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="slot-correction-param">
+                        Value{band.unit.startsWith("percent") ? " (%)" : ""}
+                        <input
+                          type="number"
+                          min="0"
+                          step="any"
+                          value={band.value}
+                          onChange={(e) =>
+                            updateBands(slot, rows.map((r, i) => (i === index ? { ...r, value: e.target.value } : r)))
+                          }
+                        />
+                      </label>
+                      <label className="slot-correction-param">
+                        Grading to (optional)
+                        <input
+                          type="number"
+                          min="0"
+                          step="any"
+                          value={band.gradeTo}
+                          onChange={(e) =>
+                            updateBands(slot, rows.map((r, i) => (i === index ? { ...r, gradeTo: e.target.value } : r)))
+                          }
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        className="button button-secondary"
+                        disabled={rows.length <= 1}
+                        onClick={() => updateBands(slot, rows.filter((_, i) => i !== index))}
+                      >
+                        Remove band
+                      </button>
+                    </div>
+                  );
+                })}
+                <button
+                  type="button"
+                  className="button button-secondary"
+                  onClick={() => {
+                    const rows = bandsFor(slot);
+                    const last = rows[rows.length - 1];
+                    const unit = slot.id === "coi" ? "per_1000_monthly" : "percent_account_value";
+                    updateBands(slot, [
+                      ...rows,
+                      {
+                        fromYear: last && last.toYear ? String(Number(last.toYear) + 1) : "",
+                        toYear: "",
+                        unit: last?.unit || unit,
+                        value: "",
+                        gradeTo: "",
+                      },
+                    ]);
+                  }}
+                >
+                  Add band
+                </button>
+              </div>
+            )}
+            {(() => {
+              const variant = (slot.correctionVariants ?? []).find(
+                (v) => v.id === (corrVariant[slot.id] ?? ""),
+              );
+              return variant?.bankSwitches && variant.bankSwitches.length > 0 ? (
+                <p className="muted">
+                  Runs through the rule bank: {variant.bankSwitches.join(", ")}.
+                </p>
+              ) : null;
+            })()}
             <textarea
               className="slot-paste"
               rows={2}

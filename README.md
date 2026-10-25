@@ -44,6 +44,19 @@ The public API is limited to:
   — upload a CSV/TSV replacement table for a slot.
 - `GET /api/workspaces/{workspace_id}/mechanics-panel/history` — the slot
   change log (audit trail), newest first.
+- `POST /api/workspaces/{workspace_id}/mechanics-panel/{slot_id}/corrections/preview`
+  and `POST .../corrections` — "This should be…": preview restates a
+  correction in actuarial language; applying requires `confirmed: true`.
+- `GET /api/workspaces/{workspace_id}/mechanics-panel/proposals` — pending
+  extraction proposals (deterministic signals from the filing's tables and
+  text, each with page evidence).
+- `POST /api/workspaces/{workspace_id}/mechanics-panel/proposals/{id}/confirm`
+  — apply a proposal (requires `confirmed: true`); `POST .../dismiss`
+  dismisses it permanently.
+
+The projection engine executes only **banked** calculation variations —
+see `docs/rule-bank.md` for the rule bank, its governance (a variation
+enters as code + tests in this repo), and the proposal principles.
 - `GET /api/workspaces/{workspace_id}/feature-requests` — list workspace
   feature requests.
 - `POST /api/workspaces/{workspace_id}/feature-requests` — create a workspace

@@ -49,6 +49,7 @@ import re
 from typing import Any, Dict, List, Optional
 import uuid
 
+from actuarypoc.domain import rule_bank
 from actuarypoc.extract.workspace_mechanics_panel import (
     _change_record,
     _slot_status,
@@ -63,18 +64,39 @@ CORRECTION_SOURCE_TYPE = "correction"
 # corrections are captured (see the server's correction endpoints).
 CORRECTION_REQUEST_CAPABILITY_ID = "mechanics_correction"
 
-COI_TIMINGS = ("beginning", "middle", "end")
-NAR_DEFINITIONS = ("factor_adjusted", "unadjusted")
-SURRENDER_BASES = ("percent_account_value", "percent_face", "flat_amount")
+# Phase 4 (the rule bank): the correction variants resolve through the
+# bank — the vocabularies below are the bank registry's, so a timing,
+# definition, or basis the bank does not know cannot be corrected into
+# existence here either.
+COI_TIMINGS = tuple(rule_bank.COI_TIMING_SWITCHES)
+NAR_DEFINITIONS = tuple(rule_bank.NAR_DEFINITION_SWITCHES)
+_GRADED_SWITCH = rule_bank.get_switch("surrender.schedule.graded")
+SURRENDER_BASES = next(
+    spec.choices for spec in _GRADED_SWITCH.params if spec.name == "basis"
+)
 
-# Structured variants, keyed by the slot they attach to.  Each variant is
-# a small deterministic mapping — the seed of the Phase 4 rule bank.
+# Structured variants, keyed by the slot they attach to.  Each variant
+# names the banked switches it resolves through (``bankSwitches``):
+# corrections and slot defaults alike execute bank code, never a
+# private copy of a formula.
 VARIANTS_BY_SLOT: Dict[str, List[Dict[str, Any]]] = {
     "surrender": [
         {
             "id": "surrender_basis",
             "label": "Change the surrender charge basis",
             "params": ["basis", "percent", "amount", "gradingYears"],
+            "bankSwitches": [
+                "surrender.basis.percent_account_value",
+                "surrender.basis.percent_face",
+                "surrender.basis.fixed",
+                "surrender.schedule.graded",
+            ],
+        },
+        {
+            "id": "surrender_banded",
+            "label": "Set a banded (piecewise) surrender schedule",
+            "params": ["bands"],
+            "bankSwitches": ["surrender.schedule.banded"],
         },
     ],
     "coi": [
@@ -82,6 +104,17 @@ VARIANTS_BY_SLOT: Dict[str, List[Dict[str, Any]]] = {
             "id": "coi_timing",
             "label": "Change when the COI charge is deducted",
             "params": ["timing"],
+            "bankSwitches": [
+                "coi.timing.beginning",
+                "coi.timing.middle",
+                "coi.timing.end",
+            ],
+        },
+        {
+            "id": "coi_banded",
+            "label": "Set banded COI rates by policy duration",
+            "params": ["bands"],
+            "bankSwitches": ["coi.schedule.banded"],
         },
     ],
     "nar": [
@@ -89,6 +122,10 @@ VARIANTS_BY_SLOT: Dict[str, List[Dict[str, Any]]] = {
             "id": "nar_definition",
             "label": "Change the net amount at risk definition",
             "params": ["definition"],
+            "bankSwitches": [
+                "nar.definition.factor_adjusted",
+                "nar.definition.unadjusted",
+            ],
         },
     ],
 }
@@ -301,6 +338,12 @@ def _validate_spec(slot: Dict[str, Any], spec: Dict[str, Any]) -> Dict[str, Any]
                 "- account value) or unadjusted (death benefit - account value)"
             )
         return {"definition": definition}
+    if variant in ("surrender_banded", "coi_banded"):
+        # Band shapes are validated by the rule bank (contiguous from
+        # year 1, no gaps or overlaps, banked units, sane ranges).
+        mechanic = "surrender" if variant == "surrender_banded" else "coi"
+        bands = rule_bank.validate_bands(mechanic, params.get("bands"))
+        return {"bands": bands}
     raise ValueError(f"Unknown correction variant: {variant!r}")
 
 
@@ -318,29 +361,15 @@ def _graded_surrender_rows(
     The schedule starts at the corrected value in year 1 and grades
     linearly to zero at the end of the grading period — the shape Eddy
     described ("8% of account value, grading to 0 over 10 years").
-    Rows are validated by the same validators ingestion uses, and
-    stamped with correction provenance so the ledger can label them.
+    Phase 4: the row construction is the rule bank's graded-schedule
+    materializer (surrender.schedule.graded); this function validates
+    the rows with the same validators ingestion uses and stamps the
+    correction provenance so the ledger can label them.
     """
 
-    basis = params["basis"]
-    grading_years = int(params["gradingYears"])
-    unit = {
-        "percent_account_value": "percent_account_value",
-        "percent_face": "percent_face",
-        "flat_amount": "fixed",
-    }[basis]
-    start = float(params["percent"]) if basis != "flat_amount" else float(params["amount"])
-    rows: List[Dict[str, Any]] = []
-    for duration in range(1, grading_years + 1):
-        factor = (grading_years - duration + 1) / grading_years
-        rows.append({
-            "duration": duration,
-            "issue_age": None,
-            "sex": None,
-            "charge": start * factor,
-            "charge_unit": unit,
-        })
-    canonical = _validate_canonical_rows("surrender", rows)
+    canonical = _validate_canonical_rows(
+        "surrender", rule_bank.materialize_graded_surrender(params)
+    )
     provenance = {
         "sourceType": CORRECTION_SOURCE_TYPE,
         "filename": "Workspace correction",
@@ -351,6 +380,43 @@ def _graded_surrender_rows(
         "confirmBack": confirm_back,
     }
     return [{**row, "provenance": dict(provenance)} for row in canonical]
+
+
+def _banded_rows(
+    mechanic: str,
+    params: Dict[str, Any],
+    *,
+    who: str,
+    at: str,
+    correction_id: str,
+    text: Optional[str],
+    confirm_back: str,
+) -> List[Dict[str, Any]]:
+    """Materialise a banded-schedule correction into validated rows.
+
+    The bank's banded materializer (surrender.schedule.banded /
+    coi.schedule.banded) builds one row per duration, each tagged
+    with its band; the tag moves into the row provenance — the
+    projection loop's source summary carries it from there, so the
+    ledger derivation can name the band applied for a period.
+    """
+
+    materialised = rule_bank.materialize_banded_rows(mechanic, params["bands"])
+    bands = [row.pop("_band", None) for row in materialised]
+    canonical = _validate_canonical_rows(mechanic, materialised)
+    provenance = {
+        "sourceType": CORRECTION_SOURCE_TYPE,
+        "filename": "Workspace correction",
+        "correctionId": correction_id,
+        "correctedBy": who,
+        "correctedAt": at,
+        "correctionText": text,
+        "confirmBack": confirm_back,
+    }
+    return [
+        {**row, "provenance": {**provenance, "band": band}}
+        for row, band in zip(canonical, bands)
+    ]
 
 
 def _confirm_back(
@@ -386,7 +452,52 @@ def _confirm_back(
             factor = rows[0].get("factor") if rows else 1.0
             now = f"death benefit ÷ {factor} (the NAR factor in force) − account value"
         return f"Net amount at risk for COI: was {was_text}; now {now}."
+    if variant in ("surrender_banded", "coi_banded"):
+        bands_text = "; ".join(
+            _band_phrase(index, band) for index, band in enumerate(params["bands"], start=1)
+        )
+        if variant == "surrender_banded":
+            return f"Surrender charge: was {was_text}; now a banded schedule — {bands_text}."
+        return f"COI rates: was {was_text}; now banded by policy duration — {bands_text}."
     raise ValueError(f"Unknown correction variant: {variant!r}")
+
+
+def _short_band_value(unit: str, value: float) -> str:
+    if unit in ("percent_account_value", "percent_face", "percent_nar_annual"):
+        return _pct(value)
+    if unit in ("per_1000_face", "fixed"):
+        return _money(value)
+    return f"{value:g}"
+
+
+def _band_phrase(index: int, band: Dict[str, Any]) -> str:
+    """One band restated in actuarial language for the confirm-back."""
+
+    unit = str(band.get("unit") or "")
+    value = float(band.get("value") or 0.0)
+    span = band.get("label") or f"years {band.get('fromYear')}–{band.get('toYear') or '+'}"
+    if value == 0:
+        amount = "no charge"
+    elif unit == "percent_account_value":
+        amount = f"{_pct(value)} of account value"
+    elif unit == "percent_face":
+        amount = f"{_pct(value)} of face amount"
+    elif unit == "per_1000_face":
+        amount = f"{_money(value)} per $1,000 of face amount"
+    elif unit == "fixed":
+        amount = f"a flat {_money(value)}"
+    elif unit == "per_1000_monthly":
+        amount = f"{value:g} per $1,000 of net amount at risk, monthly"
+    elif unit == "per_1000_annual":
+        amount = f"{value:g} per $1,000 of net amount at risk, annually"
+    elif unit == "percent_nar_annual":
+        amount = f"{_pct(value)} of net amount at risk, annually"
+    else:
+        amount = f"{value:g} ({unit})"
+    grade_to = band.get("gradeTo")
+    if grade_to is not None and float(grade_to) != value:
+        amount += f", grading linearly to {_short_band_value(unit, float(grade_to))}"
+    return f"band {index} ({span}): {amount}"
 
 
 def _current_timing(artifact: Dict[str, Any]) -> str:
@@ -435,6 +546,16 @@ def _build_correction(
     }
     if variant == "surrender_basis":
         record["rows"] = _graded_surrender_rows(
+            params,
+            who=who,
+            at=at,
+            correction_id=record["id"],
+            text=text,
+            confirm_back=confirm_back,
+        )
+    if variant in ("surrender_banded", "coi_banded"):
+        record["rows"] = _banded_rows(
+            str(slot.get("mechanic") or ""),
             params,
             who=who,
             at=at,
@@ -504,7 +625,9 @@ def apply_correction(
 
     prior_correction = (result.get("corrections") or {}).get(mechanic)
     result.setdefault("corrections", {})[mechanic] = record
-    if record["variant"] == "surrender_basis":
+    if record.get("rows") is not None:
+        # Table-shaped corrections (surrender_basis, the banded
+        # schedules) replace the mechanic's usable rows outright.
         result.setdefault("usable", {})[mechanic] = deepcopy(record["rows"])
     result.setdefault("status", {})[mechanic] = "corrected"
 
@@ -595,6 +718,18 @@ def reapply_corrections(
             continue
         if record.get("variant") == "surrender_basis":
             rows = _graded_surrender_rows(
+                dict(record.get("params") or {}),
+                who=str(record.get("who") or "workspace_user"),
+                at=str(record.get("at") or ""),
+                correction_id=str(record.get("id") or ""),
+                text=record.get("text"),
+                confirm_back=str(record.get("confirmBack") or ""),
+            )
+            usable[mechanic] = rows
+            record["rows"] = deepcopy(rows)
+        elif record.get("variant") in ("surrender_banded", "coi_banded"):
+            rows = _banded_rows(
+                mechanic,
                 dict(record.get("params") or {}),
                 who=str(record.get("who") or "workspace_user"),
                 at=str(record.get("at") or ""),
