@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 import io
 import json
 import logging
@@ -70,6 +70,17 @@ from actuarypoc.extract.assumptions_for_product import (
 from actuarypoc.extract.mechanics_for_product import generate_mechanics_for_product
 from actuarypoc.extract.mechanic_assumptions_extractor import extract_mechanic_assumptions
 from actuarypoc.extract.workspace_ul_mechanics import accept_filed_mechanic, extract_ul_mechanics, usable_mechanics
+from actuarypoc.extract.workspace_mechanics_panel import (
+    SLOT_BY_ID as _SLOT_BY_ID,
+    annotate_gap_items as _annotate_gap_items,
+    apply_nar_factor_edit as _apply_nar_factor_edit,
+    apply_table_edit as _apply_table_edit,
+    build_mechanics_panel as _build_mechanics_panel,
+    build_slot_view as _build_slot_view,
+    parse_table_bytes as _parse_slot_table_bytes,
+    reapply_workspace_edits as _reapply_workspace_edits,
+    validate_table_rows as _validate_slot_table_rows,
+)
 from actuarypoc.agents.pmr_ai import summarise_pmr, propose_decision
 from actuarypoc.agents.scenario_ai import generate_scenarios_for_product
 from actuarypoc.agents.synthetic_coi_ai import (
@@ -113,6 +124,9 @@ from actuarypoc.storage.workspace_store import (
     update_feature_request_status,
     store_workspace_executable_mechanics,
     load_workspace_executable_mechanics,
+    load_workspace_mechanics_changes,
+    append_workspace_mechanics_change,
+    set_workspace_projection_stale,
 )
 
 try:  # FastAPI can be configured with either Pydantic v1 or v2
@@ -220,6 +234,9 @@ def _workspace_to_api(ws: Dict[str, Any]) -> Dict[str, Any]:
         "compliancePartial": ws.get("compliance_partial_count"),
         "complianceMissing": ws.get("compliance_missing_count"),
         "projectionTrustLevel": ws.get("projection_trust_level"),
+        "projectionStale": bool(ws.get("projection_stale")),
+        "projectionStaleSince": ws.get("projection_stale_since"),
+        "projectionStaleSlots": list(ws.get("projection_stale_slots") or []),
     }
 
 
@@ -1726,10 +1743,15 @@ def _compile_snapshot_projection_graph(snapshot: Dict[str, Any]) -> Dict[str, An
 
 
 def _apply_active_synthetic_mechanics(snapshot: Dict[str, Any], workspace_id: str) -> Dict[str, Any]:
-    """Rebuild the view after reload when reviewed filed or synthetic mechanics are active."""
+    """Rebuild the view after reload when reviewed filed, synthetic, or
+    workspace-edited mechanics are active."""
 
     artifact = load_workspace_executable_mechanics(workspace_id) or {}
-    if not ((artifact.get("synthetic") or {}) or (artifact.get("reviews") or {})):
+    if not (
+        (artifact.get("synthetic") or {})
+        or (artifact.get("reviews") or {})
+        or (artifact.get("workspaceEdits") or {})
+    ):
         return snapshot
     request = dict((snapshot.get("illustration") or {}).get("request") or {})
     request["_workspaceExecutableMechanics"] = artifact.get("usable") or {}
@@ -1741,6 +1763,18 @@ def _apply_active_synthetic_mechanics(snapshot: Dict[str, Any], workspace_id: st
         snapshot["gaps"] = {"items": gaps, "warnings": warnings, "notes": notes}
         snapshot["executableMechanics"] = artifact
     return snapshot
+
+
+def _annotate_snapshot_gap_slots(snapshot: Dict[str, Any]) -> None:
+    """Add the resolving ``slotId`` to each snapshot gap item (Phase 2).
+
+    The gaps list and the mechanics panel share one mapping, so a gap
+    always points at the slot that resolves it.
+    """
+
+    gaps = snapshot.get("gaps")
+    if isinstance(gaps, dict) and isinstance(gaps.get("items"), list):
+        gaps["items"] = _annotate_gap_items(gaps["items"])
 
 
 @app.get("/api/workspaces/{workspace_id}")
@@ -1783,6 +1817,7 @@ def api_get_workspace(workspace_id: str) -> Dict[str, Any]:
     snapshot.setdefault("capabilityAssessment", _build_capability_assessment(snapshot))
     snapshot = _apply_active_synthetic_mechanics(snapshot, workspace_id)
     snapshot["projectionGraph"] = _compile_snapshot_projection_graph(snapshot)
+    _annotate_snapshot_gap_slots(snapshot)
 
     return {
         "workspace": _workspace_to_api(ws),
@@ -1959,6 +1994,22 @@ def api_workspace_analyze(workspace_id: str) -> Dict[str, Any]:
     except Exception:
         docs_for_inventory = []
     mechanics_artifact = _extract_workspace_executable_mechanics(docs_for_inventory)
+    # Phase 2: workspace slot edits are durable product inputs, not
+    # analysis by-products — re-apply them onto the fresh artifact so a
+    # re-run never silently discards an actuary's correction.  Reading
+    # the prior artifact is best-effort: if it cannot be read, analysis
+    # proceeds from the documents alone rather than failing outright.
+    try:
+        prior_artifact = load_workspace_executable_mechanics(workspace_id) or {}
+    except Exception as exc:  # noqa: BLE001
+        logging.warning(
+            "[workspace-analysis] could not load prior mechanics artifact for %s: %s",
+            workspace_id, exc,
+        )
+        prior_artifact = {}
+    mechanics_artifact = _reapply_workspace_edits(
+        mechanics_artifact, prior_artifact.get("workspaceEdits")
+    )
     mechanics_artifact["workspaceId"] = workspace_id
     mechanics_artifact["objectKey"] = store_workspace_executable_mechanics(
         workspace_id, mechanics_artifact
@@ -2072,6 +2123,7 @@ def api_workspace_analyze(workspace_id: str) -> Dict[str, Any]:
     snapshot["illustration"] = projection
     snapshot["mechanicsExplanation"] = mechanics
     snapshot["gaps"] = {"items": gaps, "warnings": warnings, "notes": notes}
+    _annotate_snapshot_gap_slots(snapshot)
     snapshot["executableMechanics"] = mechanics_artifact
     _reconcile_workspace_readiness(snapshot)
     snapshot["requirementsCandidates"] = _build_requirements_candidates(snapshot)
@@ -2402,6 +2454,166 @@ def api_remove_synthetic_surrender(workspace_id: str) -> Dict[str, Any]:
     return {"removed": True}
 
 
+# ---------------------------------------------------------------------------
+# Phase 2 (the chassis): mechanics panel — the product's editable inputs
+#
+# Eddy (Aug 7, 2026): the chassis should ask for each input — COI
+# schedule, surrender schedule, fees, NAR calculation — and the actuary
+# should be able to change any of them in the product, without
+# re-uploading a filing or touching code.  These endpoints expose the
+# slots derived from the mechanics artifact, accept edits validated by
+# the same validators ingestion uses, keep a persisted change log, and
+# mark the saved projection stale until the existing re-run flow
+# (POST /analyze or POST /projection) recomputes it.
+# ---------------------------------------------------------------------------
+
+
+class MechanicsSlotEditRequest(BaseModel):  # type: ignore[misc]
+    rows: Optional[List[Dict[str, Any]]] = None
+    csvText: Optional[str] = None
+    csvFormat: Optional[str] = None
+    factor: Optional[float] = None
+    who: Optional[str] = None
+
+
+def _slot_or_404(slot_id: str) -> Dict[str, Any]:
+    slot = _SLOT_BY_ID.get(str(slot_id or "").strip().lower())
+    if slot is None:
+        raise HTTPException(status_code=404, detail=f"Unknown mechanics slot: {slot_id}")
+    return slot
+
+
+def _persist_slot_edit(
+    workspace_id: str, slot: Dict[str, Any], outcome: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Persist an applied slot edit: artifact, change log, staleness."""
+
+    artifact = outcome["artifact"]
+    artifact["objectKey"] = store_workspace_executable_mechanics(workspace_id, artifact)
+    change = outcome["change"]
+    append_workspace_mechanics_change(workspace_id, change)
+    set_workspace_projection_stale(workspace_id, stale=True, slots=[slot["id"]])
+    return {
+        "slot": _build_slot_view(artifact, slot),
+        "change": change,
+        "projectionStale": True,
+    }
+
+
+@app.get("/api/workspaces/{workspace_id}/mechanics-panel")
+def api_get_mechanics_panel(workspace_id: str) -> Dict[str, Any]:
+    """Return the product-input slots, gap -> slot mapping, and change log."""
+
+    ws = get_workspace(workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    artifact = load_workspace_executable_mechanics(workspace_id) or {}
+    snapshot = ws.get("latest_snapshot_json") or {}
+    if not isinstance(snapshot, dict):
+        snapshot = {}
+    gaps = ((snapshot.get("gaps") or {}).get("items")) or []
+    changes = load_workspace_mechanics_changes(workspace_id)
+    panel = _build_mechanics_panel(
+        artifact, snapshot=snapshot, gaps=gaps, changes=changes, workspace=ws
+    )
+    panel["workspaceId"] = workspace_id
+    return panel
+
+
+@app.get("/api/workspaces/{workspace_id}/mechanics-panel/history")
+def api_get_mechanics_panel_history(workspace_id: str) -> Dict[str, Any]:
+    """Return the slot change log, newest first (the audit trail)."""
+
+    if get_workspace(workspace_id) is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    changes = load_workspace_mechanics_changes(workspace_id)
+    return {"changes": list(reversed(changes))}
+
+
+@app.put("/api/workspaces/{workspace_id}/mechanics-panel/{slot_id}")
+def api_edit_mechanics_slot(
+    workspace_id: str, slot_id: str, payload: MechanicsSlotEditRequest
+) -> Dict[str, Any]:
+    """Replace a slot's table or set the NAR factor, in place.
+
+    Validation is the ingestion validation (row validators + schedule
+    completeness): invalid input is rejected whole with the validator's
+    message and nothing is written.
+    """
+
+    if get_workspace(workspace_id) is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    slot = _slot_or_404(slot_id)
+    if slot["kind"] == "display":
+        raise HTTPException(
+            status_code=400, detail=f"The {slot['label']} slot is display-only"
+        )
+    who = str(payload.who or "workspace_user")
+    at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    artifact = load_workspace_executable_mechanics(workspace_id) or {}
+    try:
+        if slot["kind"] == "scalar":
+            if payload.factor is None:
+                raise ValueError("A NAR factor value is required for this slot")
+            outcome = _apply_nar_factor_edit(
+                artifact, slot, payload.factor,
+                workspace_id=workspace_id, who=who, at=at,
+            )
+        else:
+            mechanic = str(slot["mechanic"])
+            if payload.rows is not None:
+                canonical = _validate_slot_table_rows(mechanic, payload.rows)
+            elif payload.csvText is not None:
+                suffix = (
+                    ".tsv"
+                    if str(payload.csvFormat or "csv").strip().lower() == "tsv"
+                    else ".csv"
+                )
+                canonical = _parse_slot_table_bytes(
+                    mechanic, f"workspace-edit{suffix}", payload.csvText.encode("utf-8")
+                )
+            else:
+                raise ValueError("Supply either rows or csvText to replace this slot's table")
+            outcome = _apply_table_edit(
+                artifact, slot, canonical,
+                workspace_id=workspace_id, who=who, at=at,
+            )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _persist_slot_edit(workspace_id, slot, outcome)
+
+
+@app.post("/api/workspaces/{workspace_id}/mechanics-panel/{slot_id}/table-file")
+async def api_upload_mechanics_slot_table(
+    workspace_id: str, slot_id: str, file: UploadFile = File(...)
+) -> Dict[str, Any]:
+    """Upload a CSV/TSV replacement table for a slot (same validation)."""
+
+    if get_workspace(workspace_id) is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    slot = _slot_or_404(slot_id)
+    if slot["kind"] != "table":
+        raise HTTPException(
+            status_code=400, detail="Table upload applies only to table slots"
+        )
+    filename = str(file.filename or "")
+    if Path(filename).suffix.lower() not in {".csv", ".tsv"}:
+        raise HTTPException(status_code=400, detail="Only .csv or .tsv tables can be uploaded")
+    content = await file.read()
+    who = "workspace_user"
+    at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    artifact = load_workspace_executable_mechanics(workspace_id) or {}
+    try:
+        canonical = _parse_slot_table_bytes(str(slot["mechanic"]), filename, content)
+        outcome = _apply_table_edit(
+            artifact, slot, canonical,
+            workspace_id=workspace_id, who=who, at=at,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _persist_slot_edit(workspace_id, slot, outcome)
+
+
 @app.post("/api/workspaces/{workspace_id}/projection")
 def api_workspace_projection(
     workspace_id: str, payload: WorkspaceProjectionRequest
@@ -2476,7 +2688,7 @@ def api_workspace_projection(
     return {
         "illustration": projection,
         "mechanicsExplanation": mechanics,
-        "gaps": {"items": gaps, "warnings": warnings, "notes": notes},
+        "gaps": {"items": _annotate_gap_items(gaps), "warnings": warnings, "notes": notes},
         "projectionGraph": _compile_snapshot_projection_graph(graph_snapshot),
     }
 

@@ -418,6 +418,23 @@ def _parse_row(mechanic: str, raw: Dict[str, Any]) -> Dict[str, Any]:
             "charge": charge,
             "charge_unit": unit,
         }
+    if mechanic == "corridor":
+        if "percentage" not in raw:
+            raise ValueError("corridor rows require percentage")
+        percentage = _number(raw.get("percentage"), "percentage")
+        if not 0 < percentage <= 10.0:
+            raise ValueError("corridor percentage must be greater than 0 and at most 10")
+        return {
+            "duration": _integer(raw.get("duration"), "duration", 1, MAX_DURATION),
+            "percentage": percentage,
+        }
+    if mechanic == "nar_factors":
+        if "factor" not in raw:
+            raise ValueError("nar_factors rows require factor")
+        factor = _number(raw.get("factor"), "factor")
+        if not 0 < factor <= 2.0:
+            raise ValueError("NAR factor must be greater than 0 and at most 2.0")
+        return {"factor": factor}
     required = {"amount", "fee_unit"}
     if not required <= set(raw):
         raise ValueError("fee rows require amount and fee_unit")
