@@ -1,5 +1,6 @@
 import React from "react";
 import { formatCurrency, ProjectionChart, ProjectionGraphDefinition, ProjectionLogicGraph, WorkspaceRow } from "./ProductWorkspacePage";
+import { ProjectionLedger } from "./ProjectionLedger";
 
 interface ProjectionLogicPageProps {
   snapshot: any;
@@ -427,7 +428,7 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
           <div className="synthetic-coi-review__metrics">
             <article><span>Rows</span><strong>{syntheticPreview.rowCount}</strong></article>
             {syntheticPreview.mechanic === "surrender" ? (
-              <><article><span>Minimum charge</span><strong>{(Number(syntheticPreview.minimumCharge) * 100).toFixed(2)}% of face</strong></article><article><span>Maximum charge</span><strong>{(Number(syntheticPreview.maximumCharge) * 100).toFixed(2)}% of face</strong></article></>
+              <><article><span>Minimum charge</span><strong>{(Number(syntheticPreview.minimumCharge) * 100).toFixed(2)}% of account value</strong></article><article><span>Maximum charge</span><strong>{(Number(syntheticPreview.maximumCharge) * 100).toFixed(2)}% of account value</strong></article></>
             ) : (
               <><article><span>Minimum rate</span><strong>{syntheticPreview.minimumRate} / $1,000</strong></article><article><span>Maximum rate</span><strong>{syntheticPreview.maximumRate} / $1,000</strong></article></>
             )}
@@ -491,16 +492,11 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
                 {!illustration.selectorIntegrity.passed && <span>{illustration.selectorIntegrity.issues?.map((issue: any) => issue.mechanic.replaceAll("_", " ")).join(", ")} did not have an exact match.</span>}
               </div>
             )}
+            {/* Phase 1 (show the math): the auditable ledger is the primary
+                projection view — numbers first, each row expandable to its
+                derivation — with the chart demoted below it. */}
+            <ProjectionLedger ledger={illustration?.ledger} rateTables={illustration?.rateTables} fallbackRows={rows} />
             <ProjectionChart rows={rows} />
-            <details className="logic-results__ledger">
-              <summary>{rows.length}-year annual projection ledger</summary>
-              <div className="table-scroll projection-ledger">
-                <table className="kv-table">
-                  <thead><tr><th>Year</th><th>Age</th><th>Opening value</th><th>Premium</th><th>COI</th><th>Policy fee</th><th>Interest</th><th>Ending value</th><th>Surrender charge</th><th>Surrender value</th><th>Death benefit</th><th>Net amount at risk</th></tr></thead>
-                  <tbody>{rows.map((row, index) => <tr key={row.year ?? index}><td>{row.year}</td><td>{row.attainedAge}</td><td>{formatCurrency(row.openingPolicyValue)}</td><td>{formatCurrency(row.annualPremium)}</td><td>{formatCurrency(row.coiCharge)}</td><td>{formatCurrency(row.policyFee)}</td><td>{formatCurrency(row.guaranteedInterest)}</td><td>{formatCurrency(row.endingPolicyValue ?? row.policyValue)}</td><td>{formatCurrency(row.surrenderCharge)}</td><td>{formatCurrency(row.surrenderValue)}</td><td>{formatCurrency(row.deathBenefit)}</td><td>{formatCurrency(row.netAmountAtRisk)}</td></tr>)}</tbody>
-                </table>
-              </div>
-            </details>
           </>
         ) : <p className="muted">Run the projection to generate results.</p>}
       </section>

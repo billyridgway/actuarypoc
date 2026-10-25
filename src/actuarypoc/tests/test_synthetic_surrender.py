@@ -11,8 +11,8 @@ from actuarypoc.ui import server
 
 
 PARAMETERS = {
-    "initial_charge_percent_face": 0.12,
-    "terminal_charge_percent_face": 0.0,
+    "initial_charge_percent_account_value": 0.12,
+    "terminal_charge_percent_account_value": 0.0,
     "period_years": 10,
     "curve_shape": "linear",
     "rationale": "Unit-test schedule",
@@ -28,18 +28,36 @@ def test_builds_complete_declining_duration_schedule() -> None:
     assert rows[-1]["charge"] == 0.0
     assert all(rows[index]["charge"] >= rows[index + 1]["charge"] for index in range(len(rows) - 1))
     assert all(row["provenance"]["sourceType"] == "ai_synthetic" for row in rows)
+    # Phase 1: the synthetic schedule is a percentage of the account value
+    # (Eddy's correction), not of the face amount.
+    assert all(row["charge_unit"] == "percent_account_value" for row in rows)
+
+
+def test_legacy_percent_face_parameter_names_remain_accepted_as_aliases() -> None:
+    rows = build_synthetic_surrender_schedule(parameters={
+        "initial_charge_percent_face": 0.12,
+        "terminal_charge_percent_face": 0.0,
+        "period_years": 10,
+        "curve_shape": "linear",
+        "rationale": "Legacy-spelled proposal",
+    })
+
+    assert rows[0]["charge"] == 0.12
+    assert all(row["charge_unit"] == "percent_account_value" for row in rows)
 
 
 def test_rejects_invalid_agent_schedule_parameters() -> None:
     with pytest.raises(ValueError, match="percentages"):
         build_synthetic_surrender_schedule(
-            parameters={**PARAMETERS, "terminal_charge_percent_face": 0.2},
+            parameters={**PARAMETERS, "terminal_charge_percent_account_value": 0.2},
         )
     with pytest.raises(ValueError, match="curve_shape"):
         build_synthetic_surrender_schedule(parameters={**PARAMETERS, "curve_shape": "random"})
 
 
 def test_repairs_plausible_unbounded_agent_parameters() -> None:
+    # Legacy key spellings are fed deliberately: repair must canonicalise
+    # them onto the account-value parameter names.
     repaired = _repair_agent_parameters({
         "initial_charge_percent_face": 5,
         "terminal_charge_percent_face": 10,
@@ -47,8 +65,8 @@ def test_repairs_plausible_unbounded_agent_parameters() -> None:
         "curve_shape": "declining",
     })
 
-    assert repaired["initial_charge_percent_face"] == 0.10
-    assert repaired["terminal_charge_percent_face"] == 0.05
+    assert repaired["initial_charge_percent_account_value"] == 0.10
+    assert repaired["terminal_charge_percent_account_value"] == 0.05
     assert repaired["period_years"] == 40
     assert repaired["curve_shape"] == "linear"
     assert repaired["agentParametersAdjusted"] is True
@@ -86,7 +104,12 @@ def test_accept_remove_and_projection_execution(monkeypatch) -> None:
         horizon_years=1,
     )
     assert projection["mechanicsExecution"]["surrender"]["fullyApplied"] is True
-    assert projection["rows"][0]["surrenderCharge"] == 12_000
+    # Phase 1: the accepted synthetic schedule charges 12% of the ending
+    # account value in year 1 — not 12% of the $100,000 face amount
+    # ($12,000), which was the August-7 defect Eddy flagged.
+    row = projection["rows"][0]
+    assert row["surrenderCharge"] == pytest.approx(0.12 * row["endingPolicyValue"])
+    assert row["surrenderCharge"] != 12_000
 
     assert server.api_remove_synthetic_surrender("workspace-1") == {"removed": True}
     assert "surrender" not in artifact["usable"]

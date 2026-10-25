@@ -21,7 +21,7 @@ from PyPDF2 import PdfReader
 
 MAX_DURATION = 121
 COI_UNITS = {"per_1000_monthly", "per_1000_annual", "percent_nar_annual"}
-SURRENDER_UNITS = {"percent_face", "per_1000_face", "fixed"}
+SURRENDER_UNITS = {"percent_face", "percent_account_value", "per_1000_face", "fixed"}
 FEE_UNITS = {"annual_fixed", "monthly_fixed", "modal_fixed", "per_1000_face_annual", "percent_premium"}
 MECHANIC_KEYS = ("coi", "surrender", "fees", "nar_factors", "corridor")
 PDF_REVIEW_REQUIRED = "review_required"
@@ -408,7 +408,7 @@ def _parse_row(mechanic: str, raw: Dict[str, Any]) -> Dict[str, Any]:
         if unit not in SURRENDER_UNITS:
             raise ValueError(f"unsupported surrender charge_unit {unit!r}")
         charge = _number(raw.get("charge"), "charge")
-        upper = 1.0 if unit == "percent_face" else 1_000_000.0
+        upper = 1.0 if unit in {"percent_face", "percent_account_value"} else 1_000_000.0
         if not 0 <= charge <= upper:
             raise ValueError(f"surrender charge must be between 0 and {upper:g}")
         return {

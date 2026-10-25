@@ -11,19 +11,38 @@ from openai import OpenAI
 
 
 DEFAULT_PARAMETERS: Dict[str, Any] = {
-    "initial_charge_percent_face": 0.10,
-    "terminal_charge_percent_face": 0.0,
+    "initial_charge_percent_account_value": 0.10,
+    "terminal_charge_percent_account_value": 0.0,
     "period_years": 15,
     "curve_shape": "linear",
     "rationale": "Synthetic declining surrender schedule for scenario testing only.",
 }
 
+# Pre-Phase-1 parameter spellings expressed the synthetic schedule as a
+# percentage of face amount. Eddy (actuary reviewer, Aug 7 2026) corrected
+# that basis: surrender charges are a percentage of the account value. The
+# legacy keys are still accepted on input as aliases for the same numeric
+# percentages so stored proposals and older clients keep working.
+_LEGACY_PARAMETER_ALIASES = {
+    "initial_charge_percent_face": "initial_charge_percent_account_value",
+    "terminal_charge_percent_face": "terminal_charge_percent_account_value",
+}
+
+
+def _canonicalise_parameters(raw: Mapping[str, Any]) -> Dict[str, Any]:
+    parameters = dict(raw)
+    for legacy_key, canonical_key in _LEGACY_PARAMETER_ALIASES.items():
+        if parameters.get(canonical_key) is None and parameters.get(legacy_key) is not None:
+            parameters[canonical_key] = parameters[legacy_key]
+        parameters.pop(legacy_key, None)
+    return parameters
+
 
 def _validate_parameters(raw: Mapping[str, Any]) -> Dict[str, Any]:
     parameters = dict(DEFAULT_PARAMETERS)
-    parameters.update({key: value for key, value in raw.items() if value is not None})
-    initial = float(parameters["initial_charge_percent_face"])
-    terminal = float(parameters["terminal_charge_percent_face"])
+    parameters.update({key: value for key, value in _canonicalise_parameters(raw).items() if value is not None})
+    initial = float(parameters["initial_charge_percent_account_value"])
+    terminal = float(parameters["terminal_charge_percent_account_value"])
     period = int(parameters["period_years"])
     shape = str(parameters["curve_shape"]).lower().strip()
     if not 0.0 <= terminal <= initial <= 0.50:
@@ -33,8 +52,8 @@ def _validate_parameters(raw: Mapping[str, Any]) -> Dict[str, Any]:
     if shape not in {"linear", "front_loaded", "back_loaded"}:
         raise ValueError("curve_shape must be linear, front_loaded, or back_loaded")
     parameters.update({
-        "initial_charge_percent_face": initial,
-        "terminal_charge_percent_face": terminal,
+        "initial_charge_percent_account_value": initial,
+        "terminal_charge_percent_account_value": terminal,
         "period_years": period,
         "curve_shape": shape,
         "rationale": str(parameters.get("rationale") or DEFAULT_PARAMETERS["rationale"]),
@@ -45,13 +64,13 @@ def _validate_parameters(raw: Mapping[str, Any]) -> Dict[str, Any]:
 def _repair_agent_parameters(raw: Mapping[str, Any]) -> Dict[str, Any]:
     """Convert a plausible but invalid agent proposal into safe bounded inputs."""
 
-    repaired = dict(raw)
+    repaired = _canonicalise_parameters(raw)
     try:
-        initial = float(repaired.get("initial_charge_percent_face", DEFAULT_PARAMETERS["initial_charge_percent_face"]))
-        terminal = float(repaired.get("terminal_charge_percent_face", DEFAULT_PARAMETERS["terminal_charge_percent_face"]))
+        initial = float(repaired.get("initial_charge_percent_account_value", DEFAULT_PARAMETERS["initial_charge_percent_account_value"]))
+        terminal = float(repaired.get("terminal_charge_percent_account_value", DEFAULT_PARAMETERS["terminal_charge_percent_account_value"]))
     except (TypeError, ValueError):
-        initial = float(DEFAULT_PARAMETERS["initial_charge_percent_face"])
-        terminal = float(DEFAULT_PARAMETERS["terminal_charge_percent_face"])
+        initial = float(DEFAULT_PARAMETERS["initial_charge_percent_account_value"])
+        terminal = float(DEFAULT_PARAMETERS["terminal_charge_percent_account_value"])
     # Models sometimes return whole percentages (10) rather than decimals (.10).
     if initial > 1.0:
         initial /= 100.0
@@ -69,8 +88,8 @@ def _repair_agent_parameters(raw: Mapping[str, Any]) -> Dict[str, Any]:
     if shape not in {"linear", "front_loaded", "back_loaded"}:
         shape = "linear"
     repaired.update({
-        "initial_charge_percent_face": initial,
-        "terminal_charge_percent_face": terminal,
+        "initial_charge_percent_account_value": initial,
+        "terminal_charge_percent_account_value": terminal,
         "period_years": period,
         "curve_shape": shape,
         "rationale": str(repaired.get("rationale") or DEFAULT_PARAMETERS["rationale"]),
@@ -88,8 +107,9 @@ def propose_synthetic_surrender_parameters(
     selected_model = model or os.getenv("SYNTHETIC_SURRENDER_MODEL", os.getenv("ASSUMPTION_EXTRACT_MODEL", "gpt-4o-mini"))
     prompt = (
         "Propose a conservative synthetic surrender-charge schedule for projection testing only. "
-        "It is not filed evidence. Return one JSON object containing initial_charge_percent_face, "
-        "terminal_charge_percent_face, period_years, curve_shape (linear, front_loaded, or back_loaded), "
+        "Surrender charges are expressed as a percentage of the policy account value. "
+        "It is not filed evidence. Return one JSON object containing initial_charge_percent_account_value, "
+        "terminal_charge_percent_account_value, period_years, curve_shape (linear, front_loaded, or back_loaded), "
         f"and rationale.\nProduct: {product_code}\nContext:\n{product_context[:20000]}"
     )
     response = OpenAI(api_key=api_key).chat.completions.create(
@@ -129,15 +149,15 @@ def build_synthetic_surrender_schedule(*, parameters: Mapping[str, Any]) -> List
             remaining = remaining ** 1.5
         elif validated["curve_shape"] == "back_loaded":
             remaining = remaining ** 0.65
-        charge = validated["terminal_charge_percent_face"] + (
-            validated["initial_charge_percent_face"] - validated["terminal_charge_percent_face"]
+        charge = validated["terminal_charge_percent_account_value"] + (
+            validated["initial_charge_percent_account_value"] - validated["terminal_charge_percent_account_value"]
         ) * remaining
         rows.append({
             "duration": duration,
             "issue_age": None,
             "sex": None,
             "charge": round(charge, 8),
-            "charge_unit": "percent_face",
+            "charge_unit": "percent_account_value",
             "provenance": {
                 "filename": "AI-generated synthetic surrender schedule",
                 "sourceType": "ai_synthetic",
