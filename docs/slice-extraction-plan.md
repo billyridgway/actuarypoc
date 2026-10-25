@@ -206,8 +206,14 @@ New module: `src/actuarypoc/extract/table_extractor.py`; adds
 
 For each PDF page, strategies are tried in order — `lines`,
 `lines_strict`, then `text` — and the first strategy yielding at least
-one table wins for that page; the strategy used is recorded in
-provenance. Each table becomes a `TableArtifact` dict:
+one *accepted* table wins for that page; the strategy used is recorded
+in provenance. Acceptance gates keep the channel honest: any table
+needs ≥2 rows and ≥2 columns, and a `text`-strategy table (no ruling
+lines) must additionally pass a data-grid gate — consistent column
+count and numeric cells clustered in a consistent column across most
+rows — because the text strategy otherwise chops ordinary prose
+paragraphs into fake columns. A page whose only "tables" fail the
+gates yields no artifacts. Each table becomes a `TableArtifact` dict:
 
 ```json
 {
@@ -306,7 +312,11 @@ a part that did not run says so, with the reason, in the snapshot.
 
 ## 8. Verification
 
-- Repo suite: `PYTHONPATH=src pytest` must stay green.
+- Repo suite: `PYTHONPATH=src pytest` must not regress. (Note: the
+  suite is *not* green at the base commit — 8 failures pre-exist at
+  41a14384, verified by running the base tree: 111 passed / 8 failed.
+  This branch: 128 passed / the same 8 failed, i.e. zero regressions
+  and 17 new passing tests.)
 - New tests (`tests/test_slice_extraction.py`,
   `tests/test_table_extractor.py`): slicing coverage over a >50,000-char
   document (every char in ≥1 slice; slices bounded; page anchoring),

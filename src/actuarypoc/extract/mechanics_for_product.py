@@ -13,11 +13,13 @@ from pathlib import Path
 
 from actuarypoc.extract.assumptions_for_product import (
     discover_docs_for_product,
+    load_filing_slices_from_minio,
     _download_minio_object,  # type: ignore[attr-defined]
 )
 from actuarypoc.extract.assumptions_extractor import read_document_text
 from actuarypoc.domain.product_mechanics import ProductMechanic, save_mechanics_to_minio
 from actuarypoc.extract.mechanics_extractor import extract_mechanics_from_text
+from actuarypoc.extract.slice_extraction import extract_mechanics_from_slices
 from actuarypoc.storage.minio_client import get_bucket_name
 
 
@@ -62,6 +64,7 @@ def generate_mechanics_for_product(
     filing_id: Optional[str] = None,
     model: Optional[str] = None,
     auto_persist_candidates: bool = True,
+    use_slices: bool = True,
 ) -> List[ProductMechanic]:
     """Derive a draft mechanics set for a product from its filings.
 
@@ -73,6 +76,12 @@ def generate_mechanics_for_product(
     - optionally persists them as a candidate set under
       ``mechanics/{product_code}/candidates/latest.json``.
 
+    With ``use_slices=True`` (default) extraction is dispatched per
+    document slice over the full filings and merged, with evidence
+    re-anchored to real pages; ``use_slices=False`` keeps the legacy
+    single-call blob path (truncated to 50,000 chars) as an explicit
+    A/B / rollback valve.
+
     Returned mechanics are in "candidate" status and should be reviewed
     by an actuary before being promoted to an approved mechanics
     registry for the product.
@@ -82,8 +91,18 @@ def generate_mechanics_for_product(
     if not code_norm:
         raise ValueError("product_code is required")
 
-    text = load_filing_text_for_mechanics(product_code=code_norm, filing_id=filing_id)
-    mechanics = extract_mechanics_from_text(product_code=code_norm, text=text, model=model)
+    if use_slices:
+        maps = load_filing_slices_from_minio(product_code=code_norm, filing_id=filing_id)
+        slices = [sl for m in maps for sl in m.slices]
+        result = extract_mechanics_from_slices(
+            product_code=code_norm, slices=slices, model=model
+        )
+        if result["failed_units"] and not result["succeeded_units"]:
+            raise RuntimeError(result["failed_units"][0]["error"])
+        mechanics = result["mechanics"]
+    else:
+        text = load_filing_text_for_mechanics(product_code=code_norm, filing_id=filing_id)
+        mechanics = extract_mechanics_from_text(product_code=code_norm, text=text, model=model)
 
     if auto_persist_candidates:
         save_mechanics_to_minio(code_norm, mechanics, kind="candidates")
