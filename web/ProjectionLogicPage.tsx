@@ -2,6 +2,13 @@ import React from "react";
 import { formatCurrency, ProjectionChart, ProjectionGraphDefinition, ProjectionLogicGraph, WorkspaceRow } from "./ProductWorkspacePage";
 import { ProjectionLedger } from "./ProjectionLedger";
 
+// The projection workspace state and handlers live in a hook so the
+// actuary workbench (WorkbenchPage) can compose the pieces as bench
+// tooling: the run controls and the ledger are the primary surface, and
+// the calculation graph is a collapsed debugging detail inside the
+// bench. ProjectionLogicPage remains below as a legacy wrapper that
+// composes the same pieces in the old page layout.
+
 interface ProjectionLogicPageProps {
   snapshot: any;
   workspaceId: string;
@@ -33,7 +40,7 @@ const REQUIRED_PROJECTION_SELECTORS = [
   ["tobacco_status", "tobacco / nicotine status"],
 ] as const;
 
-export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapshot, workspaceId }) => {
+export const useProjectionWorkspace = (snapshot: any, workspaceId: string) => {
   const [illustration, setIllustration] = React.useState(snapshot?.illustration ?? null);
   const [projectionGraph, setProjectionGraph] = React.useState<ProjectionGraphDefinition | null>(snapshot?.projectionGraph ?? null);
   const [executableMechanics, setExecutableMechanics] = React.useState<any>(snapshot?.executableMechanics ?? null);
@@ -304,26 +311,87 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
     URL.revokeObjectURL(url);
   };
 
-  return (
-    <div className="logic-workspace">
-      <header className="logic-workspace__header">
-        <div>
-          <a className="logic-workspace__back" href="/web">← All workspaces</a>
-          <p className="logic-workspace__eyebrow">Projection model</p>
-          <h1>Projection logic</h1>
-          <p className="muted">Edit scenario inputs directly in the graph, trace dependencies, and inspect where model data is missing or provisional.</p>
-        </div>
-        <div className="logic-workspace__actions">
-          <a className="button button-secondary" href={`/web?workspace=${encodeURIComponent(workspaceId)}&view=details`}>More details</a>
-          <span className={`logic-workspace__run-state${dirty || !selectorReady ? " is-dirty" : ""}`}>
-            {!selectorReady ? `Projection needs ${missingSelectors.length} selector${missingSelectors.length === 1 ? "" : "s"}` : dirty ? "Inputs changed" : "Projection current"}
-          </span>
-          <button type="button" className="button" disabled={running || !selectorReady} onClick={() => runProjection(false)}>
-            {running ? "Running projection…" : "Run projection"}
-          </button>
-        </div>
-      </header>
+  return {
+    illustration, projectionGraph, executableMechanics, values, dirty, running, error, runMessage,
+    selectorFallbackIssues, syntheticPreview, setSyntheticPreview, generatingSynthetic,
+    acceptingSynthetic, removingSynthetic, generatingSyntheticSurrender, removingSyntheticSurrender,
+    acceptingFiledMechanic, graphNodes, inputNodes, ruleNodes, rows, metrics, reconciliation,
+    missingCount, provisionalCount, filedCandidates, missingSelectors, selectorReady,
+    updateInput, runProjection, generateSyntheticCoi, acceptFiledMechanic, generateSyntheticSurrender,
+    acceptSyntheticCoi, removeSyntheticCoi, removeSyntheticSurrender, downloadSyntheticCoiCsv,
+    downloadProjectionCsv,
+  };
+};
 
+export type ProjectionWorkspace = ReturnType<typeof useProjectionWorkspace>;
+
+// The projection results: metrics, reconciliation, and — primary — the
+// auditable ledger with the rate tables in force attached. The chart is
+// demoted into a closed details expand: numbers first, graphs secondary.
+export const ProjectionResultsSection: React.FC<{ ws: ProjectionWorkspace }> = ({ ws }) => {
+  const { illustration, rows, metrics, reconciliation } = ws;
+  return (
+    <section id="projection-results" className="card logic-results">
+      <div className="logic-results__header">
+        <div>
+          <p className="logic-workspace__eyebrow">Projection output</p>
+          <h2>Ledger</h2>
+          <p className="muted">Every policy year, expandable to how each number was calculated.</p>
+        </div>
+        {rows.length > 0 && <button type="button" className="button button-secondary" onClick={ws.downloadProjectionCsv}>Download ledger CSV</button>}
+      </div>
+      {rows.length > 0 ? (
+        <>
+          <div className="logic-results__metrics">
+            <article><span>Projection horizon</span><strong>{metrics.maximumYear ?? rows.length} years</strong></article>
+            <article><span>Final cash value</span><strong>{formatCurrency(metrics.finalCashValue ?? rows[rows.length - 1]?.cashValue)}</strong></article>
+            <article><span>Final surrender value</span><strong>{formatCurrency(metrics.finalSurrenderValue ?? rows[rows.length - 1]?.surrenderValue)}</strong></article>
+            <article><span>Final net amount at risk</span><strong>{formatCurrency(metrics.finalNetAmountAtRisk ?? rows[rows.length - 1]?.netAmountAtRisk)}</strong></article>
+          </div>
+          {reconciliation && (
+            <div className={`logic-results__reconciliation ${reconciliation.passed ? "is-passed" : "is-failed"}`} role="status">
+              <strong>{reconciliation.passed ? "Projection ledger reconciled" : "Projection reconciliation failed"}</strong>
+              <span>
+                {reconciliation.passed
+                  ? `${reconciliation.checkCount} calculation checks passed across ${rows.length} policy years. Maximum residual ${formatCurrency(reconciliation.maxResidual)}.`
+                  : `${reconciliation.failures?.length || 0} checks failed in policy years ${(reconciliation.failedYears || []).join(", ")}.`}
+              </span>
+            </div>
+          )}
+          {illustration?.selectorIntegrity && (
+            <div className={`logic-results__selector-integrity ${illustration.selectorIntegrity.passed ? "is-passed" : "is-fallback"}`}>
+              <strong>{illustration.selectorIntegrity.passed ? "Filed classification matched" : "Projection used authorized selector fallback"}</strong>
+              <span>
+                Sex: {illustration.selectorIntegrity.scenario?.sex} · Risk class: {illustration.selectorIntegrity.scenario?.riskClass} · Tobacco status: {illustration.selectorIntegrity.scenario?.tobaccoStatus}
+              </span>
+              {!illustration.selectorIntegrity.passed && <span>{illustration.selectorIntegrity.issues?.map((issue: any) => issue.mechanic.replaceAll("_", " ")).join(", ")} did not have an exact match.</span>}
+            </div>
+          )}
+          {/* Phase 1 (show the math): the auditable ledger is the primary
+              projection view — numbers first, each row expandable to its
+              derivation, rate tables in force attached — with the chart
+              demoted below it, closed by default. */}
+          <ProjectionLedger ledger={illustration?.ledger} rateTables={illustration?.rateTables} fallbackRows={rows} />
+          <details className="logic-results__chart-details">
+            <summary>Chart (secondary view)</summary>
+            <ProjectionChart rows={rows} />
+          </details>
+        </>
+      ) : <p className="muted">Run the projection to generate results.</p>}
+    </section>
+  );
+};
+
+// The calculation graph and its review tooling (filed-table candidates,
+// synthetic previews). On the workbench this renders inside a collapsed
+// details expand — a debugging aid, not the working surface.
+export const ProjectionGraphSection: React.FC<{ ws: ProjectionWorkspace }> = ({ ws }) => {
+  const {
+    projectionGraph, values, inputNodes, ruleNodes, provisionalCount, missingCount,
+    selectorReady, missingSelectors, filedCandidates, acceptingFiledMechanic, syntheticPreview,
+  } = ws;
+  return (
+    <div className="logic-graph-section">
       <div className="logic-workspace__summary" aria-label="Projection logic status">
         <span><strong>{inputNodes.length}</strong> inputs</span>
         <span><strong>{ruleNodes.length}</strong> rules</span>
@@ -334,35 +402,22 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
       {!selectorReady && (
         <div className="logic-workspace__readiness" role="status">
           <strong>Complete the underwriting scenario</strong>
-          <span>Select {missingSelectors.join(", ")} in the graph. These values determine which filed COI and expense rows apply.</span>
+          <span>Select {missingSelectors.join(", ")} in the scenario inputs. These values determine which filed COI and expense rows apply.</span>
         </div>
       )}
-      {error && <p className="error">{error}</p>}
-      {selectorFallbackIssues.length > 0 && (
-        <div className="logic-workspace__selector-fallback" role="alert">
-          <strong>No exact filed-table match</strong>
-          {selectorFallbackIssues.map((issue: any) => (
-            <span key={issue.mechanic}>{issue.message} Affected policy years: {issue.years?.join(", ")}.</span>
-          ))}
-          <button type="button" className="button button-secondary" disabled={running} onClick={() => runProjection(true)}>
-            Run with disclosed fallback
-          </button>
-        </div>
-      )}
-      {runMessage && <p className="logic-workspace__success" role="status">{runMessage}</p>}
       {projectionGraph?.nodes?.length ? (
         <ProjectionLogicGraph
           definition={projectionGraph}
           editableValues={values}
-          onInputChange={updateInput}
-          onGenerateSyntheticCoi={generateSyntheticCoi}
-          generatingSyntheticCoi={generatingSynthetic}
-          onRemoveSyntheticCoi={removeSyntheticCoi}
-          removingSyntheticCoi={removingSynthetic}
-          onGenerateSyntheticSurrender={generateSyntheticSurrender}
-          generatingSyntheticSurrender={generatingSyntheticSurrender}
-          onRemoveSyntheticSurrender={removeSyntheticSurrender}
-          removingSyntheticSurrender={removingSyntheticSurrender}
+          onInputChange={ws.updateInput}
+          onGenerateSyntheticCoi={ws.generateSyntheticCoi}
+          generatingSyntheticCoi={ws.generatingSynthetic}
+          onRemoveSyntheticCoi={ws.removeSyntheticCoi}
+          removingSyntheticCoi={ws.removingSynthetic}
+          onGenerateSyntheticSurrender={ws.generateSyntheticSurrender}
+          generatingSyntheticSurrender={ws.generatingSyntheticSurrender}
+          onRemoveSyntheticSurrender={ws.removeSyntheticSurrender}
+          removingSyntheticSurrender={ws.removingSyntheticSurrender}
         />
       ) : (
         <section className="card"><p className="muted">No projection mechanics are available for this workspace yet.</p></section>
@@ -405,7 +460,7 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
                     )}
                     <div><dt>Range</dt><dd>Duration {first.duration ?? "—"}: {value(first) ?? "—"} → duration {last.duration ?? "—"}: {value(last) ?? "—"}</dd></div>
                   </dl>
-                  <button type="button" className="button" disabled={acceptingFiledMechanic !== null} onClick={() => acceptFiledMechanic(candidate)}>
+                  <button type="button" className="button" disabled={acceptingFiledMechanic !== null} onClick={() => ws.acceptFiledMechanic(candidate)}>
                     {acceptingFiledMechanic === candidate.id ? "Accepting…" : "Accept and add to projection"}
                   </button>
                 </article>
@@ -423,7 +478,7 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
               <h2>Review synthetic {syntheticPreview.mechanic === "surrender" ? "surrender schedule" : "COI table"}</h2>
               <p className="synthetic-coi-review__warning">{syntheticPreview.disclaimer}</p>
             </div>
-            <button type="button" className="button button-secondary" onClick={() => setSyntheticPreview(null)}>Discard</button>
+            <button type="button" className="button button-secondary" onClick={() => ws.setSyntheticPreview(null)}>Discard</button>
           </div>
           <div className="synthetic-coi-review__metrics">
             <article><span>Rows</span><strong>{syntheticPreview.rowCount}</strong></article>
@@ -447,59 +502,60 @@ export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapsh
             </table>
           </div>
           <div className="synthetic-coi-review__actions">
-            <button type="button" className="button" disabled={acceptingSynthetic} onClick={acceptSyntheticCoi}>
-              {acceptingSynthetic ? "Accepting…" : `Accept synthetic ${syntheticPreview.mechanic === "surrender" ? "schedule" : "table"}`}
+            <button type="button" className="button" disabled={ws.acceptingSynthetic} onClick={ws.acceptSyntheticCoi}>
+              {ws.acceptingSynthetic ? "Accepting…" : `Accept synthetic ${syntheticPreview.mechanic === "surrender" ? "schedule" : "table"}`}
             </button>
-            <button type="button" className="button button-secondary" onClick={downloadSyntheticCoiCsv}>Download CSV</button>
+            <button type="button" className="button button-secondary" onClick={ws.downloadSyntheticCoiCsv}>Download CSV</button>
             <span className="muted">Acceptance records synthetic provenance; it never becomes filed evidence.</span>
           </div>
         </section>
       )}
+    </div>
+  );
+};
 
-      <section id="projection-results" className="card logic-results">
-        <div className="logic-results__header">
-          <div>
-            <p className="logic-workspace__eyebrow">Projection output</p>
-            <h2>Projection results</h2>
-            <p className="muted">These diagnostic values use the inputs and assumptions shown in the graph above.</p>
-          </div>
-          {rows.length > 0 && <button type="button" className="button button-secondary" onClick={downloadProjectionCsv}>Download ledger CSV</button>}
+// Legacy page layout: header + graph + results in the pre-workbench
+// arrangement. The workbench (WorkbenchPage) is the workspace's main
+// surface now; this wrapper remains only so existing imports keep
+// working — nothing routes to it as a peer page.
+export const ProjectionLogicPage: React.FC<ProjectionLogicPageProps> = ({ snapshot, workspaceId }) => {
+  const ws = useProjectionWorkspace(snapshot, workspaceId);
+  return (
+    <div className="logic-workspace">
+      <header className="logic-workspace__header">
+        <div>
+          <a className="logic-workspace__back" href="/web">← All workspaces</a>
+          <p className="logic-workspace__eyebrow">Projection model</p>
+          <h1>Projection logic</h1>
+          <p className="muted">Edit scenario inputs directly in the graph, trace dependencies, and inspect where model data is missing or provisional.</p>
         </div>
-        {rows.length > 0 ? (
-          <>
-            <div className="logic-results__metrics">
-              <article><span>Projection horizon</span><strong>{metrics.maximumYear ?? rows.length} years</strong></article>
-              <article><span>Final cash value</span><strong>{formatCurrency(metrics.finalCashValue ?? rows[rows.length - 1]?.cashValue)}</strong></article>
-              <article><span>Final surrender value</span><strong>{formatCurrency(metrics.finalSurrenderValue ?? rows[rows.length - 1]?.surrenderValue)}</strong></article>
-              <article><span>Final net amount at risk</span><strong>{formatCurrency(metrics.finalNetAmountAtRisk ?? rows[rows.length - 1]?.netAmountAtRisk)}</strong></article>
-            </div>
-            {reconciliation && (
-              <div className={`logic-results__reconciliation ${reconciliation.passed ? "is-passed" : "is-failed"}`} role="status">
-                <strong>{reconciliation.passed ? "Projection ledger reconciled" : "Projection reconciliation failed"}</strong>
-                <span>
-                  {reconciliation.passed
-                    ? `${reconciliation.checkCount} calculation checks passed across ${rows.length} policy years. Maximum residual ${formatCurrency(reconciliation.maxResidual)}.`
-                    : `${reconciliation.failures?.length || 0} checks failed in policy years ${(reconciliation.failedYears || []).join(", ")}.`}
-                </span>
-              </div>
-            )}
-            {illustration?.selectorIntegrity && (
-              <div className={`logic-results__selector-integrity ${illustration.selectorIntegrity.passed ? "is-passed" : "is-fallback"}`}>
-                <strong>{illustration.selectorIntegrity.passed ? "Filed classification matched" : "Projection used authorized selector fallback"}</strong>
-                <span>
-                  Sex: {illustration.selectorIntegrity.scenario?.sex} · Risk class: {illustration.selectorIntegrity.scenario?.riskClass} · Tobacco status: {illustration.selectorIntegrity.scenario?.tobaccoStatus}
-                </span>
-                {!illustration.selectorIntegrity.passed && <span>{illustration.selectorIntegrity.issues?.map((issue: any) => issue.mechanic.replaceAll("_", " ")).join(", ")} did not have an exact match.</span>}
-              </div>
-            )}
-            {/* Phase 1 (show the math): the auditable ledger is the primary
-                projection view — numbers first, each row expandable to its
-                derivation — with the chart demoted below it. */}
-            <ProjectionLedger ledger={illustration?.ledger} rateTables={illustration?.rateTables} fallbackRows={rows} />
-            <ProjectionChart rows={rows} />
-          </>
-        ) : <p className="muted">Run the projection to generate results.</p>}
-      </section>
+        <div className="logic-workspace__actions">
+          <a className="button button-secondary" href={`/web?workspace=${encodeURIComponent(workspaceId)}&view=details`}>More details</a>
+          <span className={`logic-workspace__run-state${ws.dirty || !ws.selectorReady ? " is-dirty" : ""}`}>
+            {!ws.selectorReady ? `Projection needs ${ws.missingSelectors.length} selector${ws.missingSelectors.length === 1 ? "" : "s"}` : ws.dirty ? "Inputs changed" : "Projection current"}
+          </span>
+          <button type="button" className="button" disabled={ws.running || !ws.selectorReady} onClick={() => ws.runProjection(false)}>
+            {ws.running ? "Running projection…" : "Run projection"}
+          </button>
+        </div>
+      </header>
+
+      {ws.error && <p className="error">{ws.error}</p>}
+      {ws.selectorFallbackIssues.length > 0 && (
+        <div className="logic-workspace__selector-fallback" role="alert">
+          <strong>No exact filed-table match</strong>
+          {ws.selectorFallbackIssues.map((issue: any) => (
+            <span key={issue.mechanic}>{issue.message} Affected policy years: {issue.years?.join(", ")}.</span>
+          ))}
+          <button type="button" className="button button-secondary" disabled={ws.running} onClick={() => ws.runProjection(true)}>
+            Run with disclosed fallback
+          </button>
+        </div>
+      )}
+      {ws.runMessage && <p className="logic-workspace__success" role="status">{ws.runMessage}</p>}
+
+      <ProjectionGraphSection ws={ws} />
+      <ProjectionResultsSection ws={ws} />
     </div>
   );
 };

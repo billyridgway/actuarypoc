@@ -1502,3 +1502,218 @@ details > summary {
 .slot-history {
   margin-top: 1.25rem;
 }
+
+/* Actuary workbench: one surface per product. Ledger primary in the
+   main column, bench tooling (product inputs, equations) in the side
+   column, validation + filing + activity along the bottom, and the
+   calculation map as a collapsed debugging detail. */
+
+.workbench {
+  display: flex;
+  flex-direction: column;
+}
+
+.workbench__header h1 {
+  margin: 0.25rem 0 0.15rem;
+}
+
+.workbench__identity-line {
+  margin: 0 0 0.5rem;
+}
+
+.workbench__state {
+  margin: 0.25rem 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.workbench__stale {
+  background: var(--warning-soft);
+  border: 1px solid var(--warning);
+  border-radius: 8px;
+  padding: 0.5rem 0.75rem;
+  margin: 0.5rem 0 0;
+}
+
+.workbench__scenario {
+  border-top: 1px solid var(--border);
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+}
+
+.workbench__scenario-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr));
+  gap: 0.6rem;
+}
+
+.workbench__scenario-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.workbench__scenario-field input,
+.workbench__scenario-field select {
+  font: inherit;
+  color: var(--text-main);
+  padding: 0.45rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+  min-height: 44px;
+}
+
+.workbench__scenario-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+  margin-top: 0.75rem;
+}
+
+.workbench__grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 24rem);
+  gap: 1.25rem;
+  align-items: start;
+}
+
+.workbench__main,
+.workbench__side,
+.workbench__band-col {
+  min-width: 0;
+}
+
+.workbench__side {
+  display: flex;
+  flex-direction: column;
+}
+
+.workbench__map > summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 1.05rem;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+}
+
+.workbench__map .logic-graph-section {
+  margin-top: 0.75rem;
+}
+
+.workbench__band {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  gap: 1.25rem;
+  align-items: start;
+}
+
+.logic-results__chart-details {
+  margin-top: 1rem;
+}
+
+.logic-results__chart-details > summary {
+  cursor: pointer;
+  font-weight: 600;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+}
+
+/* Equations pane (Phase 7 contract) */
+
+.equation-group h3 {
+  margin: 1rem 0 0.5rem;
+}
+
+.equation-card h4 {
+  margin: 0 0 0.4rem;
+}
+
+.equation-verbatim {
+  border-left: 3px solid var(--border);
+  background: var(--accent-soft);
+  margin: 0.5rem 0;
+  padding: 0.5rem 0.75rem;
+}
+
+.equation-verbatim cite {
+  display: block;
+  margin-top: 0.35rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  font-style: normal;
+}
+
+.equation-conflict {
+  background: var(--warning-soft);
+  border: 1px solid var(--warning);
+  border-radius: 8px;
+  padding: 0.5rem 0.75rem;
+}
+
+.equation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.6rem;
+}
+
+.equation-editor label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.9rem;
+}
+
+.equation-editor textarea {
+  font: inherit;
+  padding: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.activity-list {
+  padding-left: 1.1rem;
+}
+
+.activity-list li {
+  margin-bottom: 0.35rem;
+}
+
+@media (max-width: 1100px) {
+  .workbench__grid,
+  .workbench__band {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 640px) {
+  .workbench__scenario-fields {
+    grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr));
+  }
+}
+
+/* Phone-width guards for bench regions: wide intrinsic controls
+   (the pack-case editor is cols=100) clamp to their region, and the
+   calculation map scrolls inside its own region when expanded. */
+.workbench textarea {
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.workbench .slot-paste {
+  min-width: 0;
+}
+
+.workbench__map .logic-graph {
+  overflow-x: auto;
+}
