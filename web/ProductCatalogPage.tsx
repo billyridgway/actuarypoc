@@ -1,4 +1,5 @@
 import React from "react";
+import { ObjectStorePicker } from "./ObjectStorePicker";
 
 interface CatalogWorkspace {
   id: string;
@@ -50,6 +51,7 @@ export const ProductCatalogPage: React.FC = () => {
   const [loading, setLoading] = React.useState<boolean>(true);
   const [error, setError] = React.useState<string | null>(null);
   const [creating, setCreating] = React.useState<boolean>(false);
+  const [showCreate, setShowCreate] = React.useState<boolean>(false);
   const [uploadProgress, setUploadProgress] = React.useState<{
     total: number;
     uploaded: number;
@@ -194,8 +196,9 @@ export const ProductCatalogPage: React.FC = () => {
       <section className="card home-card">
         <h2>Workspace Catalog</h2>
         <p className="muted">
-          Create a workspace by uploading one or more filing documents. The documents are attached automatically and
-          can then be analyzed from the workspace.
+          Create a workspace from filing documents that already live in the object store, or by
+          uploading files. The documents are attached automatically and can then be analyzed from
+          the workspace.
         </p>
         <p>
           <button
@@ -204,9 +207,7 @@ export const ProductCatalogPage: React.FC = () => {
             disabled={creating}
             onClick={() => {
               setError(null);
-              if (fileInputRef.current) {
-                fileInputRef.current.click();
-              }
+              setShowCreate((prev) => !prev);
             }}
           >
             New Product Review
@@ -219,6 +220,31 @@ export const ProductCatalogPage: React.FC = () => {
             onChange={handleNewProductReviewFiles}
           />
         </p>
+        {showCreate && (
+          <div className="create-workspace-panel">
+            <ObjectStorePicker
+              onCreated={(workspaceId) => {
+                window.location.href = `/web?workspace=${encodeURIComponent(workspaceId)}`;
+              }}
+              onCancel={() => setShowCreate(false)}
+            />
+            <p className="muted">
+              Working off the object store?{" "}
+              <a
+                href="#"
+                onClick={(event) => {
+                  event.preventDefault();
+                  setShowCreate(false);
+                  if (fileInputRef.current) {
+                    fileInputRef.current.click();
+                  }
+                }}
+              >
+                Upload files instead
+              </a>
+            </p>
+          </div>
+        )}
         {uploadProgress && (
           <p className="muted">
             Uploading filings… {uploadProgress.uploaded} of {uploadProgress.total}

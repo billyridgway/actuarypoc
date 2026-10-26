@@ -23,7 +23,15 @@ def test_only_workspace_application_routes_are_public() -> None:
     }
 
     assert application_paths
-    assert all(path.startswith("/api/workspaces") for path in application_paths)
+    # The public surface is the workspace flow plus the object-store
+    # browsing routes the workspace creation picker is built on
+    # (docs/workspace-sources.md). Everything else stays private.
+    assert all(
+        path.startswith("/api/workspaces") or path.startswith("/api/object-store")
+        for path in application_paths
+    )
+    assert "/api/object-store/buckets" in application_paths
+    assert "/api/object-store/objects" in application_paths
     assert supported_diagnostic_paths.issubset({route.path for route in app.routes})
     assert "/api/products" not in application_paths
     assert "/api/run-detail" not in application_paths

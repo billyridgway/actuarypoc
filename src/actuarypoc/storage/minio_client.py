@@ -32,3 +32,30 @@ def ensure_bucket(minio_client: Minio) -> None:
     bucket = get_bucket_name()
     if not minio_client.bucket_exists(bucket):
         minio_client.make_bucket(bucket)
+
+
+def document_object_location(document: dict, default_bucket: str) -> tuple[str, str]:
+    """Where a workspace document's bytes live.
+
+    Source-referenced documents (docs/workspace-sources.md) read from
+    their recorded ``source`` bucket/key; uploaded documents read from
+    the app bucket at their ``object_path``. The bytes themselves are
+    never copied into the workspace for a source document.
+    """
+
+    source = document.get("source") if isinstance(document, dict) else None
+    if isinstance(source, dict) and source.get("bucket") and source.get("key"):
+        return str(source["bucket"]), str(source["key"])
+    return default_bucket, str((document or {}).get("object_path") or "")
+
+
+def fetch_document_bytes(client: Minio, document: dict, default_bucket: str) -> bytes:
+    """Fetch a document's bytes from its resolved location."""
+
+    bucket, key = document_object_location(document, default_bucket)
+    response = client.get_object(bucket, key)
+    try:
+        return response.read()
+    finally:
+        response.close()
+        response.release_conn()
