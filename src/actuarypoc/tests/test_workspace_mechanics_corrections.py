@@ -320,15 +320,19 @@ def test_filed_override_persists_with_provenance_and_history(store: FakeMinio) -
     assert record["replaces"]["rows"][0]["charge"] == pytest.approx(12.50)
     assert record["replaces"]["rows"][0]["provenance"]["sourceType"] == "filed_pdf"
 
-    # The materialised schedule: 8% of account value grading to 0 over 10y.
-    rows = artifact["usable"]["surrender"]
-    assert len(rows) == 10
-    assert rows[0]["charge_unit"] == "percent_account_value"
-    assert rows[0]["charge"] == pytest.approx(0.08)
-    assert rows[9]["charge"] == pytest.approx(0.008)
-    assert rows[0]["provenance"]["sourceType"] == "correction"
-    assert rows[0]["provenance"]["correctedBy"] == "eddy"
-    assert rows[0]["provenance"]["confirmBack"] == EXPECTED_CONFIRM_BACK
+    # Phase 7: the correction puts an approved EQUATION in force — 8%
+    # of the (ending) account value grading to 0 over 10 years.  The
+    # filed table rows stay as data underneath; the equation governs.
+    from actuarypoc.extract import workspace_equations as ws_equations
+
+    in_force = ws_equations.in_force(artifact, "surrender_charge")
+    assert in_force is not None
+    assert in_force["id"] == record["equationId"]
+    assert in_force["source"]["kind"] == "correction"
+    assert in_force["source"]["correction"]["confirmBack"] == EXPECTED_CONFIRM_BACK
+    assert in_force["approval"]["by"] == "eddy"
+    assert "ending account value" in in_force["rendering"]
+    assert artifact["usable"]["surrender"][0]["charge"] == pytest.approx(12.50)
     assert artifact["status"]["surrender"] == "corrected"
 
     # The change history says loudly that a filed value was overridden.
@@ -371,28 +375,30 @@ def test_ledger_reflects_the_surrender_correction(store: FakeMinio) -> None:
     assert labels["Corrected by"] == "eddy"
     assert component["source"]["sourceType"] == "correction"
 
-    # The rate tables in force label the corrected schedule too.
+    # The rate tables in force label the corrected mechanic too: the
+    # table data is unchanged, the governing equation is the correction.
     surrender_table = projection["rateTables"]["surrender"]
     assert surrender_table["status"] == "corrected"
-    assert surrender_table["rows"][0]["charge"] == pytest.approx(0.08)
+    assert surrender_table["equation"]["sourceKind"] == "correction"
 
 
-def test_correction_over_placeholder_and_over_edit(store: FakeMinio) -> None:
-    # Over a placeholder (nothing in force): the confirm-back names it.
+def test_correction_over_missing_and_over_edit(store: FakeMinio) -> None:
+    # Over nothing in force: the confirm-back names the absence.
     workspace_id = _seed_workspace(store, _empty_artifact())
     preview = server.api_preview_mechanics_correction(
         workspace_id, "surrender", _surrender_spec()
     )
     assert "no surrender schedule is in force" in preview["confirmBack"]
-    assert "placeholder" in preview["confirmBack"]
+    assert "no surrender charge is calculated" in preview["confirmBack"]
     server.api_apply_mechanics_correction(
         workspace_id, "surrender", _surrender_spec(confirmed=True)
     )
     artifact = workspace_store.load_workspace_executable_mechanics(workspace_id)
     assert artifact["corrections"]["surrender"]["replaces"]["status"] == "missing"
 
-    # Over a Phase 2 workspace edit: the correction wins, immediately and
-    # after the edit/correction re-application order a re-run performs.
+    # Over a Phase 2 workspace edit: the correction's equation wins,
+    # immediately and after the edit/correction re-application order a
+    # re-run performs.  The edit's rows remain as data underneath.
     workspace_id = _seed_workspace(store, _empty_artifact())
     server.api_edit_mechanics_slot(
         workspace_id, "surrender",
@@ -405,14 +411,22 @@ def test_correction_over_placeholder_and_over_edit(store: FakeMinio) -> None:
         workspace_id, "surrender", _surrender_spec(confirmed=True)
     )
     artifact = workspace_store.load_workspace_executable_mechanics(workspace_id)
-    assert artifact["usable"]["surrender"][0]["charge_unit"] == "percent_account_value"
     assert artifact["corrections"]["surrender"]["replaces"]["status"] == "workspace_table"
+
+    from actuarypoc.extract import workspace_equations as ws_equations
+
+    in_force = ws_equations.in_force(artifact, "surrender_charge")
+    assert in_force is not None
+    assert in_force["source"]["kind"] == "correction"
 
     fresh = _empty_artifact()
     fresh = panel.reapply_workspace_edits(fresh, artifact.get("workspaceEdits"))
     fresh = corrections.reapply_corrections(fresh, artifact.get("corrections"))
-    assert fresh["usable"]["surrender"][0]["charge_unit"] == "percent_account_value"
-    assert fresh["usable"]["surrender"][0]["provenance"]["sourceType"] == "correction"
+    fresh_in_force = ws_equations.in_force(fresh, "surrender_charge")
+    assert fresh_in_force is not None
+    assert fresh_in_force["source"]["kind"] == "correction"
+    assert "ending account value" in fresh_in_force["rendering"]
+    assert fresh["usable"]["surrender"][0]["charge_unit"] == "percent_face"
 
 
 # ---------------------------------------------------------------------------
@@ -768,8 +782,14 @@ def test_corrections_survive_an_analysis_rerun(store: FakeMinio, monkeypatch) ->
     assert artifact is not None
     record = artifact["corrections"]["surrender"]
     assert record["confirmBack"] == EXPECTED_CONFIRM_BACK
-    assert artifact["usable"]["surrender"][0]["charge_unit"] == "percent_account_value"
-    assert artifact["usable"]["surrender"][0]["provenance"]["sourceType"] == "correction"
+    # The re-run rebuilt the filed table; the correction survives as
+    # the approved equation in force, not as rewritten rows.
+    assert artifact["usable"]["surrender"][0]["charge_unit"] == "per_1000_face"
+    from actuarypoc.extract import workspace_equations as ws_equations
+
+    in_force = ws_equations.in_force(artifact, "surrender_charge")
+    assert in_force is not None
+    assert in_force["source"]["kind"] == "correction"
     # The executable view carries the correction into the next run.
     view = corrections.executable_mechanics_view(artifact)
-    assert view["surrender"][0]["charge"] == pytest.approx(0.08)
+    assert view["_equations"]["surrender_charge"]["id"] == in_force["id"]

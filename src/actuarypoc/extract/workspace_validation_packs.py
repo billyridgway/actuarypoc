@@ -425,25 +425,57 @@ def mechanics_fingerprint(mechanics_view: Dict[str, Any]) -> str:
 
 
 def _switches_used(projection: Dict[str, Any]) -> List[str]:
-    """The rule-bank switches a projection executed (Phase 4 record)."""
+    """Legacy (pre-Phase-7) switch record, read from old projections.
+
+    New projections carry no switch keys, so this returns [] for them;
+    it remains so runs recorded before Phase 7 stay interpretable.
+    """
 
     switches: set = set()
     for row in (projection or {}).get("rows") or []:
         applied = row.get("appliedMechanics") or {}
         coi = applied.get("coi") or {}
-        for key in ("rateSwitch", "timingSwitch", "narSwitch"):
-            if coi.get(key):
-                switches.add(str(coi[key]))
-        for fee in applied.get("fees") or []:
-            if isinstance(fee, dict) and fee.get("unitSwitch"):
-                switches.add(str(fee["unitSwitch"]))
+        if isinstance(coi, dict):
+            for key in ("rateSwitch", "timingSwitch", "narSwitch"):
+                if coi.get(key):
+                    switches.add(str(coi[key]))
+        fees = applied.get("fees")
+        if isinstance(fees, list):
+            for fee in fees:
+                if isinstance(fee, dict) and fee.get("unitSwitch"):
+                    switches.add(str(fee["unitSwitch"]))
         surrender = applied.get("surrender") or {}
-        if surrender.get("basisSwitch"):
+        if isinstance(surrender, dict) and surrender.get("basisSwitch"):
             switches.add(str(surrender["basisSwitch"]))
         crediting = applied.get("crediting") or {}
-        if crediting.get("switch"):
+        if isinstance(crediting, dict) and crediting.get("switch"):
             switches.add(str(crediting["switch"]))
     return sorted(switches)
+
+
+def _applied_equations(projection: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The approved equations a projection executed (Phase 7 record).
+
+    Read from the projection's appliedEquations citations — the same
+    citations the ledger prints — reduced to the pack record's shape.
+    """
+
+    seen: Dict[str, Dict[str, Any]] = {}
+    for citation in (projection or {}).get("appliedEquations") or []:
+        if not isinstance(citation, dict):
+            continue
+        equation_id = citation.get("equationId")
+        if not equation_id or equation_id in seen:
+            continue
+        seen[str(equation_id)] = {
+            "equationId": equation_id,
+            "mechanic": citation.get("mechanic"),
+            "version": citation.get("version"),
+            "approvedBy": citation.get("approvedBy"),
+            "approvedAt": citation.get("approvedAt"),
+            "sourceKind": citation.get("sourceKind"),
+        }
+    return [seen[key] for key in sorted(seen)]
 
 
 def _component_basis(
@@ -458,6 +490,18 @@ def _component_basis(
 
 
 _BASIS_EXPLANATIONS = {
+    "missing": (
+        "The {label} line for this year was NOT CALCULATED — no approved "
+        "equation is in force for the mechanic — so there is no actual to "
+        "compare. Harvest the filing's stated calculation and approve it, "
+        "or enter the equation, then re-run the pack."
+    ),
+    "equation": (
+        "The {label} line for this year was calculated by an approved "
+        "equation that does not rest on a filed table (for example an "
+        "actuary-authored equation). Check the expectation against the "
+        "approved equation recorded with this run."
+    ),
     "placeholder": (
         "The {label} line for this year is a PLACEHOLDER in the ledger — no "
         "filed value is in force for it — so the actual is a stand-in figure, "
@@ -599,6 +643,7 @@ def run_validation_pack(
     ledger_version: Optional[int] = None
     case_reports: List[Dict[str, Any]] = []
     all_switches: set = set()
+    all_equations: Dict[str, Dict[str, Any]] = {}
     totals = {"expectations": 0, "pass": 0, "fail": 0, "missing": 0}
     passed_cases = 0
     basis_counts: Dict[str, int] = {}
@@ -623,6 +668,9 @@ def run_validation_pack(
         horizon = max(ledger_rows) if ledger_rows else None
         case_switches = _switches_used(projection)
         all_switches.update(case_switches)
+        case_equations = _applied_equations(projection)
+        for equation in case_equations:
+            all_equations[str(equation["equationId"])] = equation
 
         results: List[Dict[str, Any]] = []
         case_status = "pass"
@@ -701,6 +749,7 @@ def run_validation_pack(
             "mechanicsMode": mechanics.get("mode") or "workspace",
             "mechanicsFingerprint": fingerprint,
             "switchesUsed": case_switches,
+            "appliedEquations": case_equations,
             "results": results,
         })
 
@@ -729,6 +778,7 @@ def run_validation_pack(
         "engine": {
             "ledgerVersion": ledger_version,
             "switchesUsed": sorted(all_switches),
+            "appliedEquations": [all_equations[key] for key in sorted(all_equations)],
         },
         "summary": summary,
         "standInLines": standin_lines,
@@ -804,12 +854,29 @@ def render_report_text(report: Dict[str, Any]) -> str:
     lines.append(f"Product:     {report.get('productCode') or '—'}")
     lines.append(f"Workspace:   {report.get('workspaceId')}")
     lines.append(f"Run:         {report.get('id')} at {report.get('ranAt')} by {report.get('ranBy')}")
-    lines.append(
-        f"Engine:      projection ledger version {engine.get('ledgerVersion')}; "
-        "rule-bank switches used:"
-    )
-    for switch in engine.get("switchesUsed") or []:
-        lines.append(f"               - {switch}")
+    applied_equations = engine.get("appliedEquations") or []
+    if applied_equations:
+        lines.append(
+            f"Engine:      projection ledger version {engine.get('ledgerVersion')}; "
+            "approved equations applied:"
+        )
+        for equation in applied_equations:
+            lines.append(
+                "               - {mechanic} (equation {equationId}, version "
+                "{version}, approved by {approvedBy})".format(
+                    mechanic=equation.get("mechanic"),
+                    equationId=equation.get("equationId"),
+                    version=equation.get("version"),
+                    approvedBy=equation.get("approvedBy"),
+                )
+            )
+    else:
+        lines.append(
+            f"Engine:      projection ledger version {engine.get('ledgerVersion')}; "
+            "rule-bank switches used:"
+        )
+        for switch in engine.get("switchesUsed") or []:
+            lines.append(f"               - {switch}")
     lines.append(
         f"Result:      {str(summary.get('status') or '').upper()} — "
         f"{summary.get('passedCases')}/{summary.get('cases')} cases passed; "
@@ -847,7 +914,15 @@ def render_report_text(report: Dict[str, Any]) -> str:
             f"  Mechanics: {case.get('mechanicsMode')} state, "
             f"fingerprint {str(case.get('mechanicsFingerprint') or '')[:16]}…"
         )
-        if case.get("switchesUsed"):
+        if case.get("appliedEquations"):
+            lines.append(
+                "  Equations: "
+                + ", ".join(
+                    f"{e.get('mechanic')} v{e.get('version')}"
+                    for e in case["appliedEquations"]
+                )
+            )
+        elif case.get("switchesUsed"):
             lines.append(f"  Switches: {', '.join(case['switchesUsed'])}")
         lines.append("")
         header = (

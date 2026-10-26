@@ -103,7 +103,7 @@ def test_accept_remove_and_projection_execution(monkeypatch) -> None:
         config=config,
         horizon_years=1,
     )
-    assert projection["mechanicsExecution"]["surrender"]["fullyApplied"] is True
+    assert projection["mechanicsExecution"]["surrender_charge"]["applied"] is True
     # Phase 1: the accepted synthetic schedule charges 12% of the ending
     # account value in year 1 — not 12% of the $100,000 face amount
     # ($12,000), which was the August-7 defect Eddy flagged.

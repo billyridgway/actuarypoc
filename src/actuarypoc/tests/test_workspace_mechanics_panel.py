@@ -300,12 +300,17 @@ def test_history_is_newest_first_and_panel_carries_it(store: FakeMinio) -> None:
     )
 
     history = server.api_get_mechanics_panel_history(workspace_id)
-    assert [c["slot"] for c in history["changes"]] == ["nar", "fees"]
-    assert history["changes"][0]["new"] == {"factor": 1.05}
-    assert history["changes"][1]["prior"]["status"] == "missing"
+    # Phase 7: loading the pre-doctrine artifact also records the
+    # one-time equation migration in the same audit history.
+    user_changes = [c for c in history["changes"] if c["kind"] != "equations_migrated"]
+    assert [c["slot"] for c in user_changes] == ["nar", "fees"]
+    assert any(c["kind"] == "equations_migrated" for c in history["changes"])
+    assert user_changes[0]["new"] == {"factor": 1.05}
+    assert user_changes[1]["prior"]["status"] == "missing"
 
     panel_payload = server.api_get_mechanics_panel(workspace_id)
-    assert [c["slot"] for c in panel_payload["changeLog"]] == ["nar", "fees"]
+    panel_user_changes = [c for c in panel_payload["changeLog"] if c["kind"] != "equations_migrated"]
+    assert [c["slot"] for c in panel_user_changes] == ["nar", "fees"]
     assert panel_payload["projectionStale"] is True
     assert panel_payload["projectionStaleSlots"] == ["fees", "nar"]
 

@@ -11,6 +11,8 @@ import zipfile
 from hashlib import sha256
 import math
 from pathlib import Path
+import uuid
+from copy import deepcopy
 from contextvars import ContextVar
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -51,7 +53,8 @@ from actuarypoc.domain.ul_requirements import get_ul_requirement_definitions
 from actuarypoc.domain.capabilities import CapabilityAssessmentItem, get_ul_capabilities
 from actuarypoc.domain.projection_graph import compile_projection_graph
 from actuarypoc.domain.projection_ledger import build_projection_ledger, build_rate_tables_in_force
-from actuarypoc.domain import rule_bank as _rule_bank
+from actuarypoc.domain import equations as _equations
+from actuarypoc.extract import workspace_equations as _workspace_equations
 from actuarypoc.domain.requirements_classification import (
     Applicability as ReqApplicability,
     Evidence as ReqEvidence,
@@ -169,6 +172,61 @@ except Exception:  # pragma: no cover - extremely unlikely in this env
 app = FastAPI(title="ActuaryPOC Projection Viewer", version="0.1.0")
 
 _WORKSPACE_MINIO_ONLY: ContextVar[bool] = ContextVar("workspace_minio_only", default=False)
+
+
+# ---------------------------------------------------------------------------
+# Phase 7: the migrating artifact loader.
+#
+# Every server read of a workspace's mechanics artifact goes through
+# this wrapper: a pre-doctrine artifact is migrated ONCE (persisted +
+# change-logged) by materializing its in-force mechanics state as
+# equation artifacts with honest provenance.  After migration the
+# wrapper is a plain load — the runtime never derives anything at
+# projection time; it executes approved artifacts or states absence.
+# ---------------------------------------------------------------------------
+
+_load_workspace_executable_mechanics_raw = load_workspace_executable_mechanics
+
+
+def _workspace_is_specimen(workspace_id: str) -> bool:
+    ws = get_workspace(workspace_id) or {}
+    code = str(ws.get("inferred_product_code") or "")
+    return "P18PR" in code.upper()
+
+
+def load_workspace_executable_mechanics(workspace_id: str):  # noqa: F811
+    artifact = _load_workspace_executable_mechanics_raw(workspace_id)
+    if not artifact:
+        return artifact
+    migrated = _workspace_equations.materialize_legacy_equations(
+        artifact,
+        at=datetime.utcnow().isoformat() + "Z",
+        specimen=_workspace_is_specimen(workspace_id),
+    )
+    if not migrated["changed"]:
+        return artifact
+    result = migrated["artifact"]
+    store_workspace_executable_mechanics(workspace_id, result)
+    append_workspace_mechanics_change(
+        workspace_id,
+        {
+            "id": f"chg-{uuid.uuid4().hex[:12]}",
+            "workspaceId": workspace_id,
+            "slot": None,
+            "mechanic": None,
+            "kind": "equations_migrated",
+            "who": "system",
+            "at": result.get("equationsMigratedAt"),
+            "summary": (
+                "Phase 7 migration: the mechanics state in force was "
+                "materialized as equation artifacts — "
+                + "; ".join(migrated["notes"])
+            ),
+            "prior": {},
+            "new": {"equationsMigratedAt": result.get("equationsMigratedAt")},
+        },
+    )
+    return result
 
 
 @app.middleware("http")
@@ -767,6 +825,9 @@ def _build_ul_projection_view(
             "sampleRows": sample_rows,
             "modelStatus": "diagnostic",
             "mechanicsExecution": projection.get("mechanicsExecution") or {},
+            "appliedEquations": projection.get("appliedEquations") or [],
+            "incomplete": bool(projection.get("incomplete")),
+            "missingMechanics": projection.get("missingMechanics") or [],
             # Phase 1 (show the math): the auditable ledger, the rate
             # tables in force, and the row reconciliation now travel with
             # every projection view.
@@ -782,74 +843,52 @@ def _build_ul_projection_view(
         gap_warnings = list(illustration.get("warnings") or [])
         gap_notes = list(illustration.get("notes") or [])
 
-        def _has_warning(substr: str) -> bool:
-            needle = (substr or "").lower()
-            for w in gap_warnings:
-                if isinstance(w, str) and needle in w.lower():
-                    return True
-            return False
-
-        if _has_warning("COI rates are placeholder"):
-            gap_items.append(
-                {
-                    "id": "missing_coi_table",
-                    "title": "COI table missing",
-                    "severity": "high",
-                    "status": "placeholder",
-                    "whyItMatters": (
-                        "COI charges currently use a flat placeholder rate, so projected "
-                        "account values and policy charges may not reflect filed rates."
-                    ),
-                    "suggestedUploads": [
-                        "COI rate table",
-                        "pricing workbook",
-                        "actuarial memorandum",
-                        "rate manual",
-                    ],
-                    "source": "Projection warning",
-                }
+        # Phase 7: gaps are the projection's missing mechanics — a
+        # mechanic with no approved equation does not calculate, and the
+        # gap names the resolution path (harvest / approve / enter).
+        _GAP_BY_MECHANIC = {
+            "coi_charge": ("missing_coi_equation", "COI charge equation missing", "high",
+                           ["COI rate table", "pricing workbook", "actuarial memorandum", "rate manual"]),
+            "surrender_charge": ("missing_surrender_equation", "Surrender charge equation missing", "medium",
+                                 ["surrender charge schedule", "policy form", "actuarial memorandum"]),
+            "policy_fees": ("missing_policy_fees_equation", "Policy fees equation missing", "medium",
+                            ["fee schedule", "expense assumption sheet", "pricing workbook", "policy specification"]),
+            "nar_definition": ("missing_nar_equation", "Net amount at risk equation missing", "high",
+                               ["policy form", "actuarial memorandum"]),
+            "crediting": ("missing_crediting_equation", "Crediting equation missing", "medium",
+                          ["policy form", "actuarial memorandum"]),
+            "premium_load": ("missing_premium_load_equation", "Premium load equation missing", "low",
+                             ["fee schedule", "policy specification"]),
+            "death_benefit": ("missing_death_benefit_equation", "Death benefit equation missing", "medium",
+                              ["policy form", "actuarial memorandum"]),
+        }
+        for missing in projection.get("missingMechanics") or []:
+            mechanic = str(missing.get("mechanic") or "")
+            gap_id, title, severity, uploads = _GAP_BY_MECHANIC.get(
+                mechanic, (f"missing_{mechanic}_equation", f"{missing.get('label') or mechanic} equation missing", "medium", []),
             )
-
-        if _has_warning("Surrender charges use a simplified placeholder schedule"):
+            label = str(missing.get("label") or mechanic)
+            if missing.get("reason") == "evaluation_failed":
+                why = (
+                    f"The approved {label} equation could not be evaluated "
+                    f"({missing.get('detail') or 'evaluation failed'}), so the mechanic "
+                    "contributed nothing to this projection."
+                )
+            else:
+                why = (
+                    f"No approved {label} equation is in force, so {label.lower()} is not "
+                    "calculated in this projection. Harvest the filing's stated calculation "
+                    "and approve it, or enter the equation, to calculate it."
+                )
             gap_items.append(
                 {
-                    "id": "surrender_schedule_placeholder",
-                    "title": "Surrender schedule placeholder",
-                    "severity": "medium",
-                    "status": "placeholder",
-                    "whyItMatters": (
-                        "Surrender values are based on a simplified placeholder schedule "
-                        "(a declining percentage of account value), not the filed surrender "
-                        "charge pattern, so early duration values may be materially "
-                        "different from production illustrations."
-                    ),
-                    "suggestedUploads": [
-                        "surrender charge schedule",
-                        "policy form",
-                        "actuarial memorandum",
-                    ],
-                    "source": "Projection warning",
-                }
-            )
-
-        if _has_warning("No policy or admin fees are applied"):
-            gap_items.append(
-                {
-                    "id": "policy_admin_fee_missing",
-                    "title": "Policy/admin fee missing",
-                    "severity": "medium",
+                    "id": gap_id,
+                    "title": title,
+                    "severity": severity,
                     "status": "missing",
-                    "whyItMatters": (
-                        "Projected policy values do not include policy or admin fees, "
-                        "so they may be higher than filed or production values."
-                    ),
-                    "suggestedUploads": [
-                        "fee schedule",
-                        "expense assumption sheet",
-                        "pricing workbook",
-                        "policy specification",
-                    ],
-                    "source": "Projection warning",
+                    "whyItMatters": why,
+                    "suggestedUploads": uploads,
+                    "source": "Projection — missing equation",
                 }
             )
 
@@ -1346,9 +1385,9 @@ def _build_ul_capability_assessment(snapshot: Dict[str, Any]) -> Optional[Dict[s
 
     items: List[Dict[str, Any]] = []
 
-    # COI tables – engine currently only supports a flat placeholder
-    # rate, so when the product appears to require COI tables this is
-    # treated as an unsupported capability.
+    # COI tables – this canned analysis surface does not execute them:
+    # since Phase 7, COI charges are calculated only in a workspace,
+    # by an approved COI charge equation over the accepted tables.
     coi_ev = ul_model.field_evidence.get("coi_rates")
     if isinstance(coi_ev, LifeFieldEvidence) and (coi_ev.status or "").lower() not in {"", "missing"}:
         req = cm_by_id.get("coi_table")
@@ -1358,8 +1397,9 @@ def _build_ul_capability_assessment(snapshot: Dict[str, Any]) -> Optional[Dict[s
         if isinstance(req, dict):
             filed_text = req.get("filedRequirement") or req.get("name")
         reason = (
-            "Product appears to use COI rate tables, but the current UL engine "
-            "only supports a flat placeholder COI rate, not full age/gender/class tables."
+            "Product appears to use COI rate tables. COI charges are calculated "
+            "only in a workspace, by an approved COI charge equation over the "
+            "accepted tables; this canned analysis view does not execute them."
         )
         items.append(
             {
@@ -1760,11 +1800,12 @@ def _projection_graph_input_configs(snapshot: Dict[str, Any]) -> Dict[str, Dict[
 
 def _graph_equation_context(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     """Run context the graph compiler uses to state each input's applied
-    equation: the first projection row's applied-mechanics record, the
-    year-1 ledger's component formulas (the engine's own derivations,
-    reused verbatim), and the rate tables in force.  Legacy snapshots
-    carry none of these; the compiler then derives equations from each
-    input's own state and the rule bank."""
+    equation: the first projection row's applied-mechanics record (Phase 7:
+    the approved equation citations), the year-1 ledger's component
+    formulas (the engine's own derivations, reused verbatim), and the rate
+    tables in force.  Legacy snapshots carry none of these; the compiler
+    then derives equations from the tables in force, or states plainly
+    that no approved equation is in force."""
 
     illustration = snapshot.get("illustration") or {}
     rows = illustration.get("rows") or []
@@ -2075,6 +2116,20 @@ def api_workspace_analyze(workspace_id: str) -> Dict[str, Any]:
     mechanics_artifact = _reapply_corrections(
         mechanics_artifact, prior_artifact.get("corrections")
     )
+    # Phase 7: equation artifacts are durable human decisions too —
+    # carry the prior artifact's records over verbatim, then materialize
+    # transcriptions for any in-force table state that still has no
+    # equation record (the pre-doctrine migration; this analysis path
+    # is the Promise UL specimen surface, so provenance says so).
+    if prior_artifact.get("equations"):
+        mechanics_artifact["equations"] = deepcopy(prior_artifact["equations"])
+        if prior_artifact.get("equationsMigratedAt"):
+            mechanics_artifact["equationsMigratedAt"] = prior_artifact[
+                "equationsMigratedAt"
+            ]
+    mechanics_artifact = _workspace_equations.materialize_legacy_equations(
+        mechanics_artifact, at=_correction_now(), specimen=True
+    )["artifact"]
     mechanics_artifact["workspaceId"] = workspace_id
     mechanics_artifact["objectKey"] = store_workspace_executable_mechanics(
         workspace_id, mechanics_artifact
@@ -2180,10 +2235,9 @@ def api_workspace_analyze(workspace_id: str) -> Dict[str, Any]:
     projection, mechanics, warnings, notes, gaps = _build_ul_projection_view(
         "ICC18 P18PR UL", executable_request
     )
-    execution = (projection or {}).get("mechanicsExecution") or {}
-    for mechanic in ("coi", "surrender", "fees", "nar_factors", "corridor"):
-        if (execution.get(mechanic) or {}).get("fallbackYears"):
-            mechanics_artifact["status"][mechanic] = "partial_fallback"
+    # Phase 7: execution incompleteness lives on the projection itself
+    # (incomplete + missingMechanics) and on the snapshot below; the
+    # artifact's equation records are the durable state.
     store_workspace_executable_mechanics(workspace_id, mechanics_artifact)
     snapshot["illustration"] = projection
     snapshot["mechanicsExplanation"] = mechanics
@@ -2367,10 +2421,23 @@ def api_accept_filed_mechanic(
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    # Phase 7: accepting a table also puts its transcription in force
+    # as an approved document equation (approver = the accepting user)
+    # when the mechanic's equation family does not exist yet — a table
+    # alone calculates nothing under the doctrine.
+    transcription = _workspace_equations.transcribe_tables_as_approved(
+        reviewed,
+        who=str(payload.reviewedBy or "workspace_user"),
+        at=_correction_now(),
+    )
+    reviewed = transcription["artifact"]
     reviewed["objectKey"] = store_workspace_executable_mechanics(workspace_id, reviewed)
     return {
         "accepted": True,
         "mechanic": mechanic,
+        "equationsTranscribed": [
+            _workspace_equations.record_view(r) for r in transcription["transcribed"]
+        ],
         "review": (reviewed.get("reviews") or {}).get(payload.candidateId or mechanic),
         "status": (reviewed.get("status") or {}).get(mechanic),
         "activeRowCount": len((reviewed.get("usable") or {}).get(mechanic) or []),
@@ -2605,10 +2672,11 @@ def api_get_mechanics_panel(workspace_id: str) -> Dict[str, Any]:
         )
     # Phase 4: extraction proposals (deterministic signals from the
     # filing's tables and slices, each with page evidence, confirmed
-    # through the proposal routes below) and the rule-bank catalog the
-    # slots and corrections resolve through.
+    # through the proposal routes below).  Phase 7: the panel also
+    # carries the workspace's equation state — the in-force equation
+    # per mechanic and anything pending, conflicting, or missing.
     panel["proposals"] = _workspace_proposals(workspace_id, artifact)
-    panel["ruleBank"] = _rule_bank.bank_catalog()
+    panel["equations"] = _workspace_equations.equations_view(artifact)
     panel["workspaceId"] = workspace_id
     return panel
 
@@ -3045,6 +3113,273 @@ def api_dismiss_mechanics_proposal(
         "change": outcome["change"],
         "proposals": _workspace_proposals(workspace_id, updated),
     }
+
+
+# ---------------------------------------------------------------------------
+# Phase 7 (the equation doctrine): equation artifacts
+#
+# The only equations that execute are document-derived and approved
+# here, or actuary-authored here.  Approval follows the confirm-back
+# discipline: an unconfirmed approve is rejected with the equation's
+# canonical rendering as the confirm-back.  Nothing here ever engages
+# a calculation automatically.
+# ---------------------------------------------------------------------------
+
+
+class EquationApproveRequest(BaseModel):  # type: ignore[misc]
+    equationId: str
+    confirmed: bool = False
+    who: Optional[str] = None
+
+
+class EquationRejectRequest(BaseModel):  # type: ignore[misc]
+    equationId: str
+    who: Optional[str] = None
+
+
+class EquationAuthorRequest(BaseModel):  # type: ignore[misc]
+    body: Dict[str, Any]
+    timing: Optional[str] = None
+    statement: Optional[str] = None
+    confirmed: bool = False
+    who: Optional[str] = None
+
+
+class EquationHarvestRequest(BaseModel):  # type: ignore[misc]
+    who: Optional[str] = None
+
+
+_EQUATION_SLOT_BY_MECHANIC = {
+    "coi_charge": "coi",
+    "surrender_charge": "surrender",
+    "premium_load": "fees",
+    "policy_fees": "fees",
+    "nar_definition": "nar",
+    "death_benefit": "corridor",
+    "crediting": "crediting",
+}
+
+
+def _equation_mechanic_or_404(mechanic: str) -> str:
+    mechanic = str(mechanic or "").strip().lower()
+    if mechanic not in _equations.MECHANICS:
+        raise HTTPException(status_code=404, detail=f"Unknown equation mechanic: {mechanic}")
+    return mechanic
+
+
+def _equation_change(
+    workspace_id: str, mechanic: str, kind: str, who: str, at: str,
+    summary: str, record: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    return {
+        "id": f"chg-{uuid.uuid4().hex[:12]}",
+        "workspaceId": workspace_id,
+        "slot": _EQUATION_SLOT_BY_MECHANIC.get(mechanic),
+        "mechanic": mechanic,
+        "kind": kind,
+        "who": who,
+        "at": at,
+        "summary": summary,
+        "prior": {},
+        "new": {"equationId": (record or {}).get("id"), "version": (record or {}).get("version")},
+    }
+
+
+def _persist_equation_outcome(
+    workspace_id: str, mechanic: str, outcome: Dict[str, Any],
+    kind: str, who: str, at: str, summary: str,
+) -> Dict[str, Any]:
+    updated = outcome["artifact"]
+    updated["objectKey"] = store_workspace_executable_mechanics(workspace_id, updated)
+    change = _equation_change(workspace_id, mechanic, kind, who, at, summary, outcome["record"])
+    append_workspace_mechanics_change(workspace_id, change)
+    slot_id = _EQUATION_SLOT_BY_MECHANIC.get(mechanic)
+    set_workspace_projection_stale(workspace_id, stale=True, slots=[slot_id] if slot_id else [])
+    return {
+        "record": _workspace_equations.record_view(outcome["record"]),
+        "equations": _workspace_equations.equations_view(updated),
+        "change": change,
+        "projectionStale": True,
+    }
+
+
+@app.get("/api/workspaces/{workspace_id}/equations")
+def api_list_equations(workspace_id: str) -> Dict[str, Any]:
+    """All equation artifacts with state, provenance, and conflicts."""
+
+    if get_workspace(workspace_id) is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    artifact = load_workspace_executable_mechanics(workspace_id) or {}
+    view = _workspace_equations.equations_view(artifact)
+    view["workspaceId"] = workspace_id
+    return view
+
+
+@app.get("/api/workspaces/{workspace_id}/equations/{mechanic}")
+def api_get_equation(workspace_id: str, mechanic: str) -> Dict[str, Any]:
+    if get_workspace(workspace_id) is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    mechanic = _equation_mechanic_or_404(mechanic)
+    artifact = load_workspace_executable_mechanics(workspace_id) or {}
+    view = _workspace_equations.equations_view(artifact)
+    return {"mechanic": mechanic, **view["mechanics"][mechanic], "workspaceId": workspace_id}
+
+
+@app.post("/api/workspaces/{workspace_id}/equations/{mechanic}/approve")
+def api_approve_equation(
+    workspace_id: str, mechanic: str, payload: EquationApproveRequest
+) -> Dict[str, Any]:
+    """Put a pending equation in force — only with ``confirmed: true``.
+
+    The unconfirmed response is the confirm-back: the equation's
+    canonical rendering, which is exactly what will execute.
+    """
+
+    if get_workspace(workspace_id) is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    mechanic = _equation_mechanic_or_404(mechanic)
+    artifact = load_workspace_executable_mechanics(workspace_id) or {}
+    record = next(
+        (r for r in _workspace_equations.records_for(artifact, mechanic)
+         if r.get("id") == payload.equationId),
+        None,
+    )
+    if record is None:
+        raise HTTPException(status_code=404, detail="Equation not found for this mechanic")
+    if not payload.confirmed:
+        raise HTTPException(status_code=400, detail={
+            "code": "confirmation_required",
+            "message": "Confirm the equation before it is put in force.",
+            "rendering": record.get("rendering"),
+            "record": _workspace_equations.record_view(record),
+        })
+    who = str(payload.who or "workspace_user")
+    at = _correction_now()
+    try:
+        outcome = _workspace_equations.approve_equation(
+            artifact, mechanic, payload.equationId, who=who, at=at
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    label = _equations.MECHANIC_LABELS[mechanic]
+    return _persist_equation_outcome(
+        workspace_id, mechanic, outcome, "equation_approved", who, at,
+        f"{label} equation approved by {who} and put in force: {outcome['record'].get('rendering')}",
+    )
+
+
+@app.post("/api/workspaces/{workspace_id}/equations/{mechanic}/reject")
+def api_reject_equation(
+    workspace_id: str, mechanic: str, payload: EquationRejectRequest
+) -> Dict[str, Any]:
+    if get_workspace(workspace_id) is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    mechanic = _equation_mechanic_or_404(mechanic)
+    artifact = load_workspace_executable_mechanics(workspace_id) or {}
+    who = str(payload.who or "workspace_user")
+    at = _correction_now()
+    try:
+        outcome = _workspace_equations.reject_equation(
+            artifact, mechanic, payload.equationId, who=who, at=at
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    label = _equations.MECHANIC_LABELS[mechanic]
+    return _persist_equation_outcome(
+        workspace_id, mechanic, outcome, "equation_rejected", who, at,
+        f"{label} equation rejected by {who}; it will not be calculated from this equation.",
+    )
+
+
+@app.put("/api/workspaces/{workspace_id}/equations/{mechanic}")
+def api_author_equation(
+    workspace_id: str, mechanic: str, payload: EquationAuthorRequest
+) -> Dict[str, Any]:
+    """Author or replace an equation in-product.
+
+    Unconfirmed: returns the canonical rendering as the confirm-back
+    and writes nothing.  Confirmed: the equation is validated, put in
+    force with actuary provenance, and supersedes the previous one.
+    """
+
+    if get_workspace(workspace_id) is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    mechanic = _equation_mechanic_or_404(mechanic)
+    preview = _workspace_equations.preview_equation(mechanic, payload.body, payload.timing)
+    if preview["errors"]:
+        raise HTTPException(status_code=400, detail={
+            "code": "invalid_equation",
+            "message": "The equation is not valid and was not saved.",
+            "errors": preview["errors"],
+        })
+    if not payload.confirmed:
+        return {
+            "preview": True,
+            "confirmed": False,
+            "mechanic": mechanic,
+            "rendering": preview["rendering"],
+            "errors": [],
+        }
+    who = str(payload.who or "workspace_user")
+    at = _correction_now()
+    artifact = load_workspace_executable_mechanics(workspace_id) or {}
+    try:
+        outcome = _workspace_equations.author_equation(
+            artifact, mechanic, payload.body,
+            who=who, at=at, timing=payload.timing, statement=payload.statement,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    label = _equations.MECHANIC_LABELS[mechanic]
+    return _persist_equation_outcome(
+        workspace_id, mechanic, outcome, "equation_authored", who, at,
+        f"{label} equation entered by {who} and put in force: {outcome['record'].get('rendering')}",
+    )
+
+
+@app.post("/api/workspaces/{workspace_id}/equations/harvest")
+def api_harvest_equations(
+    workspace_id: str, payload: Optional[EquationHarvestRequest] = None
+) -> Dict[str, Any]:
+    """Run/refresh equation harvesting over the workspace's documents.
+
+    Harvested equations are proposals: pending until approved through
+    the approve route.  A statement that cannot be structured becomes
+    a stated-but-unmapped record — never dropped, never approved.
+    """
+
+    if get_workspace(workspace_id) is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    who = str((payload.who if payload else None) or "workspace_user")
+    at = _correction_now()
+    artifact = load_workspace_executable_mechanics(workspace_id) or {}
+    slices = _load_workspace_slices(workspace_id)
+    outcome = _workspace_equations.harvest_equations(artifact, slices, at=at)
+    updated = outcome["artifact"]
+    created_ids = outcome.get("created") or []
+    created = [
+        r for r in _workspace_equations.records(updated) if r.get("id") in created_ids
+    ]
+    if created:
+        updated["objectKey"] = store_workspace_executable_mechanics(workspace_id, updated)
+        change = _equation_change(
+            workspace_id, "", "equations_harvested", who, at,
+            f"Harvesting proposed {len(created)} equation(s) from the workspace's "
+            "documents; each is pending until approved.",
+            None,
+        )
+        change["new"] = {"equationIds": [r.get("id") for r in created]}
+        append_workspace_mechanics_change(workspace_id, change)
+    view = _workspace_equations.equations_view(updated)
+    view["workspaceId"] = workspace_id
+    view["harvest"] = {
+        "created": [_workspace_equations.record_view(r) for r in created],
+        "createdCount": len(created),
+        "skippedCount": len(outcome.get("skipped") or []),
+        "warnings": outcome.get("warnings") or [],
+        "modelReadings": outcome.get("modelReadings"),
+    }
+    return view
 
 
 # ---------------------------------------------------------------------------
@@ -7628,12 +7963,12 @@ def build_product_workspace_snapshot(product_code: str) -> Dict[str, Any]:
 
     mechanics_summary = {
         "deathBenefitOption": death_benefit_option or "level",
-        "coiApproach": f"flat {cfg_runtime.coi_rate_flat:.2%} of face amount (placeholder)",
+        # Phase 7: the product configuration carries no mechanic math of
+        # its own — every charge is calculated by a workspace's approved
+        # equations, or not calculated.
+        "coiApproach": "Calculated only by an approved COI charge equation in the workspace",
         "interestCrediting": f"guaranteed credited rate {cfg_runtime.guaranteed_rate:.2%}",
-        "surrenderMechanics": (
-            f"{cfg_runtime.max_surrender_pct:.2%} of face in early durations, "
-            f"declining over {cfg_runtime.surrender_period_years} years"
-        ),
+        "surrenderMechanics": "Calculated only by an approved surrender charge equation in the workspace",
         "mechanicsCount": len(mechanics_payload),
     }
 
@@ -7818,10 +8153,8 @@ def build_product_workspace_snapshot(product_code: str) -> Dict[str, Any]:
     # Mechanics evidence for COI structure, even when rates are placeholder.
     mech_coi = _find_mechanic_by_name("cost of insurance")
     coi_sources = _sources_from_mechanic(mech_coi, "mechanic")
-    if "missing_coi_table" in gap_ids and coi_status == "missing":
+    if "missing_coi_equation" in gap_ids and coi_status != "extracted":
         coi_status = "missing"
-    elif "missing_coi_table" in gap_ids and coi_status != "extracted":
-        coi_status = "placeholder"
 
     evidence_items.append(
         {
@@ -7833,7 +8166,7 @@ def build_product_workspace_snapshot(product_code: str) -> Dict[str, Any]:
             "sources": coi_sources,
             "confidence": _confidence_from_sources(coi_sources) if coi_sources else 0.2,
             "impact": _impact_for_id("coi_rates"),
-            "notes": "Controls the cost of insurance charges deducted from the policy; placeholder rates mean projected values may not reflect filed CSO-based tables.",
+            "notes": "Controls the cost of insurance charges deducted from the policy; without an approved COI equation no COI charge is calculated.",
         }
     )
 
@@ -7867,8 +8200,8 @@ def build_product_workspace_snapshot(product_code: str) -> Dict[str, Any]:
 
     mech_surr = _find_mechanic_by_name("surrender charge")
     surr_sources = _sources_from_mechanic(mech_surr, "mechanic")
-    if "surrender_schedule_placeholder" in gap_ids and surr_status != "extracted":
-        surr_status = "placeholder"
+    if "missing_surrender_equation" in gap_ids and surr_status != "extracted":
+        surr_status = "missing"
 
     evidence_items.append(
         {
@@ -7880,7 +8213,7 @@ def build_product_workspace_snapshot(product_code: str) -> Dict[str, Any]:
             "sources": surr_sources,
             "confidence": _confidence_from_sources(surr_sources) if surr_sources else 0.2,
             "impact": _impact_for_id("surrender_schedule"),
-            "notes": "Determines surrender charges and cash surrender values; placeholder schedule means early duration cash values may diverge from filed illustrations.",
+            "notes": "Determines surrender charges and cash surrender values; without an approved surrender equation no surrender charge is calculated.",
         }
     )
 
@@ -7906,8 +8239,8 @@ def build_product_workspace_snapshot(product_code: str) -> Dict[str, Any]:
             fee_status = "inferred"
         else:
             fee_status = "inferred"
-    if "policy_admin_fee_missing" in gap_ids and fee_status != "extracted":
-        fee_status = "missing" if not fee_val else "placeholder"
+    if "missing_policy_fees_equation" in gap_ids and fee_status != "extracted":
+        fee_status = "missing"
 
     evidence_items.append(
         {
@@ -7919,7 +8252,7 @@ def build_product_workspace_snapshot(product_code: str) -> Dict[str, Any]:
             "sources": [],
             "confidence": 0.0 if fee_status in {"missing", "placeholder"} else 0.5,
             "impact": _impact_for_id("policy_admin_fee"),
-            "notes": "Per-policy fees and admin charges reduce account value; current projection assumes no fees when this remains missing or placeholder.",
+            "notes": "Per-policy fees and admin charges reduce account value; without an approved policy fees equation no fees are calculated.",
         }
     )
 
@@ -8091,8 +8424,8 @@ def build_product_workspace_snapshot(product_code: str) -> Dict[str, Any]:
     # Build compliance requirements from the UL requirement catalogue so
     # semantics stay centralised and product-line-aware.
     gap_key_by_req_id = {
-        "coi_table": "missing_coi_table",
-        "surrender_schedule": "surrender_schedule_placeholder",
+        "coi_table": "missing_coi_equation",
+        "surrender_schedule": "missing_surrender_equation",
     }
 
     for req_def in get_ul_requirement_definitions():
@@ -8138,8 +8471,8 @@ def build_product_workspace_snapshot(product_code: str) -> Dict[str, Any]:
             )
         elif req_def.requirement_id == "coi_table":
             current_impl = (
-                "Current implementation uses a flat 0.40% of face as a placeholder "
-                "instead of filed COI tables."
+                "COI charges are calculated only by an approved COI charge equation; "
+                "without one, no COI charge is calculated."
             )
             notes = (
                 "Placeholder COI rates mean projected charges may not align with filed "
@@ -10356,12 +10689,20 @@ def build_ul_projection_explanation(
     )
 
     # 2. Premium added
+    premium_load_entry = (target_row.get("appliedMechanics") or {}).get("premiumLoad") or {}
+    premium_added_formula = (
+        "Annualised modal premium less the premium expense charge from the approved "
+        "premium load equation applied for the policy year."
+        if premium_load_entry.get("equation")
+        else "Annualised modal premium. No approved premium load equation is in force, "
+        "so no premium expense charge is deducted."
+    )
     steps.append(
         {
             "id": "premium_added",
             "order": 2,
             "title": "Premium added",
-            "formulaText": "Annualised modal premium less any filed premium expense charge applied for the policy year.",
+            "formulaText": premium_added_formula,
             "inputs": [
                 _explained_value(label="Annual premium", value=annual_premium, unit="USD", source="Projection row"),
                 _explained_value(label="Premium mode", value=premium_mode, source="Projection row"),
@@ -10376,56 +10717,99 @@ def build_ul_projection_explanation(
         }
     )
 
-    # 3. COI charge deducted. Phase 1: the stated formula must match the
-    # basis the engine actually applied this year (table rate x net amount
-    # at risk, or the labelled flat placeholder) — the previous text always
-    # claimed a flat fraction of face, which Eddy flagged as inaccurate.
+    # 3-7. Phase 7: each step's formula text IS the approved equation
+    # that ran (its canonical rendering), or states plainly that the
+    # mechanic was not calculated because no approved equation is in
+    # force. Nothing here invents a formula.
     applied_mechanics = target_row.get("appliedMechanics") or {}
-    coi_applied = applied_mechanics.get("coi") or {}
-    if coi_applied.get("basis") == "table":
-        coi_unit = str(coi_applied.get("rateUnit") or "")
-        coi_formula_text = {
-            "per_1000_monthly": (
-                "Each month: COI charge = (COI net amount at risk / 1,000) x monthly rate per $1,000 "
-                "from the COI table in force. COI net amount at risk = death benefit / NAR factor - "
-                "account value. The year's charge is the sum of the 12 monthly charges."
-            ),
-            "per_1000_annual": (
-                "Each month: COI charge = (COI net amount at risk / 1,000) x (annual rate per $1,000 / 12) "
-                "from the COI table in force. COI net amount at risk = death benefit / NAR factor - "
-                "account value. The year's charge is the sum of the 12 monthly charges."
-            ),
-            "percent_nar_annual": (
-                "Each month: COI charge = COI net amount at risk x (annual rate / 12) from the COI "
-                "table in force. COI net amount at risk = death benefit / NAR factor - account value. "
-                "The year's charge is the sum of the 12 monthly charges."
-            ),
-        }.get(
-            coi_unit,
-            "COI charge = COI table rate x COI net amount at risk (death benefit / NAR factor - "
-            "account value), applied monthly and summed for the year.",
-        )
-        coi_step_inputs = [
+
+    def _citation_inputs(citation: Any) -> List[Dict[str, Any]]:
+        if not isinstance(citation, dict):
+            return []
+        inputs: List[Dict[str, Any]] = []
+        source_bits = [
+            bit
+            for bit in (
+                citation.get("sourceFilename"),
+                f"page {citation['sourcePage']}" if citation.get("sourcePage") else None,
+            )
+            if bit
+        ]
+        if source_bits:
+            inputs.append(_explained_value(
+                label="Equation source",
+                value=", ".join(str(bit) for bit in source_bits),
+                source="Approved equation",
+            ))
+        if citation.get("approvedBy"):
+            inputs.append(_explained_value(
+                label="Approved by",
+                value=f"{citation['approvedBy']} at {citation.get('approvedAt') or ''}".strip(),
+                source="Approved equation",
+            ))
+        correction = citation.get("correction")
+        if isinstance(correction, dict):
+            inputs.append(_explained_value(
+                label="Correction applied",
+                value=correction.get("confirmBack") or correction.get("text"),
+                source="Workspace correction",
+            ))
+            if correction.get("who"):
+                inputs.append(_explained_value(
+                    label="Corrected by",
+                    value=correction.get("who"),
+                    source="Workspace correction",
+                ))
+        return inputs
+
+    def _equation_step_text(entry: Any, missing_text: str) -> tuple:
+        entry = entry if isinstance(entry, dict) else {}
+        citation = entry.get("equation")
+        if entry.get("missing"):
+            return missing_text, []
+        if entry.get("failed"):
+            base = (citation or {}).get("rendering") or "the approved equation"
+            return (
+                f"The approved equation ({base}) could not be evaluated this year: "
+                f"{entry.get('failureReason') or 'evaluation failed'}. The mechanic "
+                "contributed nothing.",
+                _citation_inputs(citation),
+            )
+        if citation:
+            return citation.get("rendering") or "", _citation_inputs(citation)
+        return missing_text, []
+
+    # 3. COI charge deducted
+    coi_entry = applied_mechanics.get("coi") or {}
+    coi_formula_text, coi_step_inputs = _equation_step_text(
+        coi_entry,
+        "Not calculated \u2014 no approved COI charge equation is in force, so no COI "
+        "charge is deducted. Harvest the filing's stated calculation and approve it, "
+        "or enter the equation, to calculate COI charges.",
+    )
+    coi_step_inputs = list(coi_step_inputs)
+    if coi_entry.get("equation"):
+        coi_step_inputs += [
             _explained_value(
                 label="COI rate applied",
-                value=coi_applied.get("rate"),
-                unit=coi_unit or "rate",
-                source=(coi_applied.get("source") or {}).get("filename") or "COI table in force",
+                value=coi_entry.get("rate"),
+                unit=str(coi_entry.get("rateUnit") or "rate"),
+                source="COI table in force",
             ),
             _explained_value(
                 label="NAR factor",
-                value=coi_applied.get("narFactor"),
+                value=coi_entry.get("narFactor"),
                 source="Projection row",
             ),
             _explained_value(
                 label="Monthly COI net amount at risk (lowest month)",
-                value=coi_applied.get("monthlyNarMin"),
+                value=coi_entry.get("monthlyNarMin"),
                 unit="USD",
                 source="Projection row",
             ),
             _explained_value(
                 label="Monthly COI net amount at risk (highest month)",
-                value=coi_applied.get("monthlyNarMax"),
+                value=coi_entry.get("monthlyNarMax"),
                 unit="USD",
                 source="Projection row",
             ),
@@ -10436,69 +10820,6 @@ def build_ul_projection_explanation(
                 source="Projection row",
             ),
         ]
-    else:
-        coi_formula_text = (
-            "Placeholder - no COI table is in force: COI charge is a flat fraction of face amount "
-            "for this draft Promise UL projection. A filed COI charge is the table rate multiplied "
-            "by the net amount at risk."
-        )
-        coi_step_inputs = [
-            _explained_value(
-                label="Face amount",
-                value=face_amount,
-                unit="USD",
-                source="Projection row",
-            ),
-            _explained_value(
-                label="COI rate (flat placeholder)",
-                value=coi_rate,
-                unit="rate",
-                source=_prov_source(prov_coi_rate),
-                source_detail=prov_coi_rate.get("name") or None,
-            ),
-        ]
-    # Phase 3: state the COI timing and any correction in force on the
-    # COI step too — the step text mirrors the ledger derivation so an
-    # auditor sees the same story in both places.
-    coi_applied_expl = applied_mechanics.get("coi") or {}
-    coi_timing_expl = str(coi_applied_expl.get("timing") or "beginning")
-    if coi_timing_expl == "middle":
-        coi_formula_text += (
-            " The COI charge is deducted in the middle of each month: half before "
-            "interest is credited and half after, with the net amount at risk "
-            "re-measured at each step."
-        )
-    elif coi_timing_expl == "end":
-        coi_formula_text += (
-            " The COI charge is deducted at the end of each month, after interest "
-            "is credited, with the net amount at risk measured on the post-interest value."
-        )
-    else:
-        coi_formula_text += (
-            " The COI charge is deducted at the beginning of each month, before "
-            "interest is credited."
-        )
-    if coi_applied_expl.get("narDefinition") == "unadjusted":
-        coi_formula_text += (
-            " Per the NAR definition in force, the filed NAR factor is not applied: "
-            "the COI net amount at risk is the death benefit minus the account value."
-        )
-    for _coi_citation in (
-        coi_applied_expl.get("timingCorrection"),
-        coi_applied_expl.get("narDefinitionCorrection"),
-    ):
-        if _coi_citation:
-            coi_step_inputs.append(_explained_value(
-                label="Correction applied",
-                value=_coi_citation.get("confirmBack") or _coi_citation.get("text"),
-                source="Workspace correction",
-            ))
-            if _coi_citation.get("who"):
-                coi_step_inputs.append(_explained_value(
-                    label="Corrected by",
-                    value=_coi_citation.get("who"),
-                    source="Workspace correction",
-                ))
     steps.append(
         {
             "id": "coi_charge_deducted",
@@ -10516,27 +10837,31 @@ def build_ul_projection_explanation(
     )
 
     # 4. Policy/admin fee deducted
+    fee_entry = applied_mechanics.get("fees") or {}
+    fee_formula_text, fee_step_inputs = _equation_step_text(
+        fee_entry,
+        "Not calculated \u2014 no approved policy fees equation is in force, so no "
+        "policy or admin fees are deducted.",
+    )
+    fee_step_inputs = list(fee_step_inputs)
+    if not fee_entry.get("equation") and policy_fee_annual:
+        fee_step_inputs.append(_explained_value(
+            label="Configured policy fee (not applied)",
+            value=policy_fee_annual,
+            unit="USD",
+            source="UL runtime configuration",
+        ))
+    row_policy_fee = target_row.get("policyFee")
     steps.append(
         {
             "id": "policy_admin_fee_deducted",
             "order": 4,
             "title": "Policy/admin fee deducted",
-            "formulaText": (
-                "Configured annual policy/admin fee applied after COI. When no evidenced "
-                "fee schedule is loaded, the current configured amount is $0."
-            ),
-            "inputs": [
-                _explained_value(
-                    label="Policy fee (annual)",
-                    value=policy_fee_annual,
-                    unit="USD",
-                    source=_prov_source(prov_policy_fee),
-                    source_detail=prov_policy_fee.get("name") or None,
-                ),
-            ],
+            "formulaText": fee_formula_text,
+            "inputs": fee_step_inputs,
             "result": _explained_value(
                 label="Policy/admin fee deducted",
-                value=policy_fee_annual,
+                value=row_policy_fee if row_policy_fee is not None else 0.0,
                 unit="USD",
                 source="Projection row",
             ),
@@ -10544,23 +10869,30 @@ def build_ul_projection_explanation(
     )
 
     # 5. Interest credited
+    crediting_entry = applied_mechanics.get("crediting") or {}
+    interest_formula_text, interest_step_inputs = _equation_step_text(
+        crediting_entry,
+        "Not calculated \u2014 no approved crediting equation is in force, so no "
+        "interest is credited.",
+    )
+    interest_step_inputs = list(interest_step_inputs) + [
+        _explained_value(
+            label="Guaranteed credited rate",
+            value=guaranteed_rate,
+            unit="rate",
+            source=_prov_source(prov_guaranteed, default="Fallback"),
+            source_detail=prov_guaranteed.get("name") or None,
+        ),
+        _explained_value(label="Opening policy value", value=opening_policy_value, unit="USD", source="Projection row"),
+        _explained_value(label="Annual premium", value=annual_premium, unit="USD", source="Projection row"),
+    ]
     steps.append(
         {
             "id": "interest_credited",
             "order": 5,
             "title": "Interest credited",
-            "formulaText": "Interest is credited at the guaranteed rate on beginning policy value plus current-year premium.",
-            "inputs": [
-                _explained_value(
-                    label="Guaranteed credited rate",
-                    value=guaranteed_rate,
-                    unit="rate",
-                    source=_prov_source(prov_guaranteed, default="Fallback"),
-                    source_detail=prov_guaranteed.get("name") or None,
-                ),
-                _explained_value(label="Opening policy value", value=opening_policy_value, unit="USD", source="Projection row"),
-                _explained_value(label="Annual premium", value=annual_premium, unit="USD", source="Projection row"),
-            ],
+            "formulaText": interest_formula_text,
+            "inputs": interest_step_inputs,
             "result": _explained_value(
                 label="Interest credited",
                 value=guaranteed_interest,
@@ -10570,18 +10902,18 @@ def build_ul_projection_explanation(
         }
     )
 
-    # 6. Closing policy value
+    # 6. Closing policy value (the roll-forward identity — universal)
     steps.append(
         {
             "id": "closing_policy_value",
             "order": 6,
             "title": "Closing policy value",
-            "formulaText": "Closing policy value = Opening value + premium less premium expense charge − COI charges − policy/admin fees + interest credited.",
+            "formulaText": "Closing policy value = Opening value + premium less premium expense charge \u2212 COI charges \u2212 policy/admin fees + interest credited.",
             "inputs": [
                 _explained_value(label="Opening policy value", value=opening_policy_value, unit="USD", source="Projection row"),
                 _explained_value(label="Premium added", value=annual_premium, unit="USD", source="Projection row"),
                 _explained_value(label="COI charge", value=coi_charge, unit="USD", source="Projection row"),
-                _explained_value(label="Policy/admin fee", value=policy_fee_annual, unit="USD", source="Projection row"),
+                _explained_value(label="Policy/admin fee", value=row_policy_fee if row_policy_fee is not None else 0.0, unit="USD", source="Projection row"),
                 _explained_value(label="Interest credited", value=guaranteed_interest, unit="USD", source="Projection row"),
             ],
             "result": _explained_value(
@@ -10593,82 +10925,26 @@ def build_ul_projection_explanation(
         }
     )
 
-    # 7. Surrender charge. Phase 1: state the basis the engine actually
-    # applied this year instead of always claiming a percentage of face.
-    surrender_applied = applied_mechanics.get("surrender") or {}
-    surrender_basis = str(surrender_applied.get("basis") or "")
-    surrender_unit = str(surrender_applied.get("chargeUnit") or "")
-    if surrender_basis == "table" and surrender_unit == "percent_account_value":
-        surrender_formula_text = "Surrender charge = schedule percentage x ending account value."
-        surrender_step_inputs = [
-            _explained_value(label="Schedule percentage", value=surrender_applied.get("percent"), unit="rate", source="Surrender schedule in force"),
-            _explained_value(label="Ending account value", value=end_policy_value, unit="USD", source="Projection row"),
-        ]
-    elif surrender_basis == "table" and surrender_unit == "percent_face":
+    # 7. Surrender charge
+    surrender_entry = applied_mechanics.get("surrender") or {}
+    surrender_formula_text, surrender_step_inputs = _equation_step_text(
+        surrender_entry,
+        "Not calculated \u2014 no approved surrender charge equation is in force, so "
+        "no surrender charge is deducted.",
+    )
+    surrender_step_inputs = list(surrender_step_inputs)
+    if (
+        surrender_entry.get("equation")
+        and not surrender_entry.get("rowApplied")
+        and not surrender_charge
+    ):
         surrender_formula_text = (
-            "Surrender charge = schedule percentage x face amount, exactly as the schedule "
-            "in force states its charges."
+            "No surrender charge applies this year: the surrender charge period "
+            f"has ended. The approved equation is: {surrender_formula_text}"
         )
-        surrender_step_inputs = [
-            _explained_value(label="Schedule percentage", value=surrender_applied.get("percent"), unit="rate", source="Surrender schedule in force"),
-            _explained_value(label="Face amount", value=face_amount, unit="USD", source="Projection row"),
-        ]
-    elif surrender_basis == "table" and surrender_unit == "per_1000_face":
-        surrender_formula_text = (
-            "Surrender charge = (face amount / 1,000) x schedule charge per $1,000 of face "
-            "amount, exactly as the schedule in force states."
-        )
-        surrender_step_inputs = [
-            _explained_value(label="Schedule charge per $1,000 of face", value=surrender_applied.get("perThousand"), unit="USD", source="Surrender schedule in force"),
-            _explained_value(label="Face amount", value=face_amount, unit="USD", source="Projection row"),
-        ]
-    elif surrender_basis == "table":
-        surrender_formula_text = "Surrender charge = the fixed amount stated in the schedule in force for this duration."
-        surrender_step_inputs = [
-            _explained_value(label="Schedule fixed charge", value=surrender_charge, unit="USD", source="Surrender schedule in force"),
-        ]
-    elif surrender_basis == "expired":
-        surrender_formula_text = "No surrender charge applies this year: the surrender charge period has ended."
-        surrender_step_inputs = [
-            _explained_value(label="Ending account value", value=end_policy_value, unit="USD", source="Projection row"),
-        ]
-    else:
-        surrender_formula_text = (
-            "Placeholder - no surrender schedule is in force: surrender charge = placeholder "
-            "percentage x ending account value. The placeholder percentage declines linearly "
-            "over the surrender period."
-        )
-        surrender_step_inputs = [
-            _explained_value(label="Placeholder percentage this year", value=surrender_applied.get("percent"), unit="rate", source="Placeholder schedule"),
-            _explained_value(label="Ending account value", value=end_policy_value, unit="USD", source="Projection row"),
-            _explained_value(
-                label="Surrender schedule",
-                value=prov_surrender.get("value"),
-                source=_prov_source(prov_surrender),
-                source_detail=prov_surrender.get("name") or None,
-            ),
-        ]
-    # Phase 3: a corrected surrender schedule says so on the step, and
-    # cites the correction (the filed value it replaced is preserved in
-    # the correction record and the change history).
-    surrender_source_expl = surrender_applied.get("source") or {}
-    if surrender_source_expl.get("sourceType") == "correction":
-        surrender_formula_text += (
-            " This schedule is a workspace correction and overrides the schedule "
-            "previously in force; the value it replaced is preserved in the "
-            "correction record and the change history."
-        )
-        surrender_step_inputs.append(_explained_value(
-            label="Correction applied",
-            value=surrender_source_expl.get("confirmBack") or surrender_source_expl.get("correctionText"),
-            source="Workspace correction",
-        ))
-        if surrender_source_expl.get("correctedBy"):
-            surrender_step_inputs.append(_explained_value(
-                label="Corrected by",
-                value=surrender_source_expl.get("correctedBy"),
-                source="Workspace correction",
-            ))
+    surrender_step_inputs.append(
+        _explained_value(label="Ending account value", value=end_policy_value, unit="USD", source="Projection row")
+    )
     steps.append(
         {
             "id": "surrender_charge",
@@ -10705,16 +10981,22 @@ def build_ul_projection_explanation(
         }
     )
 
-    # 9. Death benefit
+    # 9. Death benefit — from its approved equation
+    death_benefit_entry = applied_mechanics.get("deathBenefit") or {}
+    death_benefit_formula_text, death_benefit_inputs = _equation_step_text(
+        death_benefit_entry,
+        "Not calculated — no approved death benefit equation is in force.",
+    )
+    death_benefit_inputs = list(death_benefit_inputs) + [
+        _explained_value(label="Face amount", value=face_amount, unit="USD", source="Projection row"),
+    ]
     steps.append(
         {
             "id": "death_benefit",
             "order": 9,
             "title": "Death benefit",
-            "formulaText": "Draft UL death benefit is level and equal to face amount for this projection.",
-            "inputs": [
-                _explained_value(label="Face amount", value=face_amount, unit="USD", source="Projection row"),
-            ],
+            "formulaText": death_benefit_formula_text,
+            "inputs": death_benefit_inputs,
             "result": _explained_value(
                 label="Death benefit",
                 value=death_benefit,
@@ -10724,17 +11006,23 @@ def build_ul_projection_explanation(
         }
     )
 
-    # 10. Net amount at risk
+    # 10. Net amount at risk — from its approved equation
+    nar_entry = applied_mechanics.get("nar") or {}
+    nar_formula_text, nar_step_inputs = _equation_step_text(
+        nar_entry,
+        "Not calculated — no approved net amount at risk equation is in force.",
+    )
+    nar_step_inputs = list(nar_step_inputs) + [
+        _explained_value(label="Death benefit", value=death_benefit, unit="USD", source="Projection row"),
+        _explained_value(label="Policy value", value=end_policy_value, unit="USD", source="Projection row"),
+    ]
     steps.append(
         {
             "id": "net_amount_at_risk",
             "order": 10,
             "title": "Net amount at risk",
-            "formulaText": "Net amount at risk = Death benefit − policy value used as account value in the projection.",
-            "inputs": [
-                _explained_value(label="Death benefit", value=death_benefit, unit="USD", source="Projection row"),
-                _explained_value(label="Policy value", value=end_policy_value, unit="USD", source="Projection row"),
-            ],
+            "formulaText": nar_formula_text,
+            "inputs": nar_step_inputs,
             "result": _explained_value(
                 label="Net amount at risk",
                 value=net_amount_at_risk,
@@ -11187,7 +11475,16 @@ def validate_ul_runtime_config(config: UlRuntimeConfig, horizon_years: int) -> L
 
 
 def _reconcile_ul_projection_rows(rows: List[Dict[str, Any]], tolerance: float = 0.01) -> Dict[str, Any]:
-    """Reconcile annual presentation rows to their executed policy mechanics."""
+    """Reconcile annual presentation rows to the universal identities.
+
+    Phase 7: only identities are checked — the roll-forward, cash value
+    equalling ending value, and surrender value equalling cash minus
+    the surrender charge floored at zero.  The NAR and death-benefit
+    checks this function used to carry hardcoded one NAR definition
+    and one corridor shape; under the Equation Doctrine those are
+    whatever the approved equations say, so they are outputs to cite,
+    not identities to reconcile against.
+    """
 
     failures: List[Dict[str, Any]] = []
     max_residual = 0.0
@@ -11219,18 +11516,10 @@ def _reconcile_ul_projection_rows(rows: List[Dict[str, Any]], tolerance: float =
         cash = float(row.get("cashValue") or 0.0)
         surrender_charge = float(row.get("surrenderCharge") or 0.0)
         surrender = float(row.get("surrenderValue") or 0.0)
-        death_benefit = float(row.get("deathBenefit") or 0.0)
-        nar = float(row.get("netAmountAtRisk") or 0.0)
-        nar_factor = float(row.get("narFactor") or 1.0)
-        coi_nar = float(row.get("coiNetAmountAtRisk") or 0.0)
-        corridor = float(row.get("minimumDeathBenefitPercentage") or 1.0)
 
         check(year, "policy_value_roll_forward", ending, opening + premium - premium_load - coi - fees + interest)
         check(year, "cash_value", cash, ending)
         check(year, "surrender_value", surrender, max(cash - surrender_charge, 0.0))
-        check(year, "net_amount_at_risk", nar, max(death_benefit - cash, 0.0))
-        check(year, "coi_net_amount_at_risk", coi_nar, max(death_benefit / nar_factor - cash, 0.0))
-        check(year, "minimum_death_benefit", death_benefit, max(float(row.get("faceAmount") or 0.0), corridor * cash))
 
     return {
         "passed": not failures,
@@ -11245,12 +11534,18 @@ def _reconcile_ul_projection_rows(rows: List[Dict[str, Any]], tolerance: float =
 def _run_ul_projection(
     *, request: Dict[str, Any], config: UlRuntimeConfig, horizon_years: int = 30
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """Core UL-style projection loop used by Promise UL.
+    """Core UL projection loop (Phase 7 — the Equation Doctrine).
 
-    This helper is intentionally generic-looking but currently wired only
-    for the Promise UL draft path. It preserves existing behaviour
-    exactly: same request normalisation, same placeholder assumptions,
-    same row/metric shapes.
+    The loop is a skeleton: the universal roll-forward identity, the
+    within-month sequencing, and the bookkeeping.  Every product
+    mechanic — COI charge, surrender charge, premium load, policy
+    fees, interest crediting, the NAR definition, the death benefit —
+    is computed by evaluating the workspace's APPROVED equation for
+    that mechanic (``executable["_equations"]``).  A mechanic with no
+    approved equation, or whose equation cannot be evaluated,
+    contributes nothing and the run is flagged incomplete naming it.
+    There is no placeholder math and no fallback anywhere in this
+    function; see docs/phase-7-equations.md.
     """
 
     # Normalise core request fields with conservative defaults.
@@ -11268,11 +11563,11 @@ def _run_ul_projection(
 
     premium_mode_raw = (request.get("premiumMode") or "ANNUAL").strip().upper() or "ANNUAL"
 
-    # Placeholder annual premium: either annualised from an explicit
-    # modal premium in the request, or inferred as a simple fraction of
-    # face so that cash value growth and COI charges produce a sensible
-    # shape. This is not filed or calibrated and is surfaced as a
-    # warning by the caller.
+    # Scenario premium: either annualised from an explicit modal
+    # premium in the request, or inferred as a simple fraction of face
+    # so the scenario has a premium at all.  This is scenario
+    # scaffolding (disclosed as a derived placeholder input on the
+    # logic graph), not a product mechanic.
     modal_premium_raw = request.get("modalPremium")
     try:
         modal_premium_input = float(modal_premium_raw) if modal_premium_raw is not None else None
@@ -11296,382 +11591,344 @@ def _run_ul_projection(
         modal_premium = annual_premium / freq if freq > 0 else annual_premium
 
     guaranteed_rate = config.guaranteed_rate
-    surrender_period_years = config.surrender_period_years
-    max_surrender_pct = config.max_surrender_pct
-    coi_rate = config.coi_rate_flat
     executable = config.executable_mechanics or {}
 
-    # Phase 3 (corrections in plain English): correction settings ride
-    # inside the executable mechanics under "_settings" (see
-    # workspace_mechanics_corrections.executable_mechanics_view).  They
-    # are deterministic switches the loop applies — COI deduction timing
-    # and the NAR definition — never model interpretations.
-    mech_settings = executable.get("_settings") or {}
-    # Phase 4 (the rule bank): the settings the loop honours are exactly
-    # the banked switch ids — an unbanked timing or definition is not a
-    # setting the loop can apply, so it falls back to the default
-    # banked switch rather than improvising a meaning.
-    coi_timing = str(mech_settings.get("coiTiming") or "beginning")
-    if coi_timing not in _rule_bank.COI_TIMING_SWITCHES:
-        coi_timing = "beginning"
-    nar_definition = str(mech_settings.get("narDefinition") or "factor_adjusted")
-    if nar_definition not in _rule_bank.NAR_DEFINITION_SWITCHES:
-        nar_definition = "factor_adjusted"
-    coi_timing_correction = mech_settings.get("coiTimingCorrection") or None
-    nar_definition_correction = mech_settings.get("narDefinitionCorrection") or None
+    # The approved equations in force.  Workspace projections arrive
+    # with them on the executable view ("_equations"); a caller that
+    # hands the loop raw tables only (product illustrations, older
+    # tests) gets the same pre-doctrine materialization the stored
+    # artifacts received — derived in memory from the tables/settings
+    # in force, never persisted here, and never invented from config.
+    equations_in_force: Dict[str, Dict[str, Any]] = dict(executable.get("_equations") or {})
+    if not equations_in_force:
+        table_keys = ("coi", "surrender", "fees", "nar_factors", "corridor")
+        if any(executable.get(key) for key in table_keys):
+            pseudo: Dict[str, Any] = {
+                "usable": {key: list(executable.get(key) or []) for key in table_keys},
+                "corrections": {},
+            }
+            legacy_settings = executable.get("_settings") or {}
+            if legacy_settings.get("coiTiming"):
+                pseudo["corrections"]["coi"] = {
+                    "variant": "coi_timing",
+                    "params": {"timing": legacy_settings["coiTiming"]},
+                }
+            if legacy_settings.get("narDefinition"):
+                pseudo["corrections"]["nar_factors"] = {
+                    "variant": "nar_definition",
+                    "params": {"definition": legacy_settings["narDefinition"]},
+                }
+            materialized = _workspace_equations.materialize_legacy_equations(
+                pseudo, at=""
+            )["artifact"]
+            equations_in_force = _workspace_equations.in_force_map(materialized)
 
-    def _matches(row: Dict[str, Any], field: str, actual: Any) -> bool:
-        expected = row.get(field)
-        return expected in {None, "", "ANY", "All"} or (
-            actual is not None and str(expected).strip().lower() == str(actual).strip().lower()
-        )
+    tables: Dict[str, List[Dict[str, Any]]] = {
+        "coi": list(executable.get("coi") or []),
+        "surrender": list(executable.get("surrender") or []),
+        "fees": list(executable.get("fees") or []),
+        "nar_factors": list(executable.get("nar_factors") or []),
+        "corridor": list(executable.get("corridor") or []),
+    }
 
-    def _select(rows: List[Dict[str, Any]], year: int, attained_age: int) -> Optional[Dict[str, Any]]:
-        candidates = [
-            row for row in rows
-            if (row.get("duration") in {None, year})
-            and (row.get("attained_age") in {None, attained_age})
-            and _matches(row, "sex", request.get("sex"))
-            and _matches(row, "risk_class", request.get("riskClass"))
-            and _matches(row, "tobacco_status", request.get("tobaccoStatus"))
-            and _matches(row, "issue_age", age_norm)
-            and _matches(row, "premium_mode", premium_mode_raw)
-        ]
-        if not candidates:
-            return None
-        candidates.sort(
-            key=lambda row: sum(
-                row.get(field) not in {None, "", "ANY", "All"}
-                for field in ("duration", "attained_age", "sex", "risk_class", "tobacco_status", "issue_age", "premium_mode")
-            ),
-            reverse=True,
-        )
-        return candidates[0]
+    def _citation(mechanic: str) -> Optional[Dict[str, Any]]:
+        return _workspace_equations.citation(equations_in_force.get(mechanic))
 
-    def _select_all(rows: List[Dict[str, Any]], year: int, attained_age: int) -> List[Dict[str, Any]]:
-        return [
-            row for row in rows
-            if (row.get("duration") in {None, year})
-            and (row.get("attained_age") in {None, attained_age})
-            and _matches(row, "sex", request.get("sex"))
-            and _matches(row, "risk_class", request.get("riskClass"))
-            and _matches(row, "tobacco_status", request.get("tobaccoStatus"))
-            and _matches(row, "issue_age", age_norm)
-            and _matches(row, "premium_mode", premium_mode_raw)
-        ]
+    # The NAR definition in force, when the approved equation is exactly
+    # one of the two canonical readings (reporting only: it decides
+    # whether the filed factor is reported as applied or not applied).
+    nar_definition_kind: Optional[str] = None
+    _nar_record = equations_in_force.get("nar_definition")
+    if _nar_record is not None:
+        if _nar_record.get("body") == _equations.nar_body("unadjusted"):
+            nar_definition_kind = "unadjusted"
+        elif _nar_record.get("body") == _equations.nar_body("factor_adjusted"):
+            nar_definition_kind = "factor_adjusted"
 
+    failures: Dict[str, Dict[int, str]] = {}
+
+    def _fail(mechanic: str, year: int, reason: str) -> None:
+        years = failures.setdefault(mechanic, {})
+        if year not in years:
+            years[year] = reason
+
+    def _evaluate(mechanic: str, values: Dict[str, Any]) -> float:
+        record = equations_in_force[mechanic]
+        return _equations.evaluate(record["body"], values, tables)
+
+    payment_interval = max(1, int(round(12.0 / freq)))
     rows: List[Dict[str, Any]] = []
     years: List[int] = []
     policy_value: float = 0.0
     cumulative_premium: float = 0.0
-    fallback_years: Dict[str, List[int]] = {
-        "coi": [], "surrender": [], "fees": [], "nar_factors": [], "corridor": [],
-    }
 
     for year in range(1, horizon_years + 1):
         attained_age = age_norm + year - 1
         opening_policy_value = policy_value
-
-        # Level modal premiums are placed on their scheduled monthly payment
-        # dates. Annual output is retained for the graph and ledger.
         premium_annual = annual_premium
         cumulative_premium += premium_annual
 
-        fee_rows = _select_all(list(executable.get("fees") or []), year, attained_age)
-        policy_fee = 0.0
+        def _values(**extra: Any) -> Dict[str, Any]:
+            values: Dict[str, Any] = {
+                "duration": year,
+                "month_in_year": 1,
+                "attained_age": attained_age,
+                "issue_age": age_norm,
+                "face_amount": face_amount,
+                "premium_due": 0.0,
+                "payment_due": 0.0,
+                "guaranteed_rate": guaranteed_rate,
+                "sex": request.get("sex"),
+                "risk_class": request.get("riskClass"),
+                "tobacco_status": request.get("tobaccoStatus"),
+                "premium_mode": premium_mode_raw,
+            }
+            values.update(extra)
+            return values
+
+        # Reporting selections (data addressing only — the year's table
+        # row for rate/factor display; the math runs on the equations).
+        coi_row_report = _equations.select_row(tables["coi"], _values())
+        nar_row_report = _equations.select_row(tables["nar_factors"], _values())
+        corridor_row_report = _equations.select_row(tables["corridor"], _values())
+
         premium_load = 0.0
-        if not fee_rows:
-            fallback_years["fees"].append(year)
-        coi_row = _select(list(executable.get("coi") or []), year, attained_age)
-        if not coi_row:
-            fallback_years["coi"].append(year)
-        nar_row = _select(list(executable.get("nar_factors") or []), year, attained_age)
-        corridor_row = _select(list(executable.get("corridor") or []), year, attained_age)
-        if not nar_row:
-            fallback_years["nar_factors"].append(year)
-        if not corridor_row:
-            fallback_years["corridor"].append(year)
-        nar_factor = float((nar_row or {}).get("factor") or 1.0)
-        # Phase 3: under the corrected "unadjusted" NAR definition the
-        # filed factor is not applied to the COI net amount at risk; the
-        # filed factor itself stays recorded on the applied-mechanics
-        # block so the derivation can show both.
-        effective_nar_factor = 1.0 if nar_definition == "unadjusted" else nar_factor
-        corridor_percentage = float((corridor_row or {}).get("percentage") or 1.0)
-        monthly_interest_rate = _rule_bank.monthly_crediting_rate(guaranteed_rate)
-        payment_interval = max(1, int(round(12.0 / freq)))
-        guaranteed_interest = 0.0
+        policy_fee = 0.0
         coi_charge = 0.0
-        death_benefit = face_amount
-        # Phase 1 (show the math): track exactly what the loop applied this
-        # year so the ledger can derive each number from the same record the
-        # arithmetic used — the explanation can never drift from the math.
-        fee_amounts: List[float] = [0.0] * len(fee_rows)
+        guaranteed_interest = 0.0
         coi_nar_min: Optional[float] = None
         coi_nar_max: Optional[float] = None
+
+        coi_timing = str(
+            (equations_in_force.get("coi_charge") or {}).get("timing") or "beginning"
+        )
+        if coi_timing not in _equations.COI_TIMINGS:
+            coi_timing = "beginning"
+
+        def _month_coi(value: float, month_values: Dict[str, Any]) -> Tuple[float, float]:
+            """(charge, NAR) at an in-month account value, by the equations.
+
+            Raises Unevaluable when any link in the chain (death
+            benefit -> NAR -> COI) has no approved equation or cannot
+            be evaluated; the caller records the failure and the month
+            contributes no COI.
+            """
+
+            if "death_benefit" not in equations_in_force:
+                raise _equations.Unevaluable(
+                    "no approved death benefit equation (the COI charge "
+                    "needs it to measure the net amount at risk)"
+                )
+            if "nar_definition" not in equations_in_force:
+                raise _equations.Unevaluable(
+                    "no approved net amount at risk equation"
+                )
+            death_benefit = _evaluate(
+                "death_benefit", {**month_values, "account_value": value}
+            )
+            nar = _evaluate(
+                "nar_definition",
+                {**month_values, "account_value": value, "death_benefit": death_benefit},
+            )
+            charge = _evaluate(
+                "coi_charge",
+                {
+                    **month_values,
+                    "account_value": value,
+                    "death_benefit": death_benefit,
+                    "nar": nar,
+                },
+            )
+            return charge, nar
+
+        def _interest(base: float, month_values: Dict[str, Any]) -> float:
+            if "crediting" not in equations_in_force:
+                return 0.0
+            try:
+                return _evaluate(
+                    "crediting", {**month_values, "account_value": base}
+                )
+            except _equations.Unevaluable as exc:
+                _fail("crediting", year, str(exc))
+                return 0.0
 
         for month in range(1, 13):
             payment_due = (month - 1) % payment_interval == 0
             gross_premium = modal_premium if payment_due else 0.0
-            month_premium_load = 0.0
-            for fee_index, fee_row in enumerate(fee_rows):
-                if fee_row.get("fee_unit") == "percent_premium":
-                    row_load = _rule_bank.premium_load_for_row(
-                        float(fee_row["amount"]), gross_premium
+            month_values = _values(
+                month_in_year=month,
+                premium_due=gross_premium,
+                payment_due=1.0 if payment_due else 0.0,
+            )
+
+            policy_value += gross_premium
+            if "premium_load" in equations_in_force:
+                try:
+                    month_load = _evaluate(
+                        "premium_load",
+                        {**month_values, "account_value": policy_value},
                     )
-                    month_premium_load += row_load
-                    fee_amounts[fee_index] += row_load
-            premium_load += month_premium_load
-            policy_value += gross_premium - month_premium_load
+                except _equations.Unevaluable as exc:
+                    _fail("premium_load", year, str(exc))
+                    month_load = 0.0
+                policy_value -= month_load
+                premium_load += month_load
 
             monthly_fee = 0.0
-            for fee_index, fee_row in enumerate(fee_rows):
-                # Phase 4: every fee unit dispatches through its banked
-                # switch (fees.unit.*) — no inline unit arithmetic.
-                row_fee = _rule_bank.monthly_fee_for_unit(
-                    fee_row["fee_unit"],
-                    float(fee_row["amount"]),
-                    face_amount=face_amount,
-                    payment_due=payment_due,
-                )
-                monthly_fee += row_fee
-                fee_amounts[fee_index] += row_fee
-            if not fee_rows:
-                monthly_fee = _rule_bank.fee_fallback_monthly(config.policy_fee_annual)
-
-            def _month_coi(value: float) -> Tuple[float, float]:
-                """Monthly COI measured at an in-month account value.
-
-                Returns (charge, COI net amount at risk).  Phase 4: the
-                NAR is computed by the banked NAR-definition switch in
-                force and the charge by the banked rate-unit switch for
-                the row's unit — an unbanked unit raises rather than
-                being improvised.  With no COI row in force, the charge
-                is the banked placeholder (coi.placeholder.flat_face).
-                """
-
-                month_db = max(face_amount, corridor_percentage * value)
-                nar = _rule_bank.coi_nar_for_definition(
-                    nar_definition, month_db, value, nar_factor
-                )
-                if coi_row:
-                    charge = _rule_bank.coi_charge_for_unit(
-                        coi_row["rate_unit"], float(coi_row["rate"]), nar
+            if "policy_fees" in equations_in_force:
+                try:
+                    monthly_fee = _evaluate(
+                        "policy_fees",
+                        {**month_values, "account_value": policy_value},
                     )
-                else:
-                    charge = _rule_bank.coi_placeholder_monthly_charge(
-                        face_amount, coi_rate
-                    )
-                return charge, nar
+                except _equations.Unevaluable as exc:
+                    _fail("policy_fees", year, str(exc))
+                    monthly_fee = 0.0
+            policy_fee += monthly_fee
 
             def _track_nar(nar: float) -> None:
                 nonlocal coi_nar_min, coi_nar_max
                 coi_nar_min = nar if coi_nar_min is None else min(coi_nar_min, nar)
                 coi_nar_max = nar if coi_nar_max is None else max(coi_nar_max, nar)
 
-            # COI deduction timing (Phase 3 correction switch; Phase 4:
-            # the three sequences are banked timing_step switches —
-            # coi.timing.beginning / .middle / .end — and the loop
-            # dispatches to the bank.  The default "beginning" is
-            # exactly the historical sequence.  Fees keep their
-            # position in every variant — only the COI deduction moves.)
-            policy_fee += monthly_fee
-            policy_value, month_interest, month_coi = _rule_bank.coi_step_for_timing(
-                coi_timing,
-                policy_value,
-                monthly_fee,
-                monthly_interest_rate,
-                _month_coi,
-                _track_nar,
-            )
-            guaranteed_interest += month_interest
-            coi_charge += month_coi
+            def _coi_or_zero(value: float) -> Tuple[float, Optional[float]]:
+                try:
+                    charge, nar = _month_coi(value, month_values)
+                    return charge, nar
+                except _equations.Unevaluable as exc:
+                    _fail("coi_charge", year, str(exc))
+                    return 0.0, None
 
-        # Surrender charge. A loaded schedule is applied exactly on the
-        # basis it states (percent of account value, percent of face, per
-        # $1,000 of face, or fixed). The placeholder used when no schedule
-        # is in force is a linear decline of max_surrender_pct of the
-        # *account value* down to 0 over the surrender period — Eddy
-        # (Aug 7, 2026): a surrender charge is a percentage of the ending
-        # value, not a flat amount and not a percentage of face.
-        surrender_rows = list(executable.get("surrender") or [])
-        surrender_row = _select(surrender_rows, year, attained_age)
-        surrender_applied: Dict[str, Any] = {
-            "basis": "expired",
-            "chargeUnit": None,
-            "percent": None,
-            "perThousand": None,
-            "base": None,
-            "baseAmount": None,
-            "tableLoaded": bool(surrender_rows),
-            "source": None,
-        }
-        if surrender_row:
-            charge = float(surrender_row["charge"])
-            charge_unit = surrender_row["charge_unit"]
-            surrender_applied["basis"] = "table"
-            surrender_applied["chargeUnit"] = charge_unit
-            # Phase 4: the charge itself is computed by the banked
-            # basis switch for the row's unit (surrender.basis.*).
-            surrender_charge = _rule_bank.surrender_charge_for_unit(
-                charge_unit, charge, policy_value, face_amount
-            )
-            if charge_unit == "percent_account_value":
-                surrender_applied["percent"] = charge
-                surrender_applied["base"] = "account_value"
-                surrender_applied["baseAmount"] = policy_value
-            elif charge_unit == "percent_face":
-                surrender_applied["percent"] = charge
-                surrender_applied["base"] = "face_amount"
-                surrender_applied["baseAmount"] = face_amount
-            elif charge_unit == "per_1000_face":
-                surrender_applied["perThousand"] = charge
-                surrender_applied["base"] = "face_amount"
-                surrender_applied["baseAmount"] = face_amount
+            # Within-month sequencing (universal skeleton): fees keep
+            # their position in every arrangement; only the COI
+            # deduction moves, per the approved coi_charge equation's
+            # timing attribute.  Charges cannot make a balance negative.
+            if "coi_charge" in equations_in_force:
+                if coi_timing == "middle":
+                    first, first_nar = _coi_or_zero(policy_value)
+                    if first_nar is not None:
+                        _track_nar(first_nar)
+                    first_half = first / 2.0
+                    policy_value = max(policy_value - first_half - monthly_fee, 0.0)
+                    month_interest = _interest(policy_value, month_values)
+                    policy_value += month_interest
+                    second, second_nar = _coi_or_zero(policy_value)
+                    if second_nar is not None:
+                        _track_nar(second_nar)
+                    second_half = second / 2.0
+                    policy_value = max(policy_value - second_half, 0.0)
+                    month_coi = first_half + second_half
+                elif coi_timing == "end":
+                    policy_value = max(policy_value - monthly_fee, 0.0)
+                    month_interest = _interest(policy_value, month_values)
+                    policy_value += month_interest
+                    month_coi, nar = _coi_or_zero(policy_value)
+                    if nar is not None:
+                        _track_nar(nar)
+                    policy_value = max(policy_value - month_coi, 0.0)
+                else:  # beginning
+                    month_coi, nar = _coi_or_zero(policy_value)
+                    if nar is not None:
+                        _track_nar(nar)
+                    policy_value = max(policy_value - month_coi - monthly_fee, 0.0)
+                    month_interest = _interest(policy_value, month_values)
+                    policy_value += month_interest
+                coi_charge += month_coi
+                guaranteed_interest += month_interest
             else:
-                surrender_applied["base"] = "fixed"
-                surrender_applied["baseAmount"] = charge
-        elif surrender_rows:
-            compatible = [
-                row for row in surrender_rows
-                if _matches(row, "sex", request.get("sex"))
-                and _matches(row, "issue_age", age_norm)
-            ]
-            last_duration = max(
-                (int(row["duration"]) for row in compatible if row.get("duration") is not None),
-                default=0,
-            )
-            if compatible and year > last_duration:
+                policy_value = max(policy_value - monthly_fee, 0.0)
+                month_interest = _interest(policy_value, month_values)
+                policy_value += month_interest
+                guaranteed_interest += month_interest
+
+        # Year-end mechanics: surrender charge, death benefit, NAR —
+        # each by its approved equation, or not at all.
+        ending_values = _values(account_value=policy_value)
+        surrender_charge = 0.0
+        if "surrender_charge" in equations_in_force:
+            try:
+                surrender_charge = _evaluate("surrender_charge", ending_values)
+            except _equations.Unevaluable as exc:
+                _fail("surrender_charge", year, str(exc))
                 surrender_charge = 0.0
-            else:
-                fallback_years["surrender"].append(year)
-                surrender_charge, surrender_pct = _rule_bank.surrender_placeholder_charge(
-                    year, policy_value,
-                    period_years=surrender_period_years, max_pct=max_surrender_pct,
+
+        death_benefit: Optional[float] = None
+        if "death_benefit" in equations_in_force:
+            try:
+                death_benefit = _evaluate("death_benefit", ending_values)
+            except _equations.Unevaluable as exc:
+                _fail("death_benefit", year, str(exc))
+        # The COI-measurement NAR, by the approved nar_definition
+        # equation (this is the NAR the ledger cites).
+        coi_net_amount_at_risk: Optional[float] = None
+        if death_benefit is not None and "nar_definition" in equations_in_force:
+            try:
+                coi_net_amount_at_risk = _evaluate(
+                    "nar_definition",
+                    {**ending_values, "death_benefit": death_benefit},
                 )
-                if surrender_pct is not None:
-                    surrender_applied["basis"] = "placeholder"
-                    surrender_applied["percent"] = surrender_pct
-                    surrender_applied["base"] = "account_value"
-                    surrender_applied["baseAmount"] = policy_value
-        elif year <= surrender_period_years:
-            surrender_charge, surrender_pct = _rule_bank.surrender_placeholder_charge(
-                year, policy_value,
-                period_years=surrender_period_years, max_pct=max_surrender_pct,
-            )
-            surrender_applied["basis"] = "placeholder"
-            surrender_applied["percent"] = surrender_pct
-            surrender_applied["base"] = "account_value"
-            surrender_applied["baseAmount"] = policy_value
-        else:
-            surrender_charge = 0.0
-        if not surrender_row and not surrender_rows:
-            fallback_years["surrender"].append(year)
+            except _equations.Unevaluable as exc:
+                _fail("nar_definition", year, str(exc))
+        # The reported year-end NAR is the plain difference between the
+        # death benefit and the account value.
+        net_amount_at_risk: Optional[float] = (
+            death_benefit - policy_value if death_benefit is not None else None
+        )
 
         cash_value = policy_value
         surrender_value = max(cash_value - surrender_charge, 0.0)
-        death_benefit = max(face_amount, corridor_percentage * cash_value)
-        net_amount_at_risk = max(death_benefit - cash_value, 0.0)
-        monthly_expense_rows = [row for row in fee_rows if row.get("component") == "monthly_expense"]
 
-        def source_summary(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-            if not row:
-                return None
-            provenance = row.get("provenance") or {}
-            summary: Dict[str, Any] = {
-                "filename": provenance.get("filename"),
-                "page": provenance.get("page"),
-                "tableHeading": provenance.get("tableHeading"),
-                "valueBasis": provenance.get("valueBasis"),
-                "sourceType": provenance.get("sourceType"),
+        def _mechanic_status(mechanic: str) -> Dict[str, Any]:
+            return {
+                "equation": _citation(mechanic),
+                "missing": mechanic not in equations_in_force,
+                "failed": year in failures.get(mechanic, {}),
+                "failureReason": failures.get(mechanic, {}).get(year),
             }
-            # Phase 3: correction provenance rides along so the ledger
-            # can cite the correction (who / when / the user's words)
-            # on every line the corrected schedule produced.
-            if provenance.get("sourceType") == "correction":
-                summary["correctedBy"] = provenance.get("correctedBy")
-                summary["correctedAt"] = provenance.get("correctedAt")
-                summary["correctionText"] = provenance.get("correctionText")
-                summary["confirmBack"] = provenance.get("confirmBack")
-            # Phase 4: a row materialised from a banded schedule names
-            # its band, so the ledger derivation can name it too.
-            if provenance.get("band"):
-                summary["band"] = provenance.get("band")
-            return summary
 
-        surrender_applied["source"] = source_summary(surrender_row)
-        if surrender_applied.get("basis") == "table":
-            surrender_applied["basisSwitch"] = _rule_bank.surrender_switch_id(
-                str(surrender_applied.get("chargeUnit") or "")
-            )
-            surrender_applied["band"] = (surrender_applied.get("source") or {}).get("band")
-        elif surrender_applied.get("basis") == "placeholder":
-            surrender_applied["basisSwitch"] = "surrender.placeholder.linear_account_value"
         applied_mechanics: Dict[str, Any] = {
             "coi": {
-                "basis": "table" if coi_row else "placeholder",
-                "rate": float(coi_row["rate"]) if coi_row else None,
-                "rateUnit": coi_row.get("rate_unit") if coi_row else None,
-                # The factor actually applied to the COI net amount at
-                # risk (1.0 under the corrected unadjusted definition);
-                # the filed factor in force stays beside it.
-                "narFactor": effective_nar_factor,
-                "narFactorFiled": nar_factor,
-                "narDefinition": nar_definition,
-                "narDefinitionCorrection": nar_definition_correction,
-                "timing": coi_timing,
-                "timingCorrection": coi_timing_correction,
+                **_mechanic_status("coi_charge"),
+                "timing": coi_timing if "coi_charge" in equations_in_force else None,
                 "monthlyNarMin": coi_nar_min,
                 "monthlyNarMax": coi_nar_max,
-                "flatRate": coi_rate,
-                "source": source_summary(coi_row),
-                # Phase 4: the banked switches this year's COI ran
-                # through, recorded so the derivation (and any audit)
-                # can name them.
-                "rateSwitch": (
-                    _rule_bank.coi_rate_switch_id(str(coi_row.get("rate_unit")))
-                    if coi_row else "coi.placeholder.flat_face"
+                "rate": (
+                    float(coi_row_report["rate"])
+                    if coi_row_report and coi_row_report.get("rate") is not None
+                    else None
                 ),
-                "timingSwitch": _rule_bank.coi_timing_switch_id(coi_timing),
-                "narSwitch": _rule_bank.nar_switch_id(nar_definition),
-                "band": (source_summary(coi_row) or {}).get("band") if coi_row else None,
+                "rateUnit": coi_row_report.get("rate_unit") if coi_row_report else None,
             },
-            "fees": [
-                {
-                    "component": fee_row.get("component") or "policy_fee",
-                    "feeUnit": fee_row.get("fee_unit"),
-                    "amount": fee_amounts[index],
-                    "rate": float(fee_row["amount"]) if fee_row.get("fee_unit") == "percent_premium" else None,
-                    "flowsTo": "premium_load" if fee_row.get("fee_unit") == "percent_premium" else "policy_fee",
-                    "basis": "table",
-                    "source": source_summary(fee_row),
-                    "unitSwitch": _rule_bank.fee_switch_id(str(fee_row.get("fee_unit"))),
-                }
-                for index, fee_row in enumerate(fee_rows)
-            ] or [
-                {
-                    "component": "policy_fee",
-                    "feeUnit": "annual_fixed",
-                    "amount": policy_fee,
-                    "rate": None,
-                    "flowsTo": "policy_fee",
-                    "basis": "fallback",
-                    "source": None,
-                    "unitSwitch": "fees.fallback.configured_annual",
-                }
-            ],
-            "surrender": surrender_applied,
+            "fees": _mechanic_status("policy_fees"),
+            "premiumLoad": _mechanic_status("premium_load"),
+            "surrender": {
+                **_mechanic_status("surrender_charge"),
+                "charge": surrender_charge,
+                "rowApplied": (
+                    _equations.select_row(tables["surrender"], _values())
+                    is not None
+                ),
+            },
             "crediting": {
+                **_mechanic_status("crediting"),
                 "guaranteedRate": guaranteed_rate,
-                "switch": "crediting.guaranteed_annual",
             },
             "nar": {
-                "factor": effective_nar_factor,
-                "filedFactor": nar_factor,
-                "definition": nar_definition,
-                "definitionCorrection": nar_definition_correction,
-                "corridorPercentage": corridor_percentage,
-                "corridorBasis": "table" if corridor_row else "default",
+                "equation": _citation("nar_definition"),
+                "deathBenefitEquation": _citation("death_benefit"),
+                "definition": nar_definition_kind,
+                "missing": (
+                    "nar_definition" not in equations_in_force
+                    or "death_benefit" not in equations_in_force
+                ),
+                "failed": (
+                    year in failures.get("nar_definition", {})
+                    or year in failures.get("death_benefit", {})
+                ),
+                "failureReason": (
+                    failures.get("nar_definition", {}).get(year)
+                    or failures.get("death_benefit", {}).get(year)
+                ),
             },
         }
 
@@ -11683,9 +11940,6 @@ def _run_ul_projection(
                 "premiumMode": premium_mode_raw,
                 "modalPremium": modal_premium,
                 "annualPremium": annual_premium,
-                # Backwards-compatible fields: interpret "premium" and
-                # "cumulativePremium" as *annual* figures for this
-                # annualised projection.
                 "premium": premium_annual,
                 "cumulativePremium": cumulative_premium,
                 "openingPolicyValue": opening_policy_value,
@@ -11700,17 +11954,34 @@ def _run_ul_projection(
                 "surrenderValue": surrender_value,
                 "deathBenefit": death_benefit,
                 "netAmountAtRisk": net_amount_at_risk,
-                "coiNetAmountAtRisk": max(death_benefit / effective_nar_factor - cash_value, 0.0),
-                "narFactor": effective_nar_factor,
-                "minimumDeathBenefitPercentage": corridor_percentage,
+                "coiNetAmountAtRisk": coi_net_amount_at_risk,
+                "narFactor": (
+                    1.0
+                    if nar_definition_kind == "unadjusted"
+                    else float(nar_row_report["factor"])
+                    if nar_row_report and nar_row_report.get("factor") is not None
+                    else None
+                ),
+                "filedNarFactor": (
+                    float(nar_row_report["factor"])
+                    if nar_row_report and nar_row_report.get("factor") is not None
+                    else None
+                ),
+                "minimumDeathBenefitPercentage": (
+                    float(corridor_row_report["percentage"])
+                    if corridor_row_report and corridor_row_report.get("percentage") is not None
+                    else None
+                ),
                 "faceAmount": face_amount,
                 "appliedClassification": {
                     "sex": request.get("sex"),
                     "riskClass": request.get("riskClass"),
                     "tobaccoStatus": request.get("tobaccoStatus"),
                 },
-                "coiSource": source_summary(coi_row),
-                "monthlyExpenseSources": [source_summary(row) for row in monthly_expense_rows],
+                "coiSource": (
+                    _workspace_equations.citation(equations_in_force.get("coi_charge"))
+                ),
+                "monthlyExpenseSources": [],
                 "appliedMechanics": applied_mechanics,
                 "status": None,
             }
@@ -11754,28 +12025,67 @@ def _run_ul_projection(
         final_surrender = last.get("surrenderValue") if isinstance(last.get("surrenderValue"), (int, float)) else None
         final_nar = last.get("netAmountAtRisk") if isinstance(last.get("netAmountAtRisk"), (int, float)) else None
 
+    # Incompleteness (the doctrine's absence statement): a mechanic
+    # with no approved equation, or one whose equation failed in any
+    # year, did not calculate — the run says so, naming each one.
+    missing_mechanics: List[Dict[str, Any]] = []
+    mechanics_execution: Dict[str, Any] = {}
+    for mechanic in _equations.MECHANICS:
+        failed_years = sorted(failures.get(mechanic, {}))
+        in_force = mechanic in equations_in_force
+        mechanics_execution[mechanic] = {
+            "applied": in_force,
+            "equationId": (
+                (equations_in_force.get(mechanic) or {}).get("id") if in_force else None
+            ),
+            "missing": not in_force,
+            "failedYears": failed_years,
+            "failureReasons": {
+                str(y): failures[mechanic][y] for y in failed_years
+            },
+        }
+        if not in_force:
+            missing_mechanics.append({
+                "mechanic": mechanic,
+                "label": _equations.MECHANIC_LABELS[mechanic],
+                "reason": "no_approved_equation",
+                "detail": (
+                    f"No approved {_equations.MECHANIC_LABELS[mechanic].lower()} "
+                    "equation is in force, so it is not calculated."
+                ),
+            })
+        elif failed_years:
+            missing_mechanics.append({
+                "mechanic": mechanic,
+                "label": _equations.MECHANIC_LABELS[mechanic],
+                "reason": "evaluation_failed",
+                "detail": (
+                    f"The approved {_equations.MECHANIC_LABELS[mechanic].lower()} "
+                    f"equation could not be evaluated in year "
+                    f"{failed_years[0]}: {failures[mechanic][failed_years[0]]}"
+                ),
+            })
+
     reconciliation = _reconcile_ul_projection_rows(rows)
     projection = {
         "years": years,
         "rows": rows,
         "metrics": {
-            # Rough summary hooks; these can be refined later.
             "maximumYear": horizon_years,
-            # Draft Promise UL-style metrics.
             "breakEvenYearCash": break_even_cash,
             "breakEvenYearSurrender": break_even_surrender,
             "finalCashValue": final_cash,
             "finalSurrenderValue": final_surrender,
             "finalNetAmountAtRisk": final_nar,
         },
-        "mechanicsExecution": {
-            mechanic: {
-                "scheduleLoaded": bool(executable.get(mechanic)),
-                "fallbackYears": years,
-                "fullyApplied": bool(executable.get(mechanic)) and not years,
-            }
-            for mechanic, years in fallback_years.items()
-        },
+        "mechanicsExecution": mechanics_execution,
+        "incomplete": bool(missing_mechanics),
+        "missingMechanics": missing_mechanics,
+        "appliedEquations": [
+            _workspace_equations.citation(equations_in_force[mechanic])
+            for mechanic in _equations.MECHANICS
+            if mechanic in equations_in_force
+        ],
         "reconciliation": reconciliation,
     }
 
@@ -11805,18 +12115,21 @@ def build_ul_illustration_for_product(product_code: str, request: Dict[str, Any]
 
     cfg = load_ul_runtime_config(product_code)
     cfg.executable_mechanics = request.get("_workspaceExecutableMechanics") or None
+    # Phase 7: a scenario-entered policy fee is an input on display
+    # only.  With the configured-fee fallback deleted, no fee reaches
+    # the math except through an approved policy_fees equation.
     scenario_policy_fee = request.get("policyFeeAnnual")
-    if scenario_policy_fee is not None and not (cfg.executable_mechanics or {}).get("fees"):
-        cfg.policy_fee_annual = float(scenario_policy_fee)
-        if cfg.fees is not None:
-            cfg.fees.policy_fee_annual = [float(scenario_policy_fee) for _ in range(30)]
+    if scenario_policy_fee is not None:
         cfg.assumption_provenance = [
             item for item in (cfg.assumption_provenance or [])
             if "policy fee" not in str(item.get("name") or "").lower()
         ] + [{
             "name": "Policy fee",
             "value": float(scenario_policy_fee),
-            "source": "User-entered scenario assumption",
+            "source": (
+                "User-entered scenario assumption — not applied: fees are "
+                "calculated only by an approved policy fees equation"
+            ),
         }]
 
     horizon_years = 30
@@ -11828,9 +12141,7 @@ def build_ul_illustration_for_product(product_code: str, request: Dict[str, Any]
     projection["ledger"] = build_projection_ledger(projection)
     projection["rateTables"] = build_rate_tables_in_force(
         cfg.executable_mechanics,
-        coi_rate_flat=cfg.coi_rate_flat,
-        max_surrender_pct=cfg.max_surrender_pct,
-        surrender_period_years=cfg.surrender_period_years,
+        equations=(cfg.executable_mechanics or {}).get("_equations") or {},
     )
 
     # v0.1 Mechanics Validation Surface (UL): build a lightweight
@@ -11855,54 +12166,22 @@ def build_ul_illustration_for_product(product_code: str, request: Dict[str, Any]
                     "provenance": [row.get("provenance") for row in rows],
                 }
                 for mechanic, rows in cfg.executable_mechanics.items()
-                if rows
+                if mechanic in {"coi", "surrender", "fees", "nar_factors", "corridor"} and rows
             ]
     except Exception:
         # Explanation is best-effort only; failures must not block the
         # core projection path.
         mechanics_explanation = None
 
-    executable = cfg.executable_mechanics or {}
-    execution = projection.get("mechanicsExecution") or {}
+    # Phase 7: the warnings are the run's absence statements — one per
+    # mechanic that did not calculate, naming the resolution path.
+    # There are no placeholder warnings because there is no placeholder
+    # math to warn about.
     warnings: List[str] = []
-    if not executable.get("coi"):
+    for missing in projection.get("missingMechanics") or []:
         warnings.append(
-            "COI rates are placeholder (flat 40 bps of face amount) because no complete executable COI table is loaded."
-        )
-    elif (execution.get("coi") or {}).get("fallbackYears"):
-        warnings.append(
-            "The loaded COI table did not match every scenario duration/age/class selector; "
-            "placeholder COI was retained for unmatched years."
-        )
-    if not executable.get("surrender"):
-        warnings.append(
-            "Surrender charges use a simplified placeholder schedule (a percentage of account value declining over 19 years) because no complete executable schedule is loaded."
-        )
-    elif (execution.get("surrender") or {}).get("fallbackYears"):
-        warnings.append(
-            "The loaded surrender schedule did not match every scenario selector; "
-            "the simplified surrender placeholder was retained for unmatched years."
-        )
-    if not executable.get("fees") and scenario_policy_fee is None:
-        warnings.append(
-            "No policy or admin fees are applied because no complete evidenced fee schedule is loaded."
-        )
-    elif not executable.get("fees"):
-        warnings.append(
-            "Policy/admin fees use a user-entered scenario assumption because no complete evidenced fee schedule is loaded."
-        )
-    if not executable.get("nar_factors"):
-        warnings.append(
-            "COI net amount at risk uses factor 1.0 because no reviewed filed NAR factor is loaded."
-        )
-    if not executable.get("corridor"):
-        warnings.append(
-            "Death benefit remains at face amount because no reviewed CVAT minimum death-benefit table is loaded."
-        )
-    elif (execution.get("fees") or {}).get("fallbackYears"):
-        warnings.append(
-            "The loaded fee schedule did not cover every scenario duration/mode; "
-            "the missing-fee fallback was retained for unmatched years."
+            f"{missing.get('detail')} To resolve: harvest the filing's stated "
+            "calculation, approve a harvested equation, or enter the equation."
         )
 
     # Append any non-fatal config validation warnings so that future
@@ -11938,6 +12217,13 @@ def build_ul_illustration_for_product(product_code: str, request: Dict[str, Any]
             if label and label not in sources:
                 sources.append(label)
         return "; ".join(sources) or "Validated workspace table"
+
+    executable = cfg.executable_mechanics or {}
+    applied_equations = {
+        str(citation.get("mechanic")): citation
+        for citation in projection.get("appliedEquations") or []
+        if isinstance(citation, dict)
+    }
 
     projection_inputs = [
         {
@@ -12020,37 +12306,46 @@ def build_ul_illustration_for_product(product_code: str, request: Dict[str, Any]
         {
             "id": "coi_rate",
             "label": "COI schedule",
-            "value": f"{len(executable.get('coi') or [])} executable rows" if executable.get("coi") else cfg.coi_rate_flat,
-            "unit": None if executable.get("coi") else "rate",
+            "value": f"{len(executable.get('coi') or [])} executable rows" if executable.get("coi") else None,
+            "unit": None,
             "status": (
                 "synthetic_assumption"
                 if any((row.get("provenance") or {}).get("sourceType") in {"ai_synthetic", "deterministic_fallback"} for row in (executable.get("coi") or []))
-                else "evidenced" if executable.get("coi") else "placeholder"
+                else "evidenced" if (executable.get("coi") or applied_equations.get("coi_charge")) else "missing"
             ),
-            "source": _mechanics_source(executable.get("coi")) if executable.get("coi") else "Flat rate applied to face amount; filed COI table not loaded",
+            "source": _mechanics_source(executable.get("coi")) if executable.get("coi") else (
+                "Approved COI charge equation in force"
+                if applied_equations.get("coi_charge")
+                else "No approved COI charge equation is in force; no COI charge is calculated"
+            ),
         },
         {
             "id": "policy_fee",
             "label": "Annual policy/admin fee",
-            "value": f"{len(executable.get('fees') or [])} executable rows" if executable.get("fees") else cfg.policy_fee_annual,
+            "value": f"{len(executable.get('fees') or [])} executable rows" if executable.get("fees") else scenario_policy_fee,
             "unit": "USD",
-            "status": "evidenced" if executable.get("fees") else ("scenario_assumption" if scenario_policy_fee is not None else "missing"),
+            "status": "evidenced" if (executable.get("fees") or applied_equations.get("policy_fees")) else ("scenario_assumption" if scenario_policy_fee is not None else "missing"),
             "source": _mechanics_source(executable.get("fees")) if executable.get("fees") else (
-                "User-entered scenario assumption; no evidenced fee schedule"
+                "User-entered scenario assumption — not applied: fees are calculated "
+                "only by an approved policy fees equation"
                 if scenario_policy_fee is not None
-                else "No evidenced fee schedule; projection requires an explicit assumption"
+                else "No approved policy fees equation is in force; no policy or admin fees are calculated"
             ),
         },
         {
             "id": "surrender_schedule",
             "label": "Surrender charge schedule",
-            "value": f"{len(executable.get('surrender') or [])} executable rows" if executable.get("surrender") else f"{cfg.max_surrender_pct:.2%} of account value declining over {cfg.surrender_period_years} years",
+            "value": f"{len(executable.get('surrender') or [])} executable rows" if executable.get("surrender") else None,
             "status": (
                 "synthetic_assumption"
                 if any((row.get("provenance") or {}).get("sourceType") in {"ai_synthetic", "deterministic_fallback"} for row in (executable.get("surrender") or []))
-                else "evidenced" if executable.get("surrender") else "placeholder"
+                else "evidenced" if (executable.get("surrender") or applied_equations.get("surrender_charge")) else "missing"
             ),
-            "source": _mechanics_source(executable.get("surrender")) if executable.get("surrender") else "Simplified runtime schedule; filed schedule not loaded",
+            "source": _mechanics_source(executable.get("surrender")) if executable.get("surrender") else (
+                "Approved surrender charge equation in force"
+                if applied_equations.get("surrender_charge")
+                else "No approved surrender charge equation is in force; no surrender charge is calculated"
+            ),
         },
         {
             "id": "projection_horizon",
@@ -12070,9 +12365,13 @@ def build_ul_illustration_for_product(product_code: str, request: Dict[str, Any]
         {
             "id": "charge_timing",
             "label": "Charge timing",
-            "value": "End of policy year",
-            "status": "configured",
-            "source": "COI and policy fees are deducted after interest and do not reduce that year's interest-crediting base",
+            "value": (
+                f"COI deducted at the {(applied_equations.get('coi_charge') or {}).get('timing') or 'beginning'} of each month"
+                if applied_equations.get("coi_charge")
+                else "No COI charge equation in force"
+            ),
+            "status": "configured" if applied_equations.get("coi_charge") else "missing",
+            "source": "The timing attribute of the approved COI charge equation",
         },
     ]
 

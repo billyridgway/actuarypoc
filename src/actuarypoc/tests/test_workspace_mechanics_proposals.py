@@ -1,11 +1,13 @@
-"""Phase 4 (extraction proposals) — proposal generation, evidence,
+"""Extraction proposals — proposal generation, evidence,
 confirm-gating, and the second-product onboarding acceptance.
 
 Proposals are deterministic signals from the filing (extracted table
-candidates + prose statements in the Phase 0 slices), each carrying
-page evidence and a Phase 3-style confirm-back.  Nothing applies
+candidates + stated calculations found by equation harvesting), each
+carrying page evidence and a confirm-back.  Nothing applies
 unconfirmed; confirming applies through the same paths as the manual
-action (filed acceptance / correction), with proposal provenance.
+action (filed acceptance / Phase 7 equation approval), with proposal
+provenance.  (Phase 4's switch-setting proposals were re-expressed
+as equation proposals by Phase 7; the rule bank is retired.)
 """
 
 from __future__ import annotations
@@ -126,14 +128,23 @@ def test_filed_proposal_skipped_when_slot_already_corrected():
 def test_timing_proposal_with_page_evidence():
     # The timing phrase sits after char 400, which page_offsets place
     # on page 4 — the evidence must name page 4, not the slice start.
+    # (A COI table is in force: a timing statement attaches to its
+    # equation; with no COI body anywhere it is unmapped, not a
+    # proposal.)
     filler = "General provisions and definitions apply throughout. " * 9
     text = filler + TIMING_TEXT
     slice_ = _slice(text, page=3, page_offsets=[[0, 3], [400, 4]])
-    found = proposals.generate_proposals(_empty_artifact(), [slice_])
-    timing = [p for p in found if p["variant"] == "coi_timing"]
+    artifact = _empty_artifact()
+    artifact["usable"]["coi"] = [
+        {"duration": 1, "sex": None, "risk_class": None, "tobacco_status": None,
+         "rate": 0.19, "rate_unit": "per_1000_monthly",
+         "provenance": {"filename": "meridian-ul.pdf", "sourceType": "filed_pdf"}}
+    ]
+    found = proposals.generate_proposals(artifact, [slice_])
+    timing = [p for p in found if p["kind"] == "equation" and p["equationMechanic"] == "coi_charge"]
     assert len(timing) == 1
-    assert timing[0]["params"] == {"timing": "end"}
-    assert timing[0]["switch"] == "coi.timing.end"
+    assert timing[0]["candidate"]["timing"] == "end"
+    assert "end of each month" in timing[0]["rendering"]
     assert timing[0]["evidence"]["page"] == 4
     assert "arrears" in timing[0]["evidence"]["snippet"]
 
@@ -150,7 +161,9 @@ def test_nar_proposal_requires_a_factor_in_force():
     ]
     found = proposals.generate_proposals(artifact, slices)
     assert len(found) == 1
-    assert found[0]["params"] == {"definition": "unadjusted"}
+    assert found[0]["kind"] == "equation"
+    assert found[0]["equationMechanic"] == "nar_definition"
+    assert "death benefit − the account value" in found[0]["rendering"]
     assert found[0]["evidence"]["page"] == 5
 
 
@@ -162,13 +175,19 @@ def test_surrender_proposal_needs_both_percent_and_grading():
     full = _slice(SURRENDER_TEXT, page=6)
     found = proposals.generate_proposals(_empty_artifact(), [full])
     assert len(found) == 1
-    assert found[0]["params"] == {
-        "basis": "percent_account_value", "percent": 0.09, "gradingYears": 12,
-    }
+    assert found[0]["kind"] == "equation"
+    assert found[0]["equationMechanic"] == "surrender_charge"
+    assert "account value" in found[0]["rendering"]
+    assert "9" in str(found[0]["candidate"]["body"]) or found[0]["candidate"]["body"]
 
 
 def test_proposals_are_deterministic():
     artifact = _empty_artifact()
+    artifact["usable"]["coi"] = [
+        {"duration": 1, "sex": None, "risk_class": None, "tobacco_status": None,
+         "rate": 0.19, "rate_unit": "per_1000_monthly",
+         "provenance": {"filename": "meridian-ul.pdf", "sourceType": "filed_pdf"}}
+    ]
     slices = [_slice(TIMING_TEXT), _slice(SURRENDER_TEXT)]
     first = proposals.generate_proposals(artifact, slices)
     second = proposals.generate_proposals(artifact, slices)
@@ -181,21 +200,37 @@ def test_proposals_are_deterministic():
 # ---------------------------------------------------------------------------
 
 
-def test_apply_switch_proposal_stamps_proposal_provenance():
+def test_apply_equation_proposal_stamps_proposal_provenance():
     artifact = _empty_artifact()
+    artifact["usable"]["coi"] = [
+        {"duration": 1, "sex": None, "risk_class": None, "tobacco_status": None,
+         "rate": 0.19, "rate_unit": "per_1000_monthly",
+         "provenance": {"filename": "meridian-ul.pdf", "sourceType": "filed_pdf"}}
+    ]
     found = proposals.generate_proposals(artifact, [_slice(TIMING_TEXT, page=7)])
+    assert len(found) == 1
     outcome = proposals.apply_proposal(
         artifact, found[0], workspace_id="ws-1", who="eddy", at="2026-10-25T00:00:00Z"
     )
-    record = outcome["correction"]
-    assert record["origin"] == "extraction_proposal"
-    assert record["proposalEvidence"]["page"] == 7
-    assert outcome["artifact"]["corrections"]["coi"]["origin"] == "extraction_proposal"
-    assert outcome["change"]["kind"] == "proposal_correction"
+    record = outcome["equation"]
+    assert record["state"] == "approved"
+    assert record["approval"]["by"] == "eddy"
+    assert record["timing"] == "end"
+    assert record["source"]["proposalId"] == found[0]["id"]
+    assert record["source"]["proposalEvidence"]["page"] == 7
+    assert outcome["change"]["kind"] == "proposal_equation"
+    from actuarypoc.extract import workspace_equations as ws_equations
+    in_force = ws_equations.in_force(outcome["artifact"], "coi_charge")
+    assert in_force["timing"] == "end"
 
 
 def test_dismissal_persists_and_blocks_regeneration():
     artifact = _empty_artifact()
+    artifact["usable"]["coi"] = [
+        {"duration": 1, "sex": None, "risk_class": None, "tobacco_status": None,
+         "rate": 0.19, "rate_unit": "per_1000_monthly",
+         "provenance": {"filename": "meridian-ul.pdf", "sourceType": "filed_pdf"}}
+    ]
     slices = [_slice(TIMING_TEXT)]
     found = proposals.generate_proposals(artifact, slices)
     outcome = proposals.dismiss_proposal(
@@ -293,10 +328,12 @@ def test_proposals_over_http_confirm_gated(store, monkeypatch):
     assert {p["candidateId"] for p in found} == {"cand-coi-b", "cand-sur-b"}
     coi_proposal = next(p for p in found if p["candidateId"] == "cand-coi-b")
 
-    # The panel payload carries the proposals and the bank catalog.
+    # The panel payload carries the proposals and the equation state
+    # (Phase 7: no rule bank is served anymore).
     panel = client.get(f"/api/workspaces/{workspace_id}/mechanics-panel").json()
     assert len(panel["proposals"]) == 2
-    assert any(s["id"] == "coi.timing.end" for s in panel["ruleBank"])
+    assert "ruleBank" not in panel
+    assert "equations" in panel
 
     # Unconfirmed: refused, with the confirm-back attached, nothing applied.
     refused = client.post(
@@ -317,6 +354,9 @@ def test_proposals_over_http_confirm_gated(store, monkeypatch):
     assert applied.json()["applied"] is True
     artifact = workspace_store.load_workspace_executable_mechanics(workspace_id)
     assert artifact["usable"]["coi"][0]["rate"] == pytest.approx(0.19)
+    # Phase 7: accepting the table also put its equation in force.
+    from actuarypoc.extract import workspace_equations as ws_equations
+    assert ws_equations.in_force(artifact, "coi_charge") is not None
 
     # Dismiss the surrender proposal; it stays gone.
     surrender_proposal = next(p for p in found if p["candidateId"] == "cand-sur-b")
@@ -331,19 +371,26 @@ def test_proposals_over_http_confirm_gated(store, monkeypatch):
     assert remaining == []
 
 
-def test_switch_proposal_over_http(store, monkeypatch):
+def test_equation_proposal_over_http(store, monkeypatch):
     from fastapi.testclient import TestClient
 
     monkeypatch.setattr(
         server, "_load_workspace_slices", lambda workspace_id: [_slice(TIMING_TEXT, page=7)]
     )
     client = TestClient(server.app)
-    workspace_id = _seed_workspace(store, _empty_artifact())
+    artifact = _empty_artifact()
+    artifact["usable"]["coi"] = [
+        {"duration": 1, "sex": None, "risk_class": None, "tobacco_status": None,
+         "rate": 0.19, "rate_unit": "per_1000_monthly",
+         "provenance": {"filename": "meridian-ul.pdf", "sourceType": "filed_pdf"}}
+    ]
+    workspace_id = _seed_workspace(store, artifact)
 
     found = client.get(
         f"/api/workspaces/{workspace_id}/mechanics-panel/proposals"
     ).json()["proposals"]
-    assert len(found) == 1 and found[0]["variant"] == "coi_timing"
+    assert len(found) == 1 and found[0]["kind"] == "equation"
+    assert found[0]["equationMechanic"] == "coi_charge"
 
     applied = client.post(
         f"/api/workspaces/{workspace_id}/mechanics-panel/proposals/{found[0]['id']}/confirm",
@@ -351,11 +398,12 @@ def test_switch_proposal_over_http(store, monkeypatch):
     )
     assert applied.status_code == 200
     artifact = workspace_store.load_workspace_executable_mechanics(workspace_id)
-    record = artifact["corrections"]["coi"]
-    assert record["variant"] == "coi_timing"
-    assert record["params"] == {"timing": "end"}
-    assert record["origin"] == "extraction_proposal"
-    assert record["proposalEvidence"]["page"] == 7
+    from actuarypoc.extract import workspace_equations as ws_equations
+    in_force = ws_equations.in_force(artifact, "coi_charge")
+    assert in_force is not None
+    assert in_force["timing"] == "end"
+    assert in_force["approval"]["by"] == "eddy"
+    assert in_force["source"]["proposalEvidence"]["page"] == 7
 
 
 # ---------------------------------------------------------------------------
@@ -430,7 +478,10 @@ def test_acceptance_second_product_onboarded_via_proposals():
     assert ("filed_table", "surrender") in kinds
     assert ("filed_table", "nar_factors") in kinds
     assert ("filed_table", "fees") in kinds
-    assert any(p["variant"] == "coi_timing" for p in pending)
+    assert any(
+        p["kind"] == "equation" and p["equationMechanic"] == "coi_charge"
+        for p in pending
+    )
     for proposal in pending:
         outcome = proposals.apply_proposal(
             artifact, proposal, workspace_id="ws-b", who="eddy", at="2026-10-25T00:00:00Z"
@@ -439,9 +490,9 @@ def test_acceptance_second_product_onboarded_via_proposals():
         confirmed += 1
 
     # Round 2: with the 1.05 factor now in force, the filing's NAR
-    # prose becomes a proposal.
+    # prose becomes an equation proposal.
     pending = proposals.generate_proposals(artifact, slices)
-    assert len(pending) == 1 and pending[0]["variant"] == "nar_definition"
+    assert len(pending) == 1 and pending[0]["equationMechanic"] == "nar_definition"
     outcome = proposals.apply_proposal(
         artifact, pending[0], workspace_id="ws-b", who="eddy", at="2026-10-25T00:00:00Z"
     )
@@ -451,8 +502,8 @@ def test_acceptance_second_product_onboarded_via_proposals():
     assert confirmed == 6
     assert manual_corrections == 0
 
-    # The onboarded product projects through the banked switches its
-    # proposals set.
+    # The onboarded product projects through the approved equations
+    # its proposals put in force.
     mechanics = executable_mechanics_view(artifact)
     config = UlRuntimeConfig(
         guaranteed_rate=0.03,
@@ -468,10 +519,11 @@ def test_acceptance_second_product_onboarded_via_proposals():
         horizon_years=30,
     )
     first = projection["rows"][0]["appliedMechanics"]
-    assert first["coi"]["rateSwitch"] == "coi.rate.per_1000_monthly"
-    assert first["coi"]["timingSwitch"] == "coi.timing.end"
-    assert first["coi"]["narSwitch"] == "nar.definition.unadjusted"
-    assert first["surrender"]["basisSwitch"] == "surrender.basis.percent_account_value"
-    assert {fee["unitSwitch"] for fee in first["fees"]} == {
-        "fees.unit.annual_fixed", "fees.unit.monthly_fixed",
-    }
+    coi_rendering = first["coi"]["equation"]["rendering"]
+    assert "COI table rate" in coi_rendering
+    assert first["coi"]["timing"] == "end"
+    assert first["coi"]["rate"] == pytest.approx(0.19)
+    assert first["nar"]["definition"] == "unadjusted"
+    assert "account value" in first["surrender"]["equation"]["rendering"]
+    assert projection["mechanicsExecution"]["policy_fees"]["applied"] is True
+    assert projection["mechanicsExecution"]["coi_charge"]["applied"] is True

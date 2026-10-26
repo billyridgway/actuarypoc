@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
-from actuarypoc.domain import rule_bank as _rule_bank
+from actuarypoc.domain import equations as _eq
 
 
 GRAPH_VERSION = 1
@@ -118,35 +118,48 @@ def _edge_kind(dependency_id: str) -> str:
 
 
 def _fallback_disclosure(input_id: str, status: Any) -> Optional[Dict[str, str]]:
-    if _status(status) != "provisional":
-        return None
+    """What the node discloses about its evidence state.
+
+    Phase 7: there are no math fallbacks to disclose.  A synthetic table
+    in force is disclosed as synthetic (its equation is a transcription
+    of that table); a mechanic with no approved equation is disclosed
+    as a missing equation — the mechanic does not calculate.
+    """
+
+    raw_status = str(status or "").lower()
     if input_id == "coi_rate":
-        if str(status or "").lower() == "synthetic_assumption":
+        if raw_status == "synthetic_assumption":
             return {
                 "mode": "synthetic_active",
                 "missingEvidence": "Filed COI rate table",
                 "fallback": "Reviewed AI-generated synthetic COI table",
                 "impact": "Demographic selectors are active, but results remain scenario-only and must not be treated as filed values.",
             }
-        return {
-            "mode": "flat_fallback",
-            "missingEvidence": "Filed COI rate table",
-            "fallback": "Flat placeholder COI rate",
-            "impact": "Age, sex, risk class, and tobacco selectors cannot change COI rates until an evidenced table is loaded.",
-        }
+        if _status(status) in {"missing", "provisional"}:
+            return {
+                "mode": "missing_equation",
+                "missingEvidence": "Approved COI charge equation",
+                "impact": "No COI charge is calculated until an equation is harvested and approved, or entered. Age, sex, risk class, and tobacco selectors cannot change COI charges until then.",
+            }
     if input_id == "surrender_schedule":
-        if str(status or "").lower() == "synthetic_assumption":
+        if raw_status == "synthetic_assumption":
             return {
                 "mode": "synthetic_active",
                 "missingEvidence": "Filed surrender charge schedule",
                 "fallback": "Reviewed AI-generated synthetic surrender schedule",
                 "impact": "Duration-specific synthetic charges are active, but results remain scenario-only and are not filed values.",
             }
+        if _status(status) in {"missing", "provisional"}:
+            return {
+                "mode": "missing_equation",
+                "missingEvidence": "Approved surrender charge equation",
+                "impact": "No surrender charge is calculated until an equation is harvested and approved, or entered.",
+            }
+    if input_id == "policy_fee" and _status(status) == "missing":
         return {
-            "mode": "simplified_fallback",
-            "missingEvidence": "Filed surrender charge schedule",
-            "fallback": "Simplified declining surrender pattern",
-            "impact": "Projected surrender values may differ from filed duration-specific values.",
+            "mode": "missing_equation",
+            "missingEvidence": "Approved policy fees equation",
+            "impact": "No policy or admin fees are calculated until an equation is harvested and approved, or entered.",
         }
     return None
 
@@ -165,25 +178,23 @@ def _fmt_money(value: Any) -> Optional[str]:
         return None
 
 
-def _switch_description(switch_id: str) -> str:
-    return _rule_bank.get_switch(switch_id).description
-
-
 def _table_kind(raw: Mapping[str, Any], context: Mapping[str, Any], mechanic: str) -> Optional[str]:
     """The provenance kind of the mechanic table in force, when known.
 
     Sources, in order: the snapshot's rate-tables view (which classifies
-    rows by provenance), the run's applied-mechanics source record, and
-    the input's own status (synthetic stand-ins are marked on the node).
+    rows by provenance), the applied equation citation's table source
+    type, and the input's own status (synthetic stand-ins are marked on
+    the node).
     """
 
     rate_tables = context.get("rateTables") or {}
     view = rate_tables.get(mechanic) or {}
     if view.get("status"):
         return str(view["status"])
-    applied = (context.get("appliedMechanics") or {}).get(mechanic) or {}
-    source = applied.get("source") or {}
-    source_type = str(source.get("sourceType") or "")
+    applied_key = {"coi": "coi", "surrender": "surrender", "fees": "fees"}.get(mechanic, mechanic)
+    applied = (context.get("appliedMechanics") or {}).get(applied_key) or {}
+    citation = applied.get("equation") or {}
+    source_type = str(citation.get("tableSourceType") or "")
     if source_type == "filed_pdf":
         return "filed"
     if source_type in {"ai_synthetic", "deterministic_fallback"}:
@@ -205,46 +216,36 @@ _TABLE_KIND_PREFIX = {
 }
 
 
-def _coi_equation(raw: Mapping[str, Any], context: Mapping[str, Any]) -> Optional[str]:
-    ledger = (context.get("ledgerFormulas") or {}).get("coi")
-    if ledger:
-        return str(ledger)
-    applied = (context.get("appliedMechanics") or {}).get("coi") or {}
-    status = str(raw.get("status") or "").lower()
-    if applied.get("basis") == "table" or (not applied and status in {"evidenced", "synthetic_assumption"}):
-        unit = str(applied.get("rateUnit") or "") or _table_unit(context, "coi", "rate_unit")
-        if unit in _rule_bank.COI_RATE_SWITCH_BY_UNIT:
-            equation = _switch_description(_rule_bank.COI_RATE_SWITCH_BY_UNIT[unit])
-        else:
-            equation = (
-                "COI charge = COI table rate x COI net amount at risk, applied "
-                "monthly from the table in force."
-            )
-        definition = str(applied.get("narDefinition") or "")
-        if definition in _rule_bank.NAR_DEFINITION_SWITCHES:
-            nar_text = _switch_description(_rule_bank.NAR_DEFINITION_SWITCHES[definition])
-            equation += " " + nar_text.split(". ")[0] + "."
-        timing = str(applied.get("timing") or "")
-        if timing == "middle":
-            equation += " The COI charge is deducted in the middle of each month: half before interest is credited and half after."
-        elif timing == "end":
-            equation += " The COI charge is deducted at the end of each month, after interest is credited."
-        elif timing:
-            equation += " The COI charge is deducted at the beginning of each month, before interest is credited."
-        kind = _table_kind(raw, context, "coi")
-        return (_TABLE_KIND_PREFIX.get(kind or "", "") + equation) if kind else equation
-    # Placeholder / missing: the banked placeholder switch is what runs.
-    rate = applied.get("flatRate")
-    if rate is None:
-        rate = raw.get("value")
-    pct = _fmt_pct(rate)
-    rate_clause = f" of {pct}" if pct else ""
+def _applied_entry(context: Mapping[str, Any], key: str) -> Mapping[str, Any]:
+    return (context.get("appliedMechanics") or {}).get(key) or {}
+
+
+def _missing_equation_text(label: str) -> str:
     return (
-        "Placeholder - no COI table is in force: COI charge each month = face amount "
-        f"x flat annual placeholder rate{rate_clause} / 12. A filed COI charge is the "
-        "table rate x the net amount at risk; this placeholder is not, so it stays "
-        "flat and does not move with the account value."
+        f"Not calculated — no approved {label} equation is in force, so no "
+        f"{label} is calculated. Harvest the filing's stated calculation and "
+        "approve it, or enter the equation, to calculate it."
     )
+
+
+def _entry_equation(entry: Mapping[str, Any], label: str) -> Optional[str]:
+    """The equation text for one applied-mechanics entry (new shape)."""
+
+    if not entry:
+        return None
+    citation = entry.get("equation")
+    if entry.get("missing"):
+        return _missing_equation_text(label)
+    if citation:
+        rendering = str(citation.get("rendering") or "")
+        if entry.get("failed"):
+            return (
+                f"{rendering} This equation could not be evaluated this year "
+                f"({entry.get('failureReason') or 'evaluation failed'}), so the "
+                "mechanic contributed nothing."
+            )
+        return rendering or None
+    return None
 
 
 def _table_unit(context: Mapping[str, Any], mechanic: str, field: str) -> str:
@@ -253,106 +254,75 @@ def _table_unit(context: Mapping[str, Any], mechanic: str, field: str) -> str:
     return units.pop() if len(units) == 1 else ""
 
 
+def _coi_equation(raw: Mapping[str, Any], context: Mapping[str, Any]) -> Optional[str]:
+    ledger = (context.get("ledgerFormulas") or {}).get("coi")
+    if ledger:
+        return str(ledger)
+    from_entry = _entry_equation(_applied_entry(context, "coi"), "COI charge")
+    if from_entry:
+        kind = _table_kind(raw, context, "coi")
+        prefix = _TABLE_KIND_PREFIX.get(kind or "", "")
+        return prefix + from_entry if not from_entry.startswith("Not calculated") else from_entry
+    # No run record (legacy snapshot): derive from the table in force —
+    # the transcription of that table is the equation that would run.
+    status = str(raw.get("status") or "").lower()
+    if status in {"evidenced", "synthetic_assumption"}:
+        unit = _table_unit(context, "coi", "rate_unit")
+        if unit:
+            equation = _eq.render_equation(_eq.coi_body_for_unit(unit), "coi_charge")
+            kind = _table_kind(raw, context, "coi")
+            return (_TABLE_KIND_PREFIX.get(kind or "", "") + equation) if kind else equation
+    return _missing_equation_text("COI charge")
+
+
 def _surrender_equation(raw: Mapping[str, Any], fallback: Optional[Dict[str, str]], context: Mapping[str, Any]) -> Optional[str]:
     ledger = (context.get("ledgerFormulas") or {}).get("surrender_charge")
     if ledger:
         return str(ledger)
-    applied = (context.get("appliedMechanics") or {}).get("surrender") or {}
-    status = str(raw.get("status") or "").lower()
-    table_in_force = applied.get("basis") == "table" or (
-        not applied and status in {"evidenced", "synthetic_assumption"}
-    )
-    if table_in_force:
-        unit = str(applied.get("chargeUnit") or "") or _table_unit(context, "surrender", "charge_unit")
-        kind = _table_kind(raw, context, "surrender")
-        if unit in _rule_bank.SURRENDER_SWITCH_BY_UNIT:
-            equation = _switch_description(_rule_bank.SURRENDER_SWITCH_BY_UNIT[unit])
-            return (_TABLE_KIND_PREFIX.get(kind or "", "") + equation) if kind else equation
-        if kind == "synthetic":
+    entry = _applied_entry(context, "surrender")
+    from_entry = _entry_equation(entry, "surrender charge")
+    if from_entry:
+        if (
+            entry.get("equation")
+            and not entry.get("rowApplied")
+            and not entry.get("failed")
+        ):
             return (
-                "Surrender charge = the synthetic schedule in force's charge for "
-                "the duration, applied on the basis the schedule states "
-                "(scenario-only; not filed values)."
+                "No surrender charge applies this year: the surrender charge "
+                f"period has ended. The approved equation is: {from_entry}"
             )
-        return (
-            "Surrender charge = the schedule in force's charge for the duration, "
-            "applied on the basis the schedule states."
-        )
-    if applied.get("basis") == "expired":
-        return "No surrender charge applies: the surrender charge period has ended."
-    if applied.get("basis") == "placeholder" and applied.get("percent") is not None:
-        pct = _fmt_pct(applied.get("percent")) or "the placeholder percentage"
-        return (
-            f"Surrender charge = placeholder percentage x ending account value; the "
-            f"year-1 placeholder percentage is {pct} and declines linearly to zero "
-            "over the surrender period. Placeholder - no surrender schedule is in force."
-        )
-    # Definition-only fallback (legacy snapshots carry no run record): the
-    # node's stated value parameterises the simplified declining pattern.
-    value_text = str(raw.get("value") or "")
-    match = re.search(r"(\d+(?:\.\d+)?%)\s+of\s+(face|account value)\b.*?(\d+)\s*years", value_text)
-    if match:
-        pct, base_word, years = match.group(1), match.group(2), match.group(3)
-        base = "face amount" if base_word == "face" else "ending account value"
-        return (
-            f"Surrender charge = {pct} of {base} in year 1, declining linearly to "
-            f"zero over {years} years: in year t, surrender charge = {base} x {pct} "
-            f"x ({years} - t + 1) / {years}. Simplified fallback - no filed "
-            "surrender schedule is in force."
-        )
-    return "No filed surrender schedule is in force. " + _switch_description(
-        "surrender.placeholder.linear_account_value"
-    )
+        kind = _table_kind(raw, context, "surrender")
+        prefix = _TABLE_KIND_PREFIX.get(kind or "", "")
+        return prefix + from_entry if not from_entry.startswith("Not calculated") else from_entry
+    status = str(raw.get("status") or "").lower()
+    if status in {"evidenced", "synthetic_assumption"}:
+        unit = _table_unit(context, "surrender", "charge_unit")
+        if unit:
+            equation = _eq.render_equation(_eq.surrender_body_for_unit(unit), "surrender_charge")
+            kind = _table_kind(raw, context, "surrender")
+            return (_TABLE_KIND_PREFIX.get(kind or "", "") + equation) if kind else equation
+    return _missing_equation_text("surrender charge")
 
 
 def _fee_equation(raw: Mapping[str, Any], context: Mapping[str, Any]) -> Optional[str]:
-    applied_fees = (context.get("appliedMechanics") or {}).get("fees") or []
-    table_fees = [item for item in applied_fees if item.get("basis") == "table"]
-    if table_fees:
-        units: List[str] = []
-        for item in table_fees:
-            unit = str(item.get("feeUnit") or "")
-            if unit in _rule_bank.FEE_SWITCH_BY_UNIT and unit not in units:
-                units.append(unit)
-        if units:
-            descriptions = " ".join(
-                _switch_description(_rule_bank.FEE_SWITCH_BY_UNIT[unit]) for unit in units
-            )
-            return "From the fee schedule in force: " + descriptions
-    fallback_fees = [item for item in applied_fees if item.get("basis") == "fallback"]
-    status = str(raw.get("status") or "").lower()
-    if fallback_fees or status in {"missing", "not_available", "scenario_assumption"}:
-        amount = fallback_fees[0].get("amount") if fallback_fees else raw.get("value")
-        money = _fmt_money(amount)
-        if status == "scenario_assumption" and not fallback_fees:
-            return (
-                f"Policy/admin fee = the user-entered annual fee of {money or 'the stated amount'}, "
-                "spread evenly over the year (annual fee / 12 each month). Scenario "
-                "assumption - no evidenced fee schedule is in force."
-            )
-        monthly = _fmt_money(float(amount) / 12.0) if isinstance(amount, (int, float)) else None
-        equation = (
-            "No fee schedule is in force, so no filed fee equation applies. The "
-            "projection instead uses the fallback: monthly fee = configured annual "
-            "policy/admin fee / 12"
-        )
-        if money is not None:
-            equation += f", with the configured annual fee at {money}"
-        if monthly is not None:
-            equation += f" ({monthly} per month)"
-        equation += "."
-        if isinstance(amount, (int, float)) and float(amount) == 0.0:
-            equation += " At that amount, no fee is deducted."
-        return equation
     ledger = (context.get("ledgerFormulas") or {}).get("policy_fee")
     if ledger:
         return str(ledger)
-    return (
-        "Policy/admin fees are deducted monthly from the fee schedule in force, "
-        "each row applied on the basis it states (a stated monthly amount, an "
-        "annual amount per $1,000 of face, or a percentage of premium for a "
-        "premium expense charge)."
-    )
+    from_entry = _entry_equation(_applied_entry(context, "fees"), "policy fees")
+    if from_entry:
+        return from_entry
+    status = str(raw.get("status") or "").lower()
+    if status == "scenario_assumption":
+        money = _fmt_money(raw.get("value"))
+        return (
+            f"The user-entered annual fee of {money or 'the stated amount'} is a "
+            "scenario assumption and is not applied: fees are calculated only by "
+            "an approved policy fees equation, and none is in force."
+        )
+    rows = ((context.get("rateTables") or {}).get("fees") or {}).get("rows") or []
+    if rows:
+        return _eq.render_equation(_eq.policy_fees_body(), "policy_fees")
+    return _missing_equation_text("policy fees")
 
 
 def _applied_equation(
@@ -364,11 +334,11 @@ def _applied_equation(
     """The equation the engine applies to one input, for the graph panel.
 
     Eddy's rule (Aug 7, 2026): the formula sits beside every component.
-    Rule nodes already carry their step formulas; this gives each
-    calculation input the equation in force for its own state — the
+    Phase 7: the formula shown is the approved equation that ran — the
     ledger's own derivation when the snapshot carries the run's ledger,
-    otherwise the banked switch description for the state in force, and
-    for fallbacks the fallback's own equation, stated as a fallback.
+    otherwise the applied equation's canonical rendering, otherwise the
+    transcription of the table in force — and for a mechanic with no
+    approved equation, a plain statement that it is not calculated.
     Selector and setting inputs have no applied equation (they choose
     values; they are not calculated from), so they return None.
     """
@@ -380,11 +350,14 @@ def _applied_equation(
     if input_id == "policy_fee":
         return _fee_equation(raw, context)
     if input_id == "guaranteed_rate":
-        equation = _switch_description("crediting.guaranteed_annual")
+        from_entry = _entry_equation(_applied_entry(context, "crediting"), "crediting")
+        if from_entry:
+            return from_entry
+        equation = _eq.render_equation(_eq.crediting_body(), "crediting")
         pct = _fmt_pct(raw.get("value"))
         if pct:
             equation += f" Guaranteed annual rate in force: {pct}."
-        return equation
+        return "Interest credited each month = " + equation
     if input_id == "premium":
         if str(raw.get("status") or "").lower() == "derived_placeholder":
             match = re.search(r"(\d+(?:\.\d+)?%)\s+of\s+face", str(raw.get("source") or ""))
@@ -395,11 +368,10 @@ def _applied_equation(
                 )
         return "Annual premium = modal premium x payments per year under the selected premium mode."
     if input_id == "death_benefit_option":
-        return (
-            "Death benefit = the greater of the face amount and the corridor "
-            "minimum death benefit (corridor percentage x ending account value); "
-            "under the option in force the base death benefit is the face amount."
-        )
+        from_entry = _entry_equation(_applied_entry(context, "deathBenefit"), "death benefit")
+        if from_entry:
+            return from_entry
+        return "Death benefit = " + _eq.render_equation(_eq.death_benefit_body(), "death_benefit")
     return None
 
 
@@ -477,7 +449,7 @@ def compile_projection_graph(
             "label": raw.get("label") or input_id,
             "status": "missing" if mechanic_id == "unmodeled" else _status(raw.get("status")),
             "detail": "Unmodeled product mechanic" if mechanic_id == "unmodeled" else (
-                "Missing evidenced table; fallback active" if fallback else raw.get("status")
+                "Not calculated — no approved equation in force" if fallback and fallback.get("mode") == "missing_equation" else "Synthetic schedule in force (scenario-only)" if fallback else raw.get("status")
             ),
             "value": raw.get("value"),
             "unit": raw.get("unit"),
@@ -516,7 +488,7 @@ def compile_projection_graph(
             "kind": "rule" if definition else "unmodeled",
             "label": raw.get("title") or (raw.get("result") or {}).get("label") or rule_id,
             "status": rule_status,
-            "detail": "Unmodeled product mechanic" if definition is None else "Uses a fallback because required data is missing" if has_missing else "Uses a placeholder or default" if has_provisional else "Ready",
+            "detail": "Unmodeled product mechanic" if definition is None else "Not calculated — an approved equation or required input is missing" if has_missing else "Uses a provisional input (synthetic schedule or scenario value)" if has_provisional else "Ready",
             "value": (raw.get("result") or {}).get("value"),
             "unit": (raw.get("result") or {}).get("unit"),
             "source": (raw.get("result") or {}).get("source"),
@@ -530,7 +502,7 @@ def compile_projection_graph(
                 and rule_id == "coi_charge_deducted"
                 and any(
                     node["id"] == "input:coi_rate"
-                    and (node.get("fallbackDisclosure") or {}).get("mode") == "flat_fallback"
+                    and (node.get("fallbackDisclosure") or {}).get("mode") == "missing_equation"
                     for node in nodes
                 )
             )
@@ -539,8 +511,8 @@ def compile_projection_graph(
                 "source": dependency,
                 "target": node_id,
                 "kind": edge_kind,
-                "status": "inactive_fallback" if inactive_lookup else "active" if dependency in known_node_ids else "unresolved",
-                "detail": "Inactive while the projection uses a flat COI fallback" if inactive_lookup else None,
+                "status": "inactive_missing_equation" if inactive_lookup else "active" if dependency in known_node_ids else "unresolved",
+                "detail": "Inactive while no approved COI equation is in force" if inactive_lookup else None,
             })
         known_node_ids.add(node_id)
 

@@ -108,19 +108,20 @@ const RateTablesInForce: React.FC<{ rateTables?: any }> = ({ rateTables }) => {
     <div className="rate-tables">
       <h3>Rates in force</h3>
       <p className="muted">
-        The full tables this projection charges from. If a table is missing, the placeholder
-        being used instead is stated plainly.
+        The full tables this projection charges from, beside the approved equation that
+        applies each one. If a table is missing, the absence is stated plainly — nothing
+        is substituted for it.
       </p>
       {coi && (
         <section className="rate-table">
           <h4>
             Cost of insurance (COI){" "}
             <span className={basisClass(coi.status)}>
-              {coi.status === "placeholder" ? "Placeholder" : `${coi.rowCount} rows`}
+              {coi.status === "missing" ? "Missing" : `${coi.rowCount} rows`}
             </span>
           </h4>
-          {coi.placeholder ? (
-            <p className="rate-table__placeholder">{coi.placeholder.description}</p>
+          {coi.missingTable ? (
+            <p className="rate-table__placeholder">{coi.missingTable.description}</p>
           ) : (
             <div className="table-scroll rate-table__scroll">
               <table className="kv-table">
@@ -151,6 +152,12 @@ const RateTablesInForce: React.FC<{ rateTables?: any }> = ({ rateTables }) => {
               </table>
             </div>
           )}
+          {coi.equation ? (
+            <p className="muted">
+              Equation in force: {coi.equation.rendering}
+              {coi.equation.approvedBy ? <> — approved by {coi.equation.approvedBy}</> : null}
+            </p>
+          ) : null}
           {Array.isArray(coi.sources) && coi.sources.length > 0 && (
             <p className="muted">
               Source: {coi.sources.map((source: any) => `${source.filename ?? "table"}${source.page ? ` · page ${source.page}` : ""}`).join("; ")}
@@ -163,11 +170,11 @@ const RateTablesInForce: React.FC<{ rateTables?: any }> = ({ rateTables }) => {
           <h4>
             Surrender charge schedule{" "}
             <span className={basisClass(surrender.status)}>
-              {surrender.status === "placeholder" ? "Placeholder" : `${surrender.rowCount} rows`}
+              {surrender.status === "missing" ? "Missing" : `${surrender.rowCount} rows`}
             </span>
           </h4>
-          {surrender.placeholder ? (
-            <p className="rate-table__placeholder">{surrender.placeholder.description}</p>
+          {surrender.missingTable ? (
+            <p className="rate-table__placeholder">{surrender.missingTable.description}</p>
           ) : (
             <div className="table-scroll rate-table__scroll">
               <table className="kv-table">
@@ -190,6 +197,12 @@ const RateTablesInForce: React.FC<{ rateTables?: any }> = ({ rateTables }) => {
               </table>
             </div>
           )}
+          {surrender.equation ? (
+            <p className="muted">
+              Equation in force: {surrender.equation.rendering}
+              {surrender.equation.approvedBy ? <> — approved by {surrender.equation.approvedBy}</> : null}
+            </p>
+          ) : null}
         </section>
       )}
     </div>

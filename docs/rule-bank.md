@@ -1,4 +1,12 @@
-# The rule bank
+# The rule bank — SUPERSEDED by Phase 7 (the equation doctrine)
+
+> **This document describes a retired design.** Phase 7 (Oct 2026)
+> abolished the rule bank: there is no switch library, and no fallback
+> or placeholder calculation exists as a safety net. The only
+> equations that execute are document-derived and human-approved (or
+> actuary-authored) equation artifacts, plus the universal identities
+> that every document assumes. See `docs/phase-7-equations.md`. The
+> text below is kept as the historical record of the Phase 4 design.
 
 Phase 4 of the Eddy improvement plan. The bank is how "teach it every
 market variation" happens: every way a covered mechanic can vary —

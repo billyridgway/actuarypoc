@@ -1,29 +1,32 @@
-"""Extraction proposals — Phase 4 of the Eddy improvement plan.
+"""Extraction proposals — Phase 4, re-expressed by Phase 7.
 
 From a workspace's extracted mechanics and Phase 0 document slices,
-the system PROPOSES slot values and rule-bank switch settings, each
-with page evidence, for the actuary to confirm in the panel.  A
-proposal is the Phase 3 confirm-back pattern applied to extraction:
-the proposal restates what it would set in actuarial language, and
-nothing applies until the user confirms — confirming applies it
-through the exact same paths as a manual action (a filed-candidate
-acceptance, or a Phase 3 correction), with the proposal's evidence
+the system PROPOSES slot values and equations, each with page
+evidence, for the actuary to confirm in the panel.  A proposal is the
+confirm-back pattern applied to extraction: the proposal restates
+what it would put in force in actuarial language, and nothing
+applies until the user confirms — confirming applies it through the
+exact same paths as a manual action (a filed-candidate acceptance,
+or the Phase 7 equation approval), with the proposal's evidence
 recorded in the applied record's provenance.
 
 Signals are DETERMINISTIC FIRST:
 
 * filed table candidates extracted from the documents (headings,
-  schedule shapes) become "accept this filed table" proposals;
-* prose statements in the filing's slices — a COI deduction timing
-  phrase, a net-amount-at-risk definition, a surrender percentage
-  with its grading period — become switch-setting proposals.
+  schedule shapes) become "accept this filed table" proposals
+  (confirming one also puts the table's equation transcription in
+  force, as a manual acceptance does);
+* stated calculations found by equation harvesting — a COI
+  deduction timing phrase, a net-amount-at-risk definition, a
+  surrender percentage with its grading period — become EQUATION
+  proposals: confirming one approves the equation (the Phase 7
+  harvest candidates, plus any pending harvested records already on
+  the artifact).
 
-A configured model may additionally propose at AUTHORING time (a
-human or a model-assisted authoring step drafting a proposal for the
-panel), but a proposal is data, not authority: whatever its origin,
-the actuary confirms the mapping before anything applies, and with no
-model configured the deterministic proposals above still work.  The
-projection path never sees proposals — only confirmed mechanics.
+A configured model may additionally propose at AUTHORING time, but a
+proposal is data, not authority: whatever its origin, the actuary
+confirms before anything applies.  The projection path never sees
+proposals — only confirmed mechanics and approved equations.
 
 Dismissals persist on the artifact (``dismissedProposals``) so a
 dismissed proposal does not regenerate.
@@ -37,6 +40,8 @@ import re
 from copy import deepcopy
 from typing import Any, Dict, List, Optional
 
+from actuarypoc.domain import equations as _eq
+from actuarypoc.extract import workspace_equations as _ws_equations
 from actuarypoc.extract import workspace_mechanics_corrections as _corrections
 from actuarypoc.extract.workspace_mechanics_panel import (
     SLOT_BY_ID,
@@ -48,7 +53,19 @@ from actuarypoc.extract.workspace_ul_mechanics import accept_filed_mechanic
 
 
 PROPOSAL_KIND_FILED_TABLE = "filed_table"
+PROPOSAL_KIND_EQUATION = "equation"
+# Retired by Phase 7 (kept as a name so old payloads stay readable):
 PROPOSAL_KIND_SWITCH = "switch_setting"
+
+_EQUATION_SLOT_BY_MECHANIC: Dict[str, str] = {
+    "coi_charge": "coi",
+    "surrender_charge": "surrender",
+    "premium_load": "fees",
+    "policy_fees": "fees",
+    "nar_definition": "nar",
+    "death_benefit": "corridor",
+    "crediting": "crediting",
+}
 
 _MECHANIC_SLOTS: Dict[str, Dict[str, Any]] = {
     str(slot.get("mechanic")): slot for slot in SLOT_BY_ID.values() if slot.get("mechanic")
@@ -161,174 +178,164 @@ def _filed_table_proposals(artifact: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Proposal generation — prose switch signals in the slices
+# Proposal generation — equation proposals from harvesting
+#
+# Phase 7: the rule-shaped proposals are equation proposals.  Sources:
+# the deterministic harvest over the workspace's slices (the canonical
+# prose patterns live in workspace_equations), plus pending harvested
+# records already on the artifact (e.g. from POST /equations/harvest,
+# including model readings).  A proposal whose equation is already in
+# force, or whose mechanic is governed by a correction (the actuary's
+# own statement outranks an extraction proposal), is not proposed.
 # ---------------------------------------------------------------------------
 
-# Each signal: (regex over the slice text, required context words in the
-# same slice, variant, params builder).  The patterns are deliberately
-# narrow — a signal that does not fire costs a manual correction; a
-# signal that fires wrongly costs trust.
-_TIMING_SIGNALS = [
-    (re.compile(r"deduct\w*\s+(?:monthly\s+)?in advance|beginning of (?:the|each) (?:policy )?month|before interest is credited", re.I), "beginning"),
-    (re.compile(r"in arrears|end of (?:the|each) (?:policy )?month|after interest (?:is )?credited", re.I), "end"),
-    (re.compile(r"middle of (?:the|each) (?:policy )?month|mid-month", re.I), "middle"),
-]
 
-_NAR_PROSE = re.compile(
-    r"net amount at risk[^.]{0,160}?(?:death benefit|benefit payable)[^.]{0,80}?"
-    r"(?:less|minus|reduced by)[^.]{0,40}?account value",
-    re.I | re.S,
-)
-
-_SURRENDER_PCT = re.compile(
-    r"surrender charge[^.]{0,120}?(\d+(?:\.\d+)?)\s*%\s*of the account value",
-    re.I | re.S,
-)
-_SURRENDER_GRADING = re.compile(
-    r"grad\w+ to (?:zero|0)\s*(?:%|percent)?\s*over (\d{1,2}) years",
-    re.I,
-)
+def _current_text(artifact: Dict[str, Any], mechanic: str) -> str:
+    current = _ws_equations.in_force(artifact, mechanic)
+    if current is None:
+        return "no approved equation in force — the mechanic is not calculated"
+    return str(current.get("rendering") or "an approved equation")
 
 
-def _in_force_factor(artifact: Dict[str, Any]) -> float:
-    rows = list((artifact.get("usable") or {}).get("nar_factors") or [])
-    if rows:
-        try:
-            return float(rows[0].get("factor") or 1.0)
-        except (TypeError, ValueError):
-            return 1.0
-    return 1.0
-
-
-def _switch_proposals(
+def _equation_proposals(
     artifact: Dict[str, Any], slices: List[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
     proposals: List[Dict[str, Any]] = []
-    corrections = artifact.get("corrections") or {}
+    seen_keys: set = set()
 
-    def already_corrected(mechanic: str) -> bool:
-        return (corrections.get(mechanic) or {}).get("variant") is not None
+    def corrected_governed(mechanic: str) -> bool:
+        current = _ws_equations.in_force(artifact, mechanic)
+        return bool(current and (current.get("source") or {}).get("kind") == "correction")
 
-    settings = _corrections.executable_settings(artifact)
-    current_timing = str(settings.get("coiTiming") or "beginning")
-    current_definition = str(settings.get("narDefinition") or "factor_adjusted")
+    def add_proposal(
+        *,
+        mechanic: str,
+        rendering: str,
+        statement: Optional[str],
+        filename: Optional[str],
+        page: Optional[int],
+        equation_id: Optional[str],
+        candidate: Optional[Dict[str, Any]],
+    ) -> None:
+        slot_id = _EQUATION_SLOT_BY_MECHANIC.get(mechanic)
+        slot = SLOT_BY_ID.get(slot_id or "")
+        if slot is None or corrected_governed(mechanic):
+            return
+        current = _ws_equations.in_force(artifact, mechanic)
+        if current is not None and str(current.get("rendering") or "") == rendering:
+            return  # already in force — nothing to propose
+        key = (mechanic, rendering)
+        if key in seen_keys:
+            return
+        seen_keys.add(key)
+        label = _eq.MECHANIC_LABELS.get(mechanic, mechanic)
+        evidence = {
+            "filename": filename,
+            "page": page,
+            "heading": None,
+            "snippet": statement,
+        }
+        confirm_back = (
+            f"{label} equation: was {_current_text(artifact, mechanic)}; "
+            f"now {rendering}"
+            + (f" — as stated in {filename}" if filename else "")
+            + (f", p. {page}" if page else "")
+            + ", approved on your confirmation."
+        )
+        proposals.append({
+            "id": _proposal_id(PROPOSAL_KIND_EQUATION, {
+                "mechanic": mechanic, "rendering": rendering,
+                "equationId": equation_id,
+            }),
+            "kind": PROPOSAL_KIND_EQUATION,
+            "slot": slot["id"],
+            "mechanic": slot.get("mechanic"),
+            "candidateId": None,
+            "switch": None,
+            "variant": None,
+            "params": None,
+            "equationMechanic": mechanic,
+            "equationId": equation_id,
+            "candidate": candidate,
+            "rendering": rendering,
+            "label": f"Approve the {label.lower()} equation from the filing",
+            "confirmBack": confirm_back,
+            "evidence": evidence,
+            "status": "pending",
+        })
 
-    for slice_ in slices or []:
-        text = str(slice_.get("text") or "")
-        if not text:
+    # Pending harvested records already on the artifact.
+    for record in _ws_equations.records(artifact):
+        if record.get("state") != "pending" or record.get("body") is None:
             continue
-        lowered = text.lower()
+        source = record.get("source") or {}
+        add_proposal(
+            mechanic=str(record.get("mechanic")),
+            rendering=str(record.get("rendering") or ""),
+            statement=source.get("statement"),
+            filename=source.get("filename"),
+            page=source.get("page"),
+            equation_id=str(record.get("id")),
+            candidate=None,
+        )
 
-        # --- COI deduction timing -------------------------------------
-        if not already_corrected("coi") and (
-            "cost of insurance" in lowered or "coi" in lowered
-        ):
-            for pattern, timing in _TIMING_SIGNALS:
-                match = pattern.search(text)
-                if not match or timing == current_timing:
-                    continue
-                slot = SLOT_BY_ID["coi"]
-                spec = {"variant": "coi_timing", "params": {"timing": timing}}
-                try:
-                    preview = _corrections.preview_correction(
-                        artifact, slot, spec, who="extraction", at=""
-                    )
-                except ValueError:
-                    continue
-                proposals.append({
-                    "id": _proposal_id(PROPOSAL_KIND_SWITCH, {
-                        "slot": "coi", "variant": "coi_timing",
-                        "params": {"timing": timing},
-                    }),
-                    "kind": PROPOSAL_KIND_SWITCH,
-                    "slot": "coi",
-                    "mechanic": "coi",
-                    "candidateId": None,
-                    "switch": f"coi.timing.{timing}",
-                    "variant": "coi_timing",
-                    "params": {"timing": timing},
-                    "label": f"Set COI deduction timing to {timing} of month",
-                    "confirmBack": preview["confirmBack"],
-                    "evidence": _evidence(slice_, match.start(), match.end()),
-                    "status": "pending",
-                })
-                break
-
-        # --- NAR definition -------------------------------------------
-        if not already_corrected("nar_factors") and current_definition != "unadjusted":
-            match = _NAR_PROSE.search(text)
-            if match and _in_force_factor(artifact) > 1.0:
-                slot = SLOT_BY_ID["nar"]
-                spec = {"variant": "nar_definition", "params": {"definition": "unadjusted"}}
-                try:
-                    preview = _corrections.preview_correction(
-                        artifact, slot, spec, who="extraction", at=""
-                    )
-                except ValueError:
-                    preview = None
-                if preview is not None:
-                    proposals.append({
-                        "id": _proposal_id(PROPOSAL_KIND_SWITCH, {
-                            "slot": "nar", "variant": "nar_definition",
-                            "params": {"definition": "unadjusted"},
-                        }),
-                        "kind": PROPOSAL_KIND_SWITCH,
-                        "slot": "nar",
-                        "mechanic": "nar_factors",
-                        "candidateId": None,
-                        "switch": "nar.definition.unadjusted",
-                        "variant": "nar_definition",
-                        "params": {"definition": "unadjusted"},
-                        "label": "Set net amount at risk to death benefit − account value",
-                        "confirmBack": preview["confirmBack"],
-                        "evidence": _evidence(slice_, match.start(), match.end()),
-                        "status": "pending",
-                    })
-
-        # --- Surrender basis ------------------------------------------
-        if not already_corrected("surrender"):
-            pct_match = _SURRENDER_PCT.search(text)
-            grade_match = _SURRENDER_GRADING.search(text)
-            if pct_match and grade_match:
-                percent = float(pct_match.group(1)) / 100.0
-                grading_years = int(grade_match.group(1))
-                if 0 < percent <= 1 and 1 <= grading_years <= 40:
-                    slot = SLOT_BY_ID["surrender"]
-                    params = {
-                        "basis": "percent_account_value",
-                        "percent": percent,
-                        "gradingYears": grading_years,
-                    }
-                    spec = {"variant": "surrender_basis", "params": params}
-                    try:
-                        preview = _corrections.preview_correction(
-                            artifact, slot, spec, who="extraction", at=""
-                        )
-                    except ValueError:
-                        preview = None
-                    if preview is not None:
-                        proposals.append({
-                            "id": _proposal_id(PROPOSAL_KIND_SWITCH, {
-                                "slot": "surrender", "variant": "surrender_basis",
-                                "params": params,
-                            }),
-                            "kind": PROPOSAL_KIND_SWITCH,
-                            "slot": "surrender",
-                            "mechanic": "surrender",
-                            "candidateId": None,
-                            "switch": "surrender.schedule.graded",
-                            "variant": "surrender_basis",
-                            "params": params,
-                            "label": (
-                                f"Set surrender charge to {percent * 100:g}% of account "
-                                f"value, grading to 0 over {grading_years} years"
-                            ),
-                            "confirmBack": preview["confirmBack"],
-                            "evidence": _evidence(
-                                slice_, pct_match.start(), pct_match.end()
-                            ),
-                            "status": "pending",
-                        })
+    # Fresh deterministic harvest candidates over the slices.
+    for candidate in _ws_equations.deterministic_harvest(slices or []):
+        mechanic = str(candidate.get("mechanic") or "")
+        body = candidate.get("body")
+        timing = candidate.get("timing")
+        if mechanic == "nar_definition" and body is not None:
+            # Proposing "death benefit − account value" when no NAR
+            # factor above 1.0 is in force proposes a no-op (the two
+            # readings agree at factor 1.0) — the harvest record keeps
+            # the statement; no actionable proposal is generated.
+            factor_rows = list((artifact.get("usable") or {}).get("nar_factors") or [])
+            factors = [
+                float(r.get("factor") or 1.0) for r in factor_rows
+                if isinstance(r.get("factor"), (int, float))
+            ]
+            if not any(factor > 1.0 for factor in factors):
+                continue
+        if body is None and mechanic == "coi_charge" and timing:
+            # A timing-only statement attaches to the COI body from the
+            # table in force (or the in-force equation's body, or the
+            # pending filed candidate's unit — confirming the timing
+            # proposal creates the equation the table's own proposal
+            # will feed).
+            current = _ws_equations.in_force(artifact, "coi_charge")
+            if current is not None and current.get("body") is not None:
+                body = deepcopy(current["body"])
+            else:
+                coi_rows = list((artifact.get("usable") or {}).get("coi") or [])
+                for candidate_rows in (artifact.get("candidates") or {}).get("coi") or []:
+                    coi_rows = coi_rows + list(candidate_rows.get("rows") or [])
+                units = {str(r.get("rate_unit")) for r in coi_rows if r.get("rate_unit")}
+                if len(units) == 1:
+                    body = _eq.coi_body_for_unit(units.pop())
+            if body is None:
+                continue  # unmapped until a COI equation exists
+            rendering = _eq.render_with_timing(body, timing)
+        elif body is None:
+            continue  # unstructurable here; harvesting preserves it as unmapped
+        else:
+            rendering = _eq.render_equation(body, mechanic)
+        add_proposal(
+            mechanic=mechanic,
+            rendering=rendering,
+            statement=candidate.get("statement"),
+            filename=candidate.get("filename"),
+            page=candidate.get("page"),
+            equation_id=None,
+            candidate={
+                "mechanic": mechanic,
+                "body": body,
+                "timing": timing,
+                "statement": candidate.get("statement"),
+                "filename": candidate.get("filename"),
+                "page": candidate.get("page"),
+                "assist": candidate.get("assist"),
+            },
+        )
     return proposals
 
 
@@ -349,7 +356,7 @@ def generate_proposals(
         for item in artifact.get("dismissedProposals") or []
         if isinstance(item, dict)
     }
-    proposals = _filed_table_proposals(artifact) + _switch_proposals(artifact, slices or [])
+    proposals = _filed_table_proposals(artifact) + _equation_proposals(artifact, slices or [])
     seen: set = set()
     unique: List[Dict[str, Any]] = []
     for proposal in proposals:
@@ -376,22 +383,27 @@ def apply_proposal(
     """Apply a CONFIRMED proposal; returns {"artifact", "change", ...}.
 
     Filed-table proposals apply through the same acceptance path as a
-    manual review acceptance; switch proposals apply through the
-    Phase 3 correction machinery, with the proposal's origin and
-    evidence stamped onto the correction record.  The caller (the API)
-    enforces the confirmation gate before calling this.
+    manual review acceptance (which also puts the table's equation
+    transcription in force).  Equation proposals apply through the
+    Phase 7 approval machinery — the harvested record is approved, or
+    the candidate is materialised and approved — with the proposal's
+    origin and evidence stamped onto the equation record.  The caller
+    (the API) enforces the confirmation gate before calling this.
     """
 
     slot = SLOT_BY_ID[str(proposal["slot"])]
     mechanic = str(proposal["mechanic"])
 
     if proposal["kind"] == PROPOSAL_KIND_FILED_TABLE:
-        result = accept_filed_mechanic(
+        accepted = accept_filed_mechanic(
             deepcopy(artifact or {}),
             mechanic,
             candidate_id=str(proposal["candidateId"]),
             reviewed_by=who,
         )
+        result = _ws_equations.transcribe_tables_as_approved(
+            accepted, who=who, at=at
+        )["artifact"]
         change = _change_record(
             workspace_id=workspace_id,
             slot=slot,
@@ -416,34 +428,60 @@ def apply_proposal(
         change["proposalId"] = proposal["id"]
         return {"artifact": result, "change": change, "proposal": proposal}
 
-    if proposal["kind"] == PROPOSAL_KIND_SWITCH:
-        spec = {
-            "variant": proposal["variant"],
-            "params": deepcopy(proposal["params"]),
-            "text": None,
-        }
-        applied = _corrections.apply_correction(
-            artifact or {}, slot, spec, workspace_id=workspace_id, who=who, at=at
+    if proposal["kind"] == PROPOSAL_KIND_EQUATION:
+        equation_mechanic = str(proposal["equationMechanic"])
+        if proposal.get("equationId"):
+            approved = _ws_equations.approve_equation(
+                artifact or {}, equation_mechanic,
+                str(proposal["equationId"]), who=who, at=at,
+            )
+            result = approved["artifact"]
+            record = approved["record"]
+        elif proposal.get("candidate"):
+            approved = _ws_equations.approve_harvest_candidate(
+                artifact or {}, proposal["candidate"],
+                who=who, at=at, proposal_id=proposal["id"],
+            )
+            result = approved["artifact"]
+            record = approved["record"]
+        else:
+            raise ValueError("Equation proposal carries no equation or candidate")
+        # Stamp the proposal provenance on the record that went in force.
+        stored = next(
+            (r for r in _ws_equations.records_for(result, equation_mechanic)
+             if r.get("id") == record.get("id")),
+            None,
         )
-        record = applied["correction"]
-        # The same record object lives in the returned artifact's
-        # corrections map — stamp the proposal provenance on it.
-        record["origin"] = "extraction_proposal"
-        record["proposalId"] = proposal["id"]
-        record["proposalEvidence"] = deepcopy(proposal["evidence"])
-        change = applied["change"]
-        change["kind"] = "proposal_correction"
+        if stored is not None:
+            stored["source"]["proposalId"] = proposal["id"]
+            stored["source"]["proposalEvidence"] = deepcopy(proposal["evidence"])
+            record = stored
+        change = _change_record(
+            workspace_id=workspace_id,
+            slot=slot,
+            kind="proposal_equation",
+            who=who,
+            at=at,
+            summary=(
+                f"Confirmed extraction proposal: {proposal['confirmBack']} "
+                f"(evidence: {proposal['evidence'].get('filename')}"
+                + (f", p. {proposal['evidence'].get('page')}" if proposal["evidence"].get("page") else "")
+                + ")"
+            ),
+            prior={},
+            new={
+                "status": "approved",
+                "proposalId": proposal["id"],
+                "equationId": record.get("id"),
+                "equationMechanic": equation_mechanic,
+            },
+        )
         change["proposalId"] = proposal["id"]
-        change["summary"] = (
-            f"Confirmed extraction proposal: {change['summary']} "
-            f"(evidence: {proposal['evidence'].get('filename')}"
-            + (f", p. {proposal['evidence'].get('page')}" if proposal["evidence"].get("page") else "")
-            + ")"
-        )
+        change["equationId"] = record.get("id")
         return {
-            "artifact": applied["artifact"],
+            "artifact": result,
             "change": change,
-            "correction": record,
+            "equation": record,
             "proposal": proposal,
         }
 
