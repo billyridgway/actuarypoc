@@ -97,11 +97,12 @@ def _list_json(prefix: str) -> List[Dict[str, Any]]:
     return values
 
 
-def create_workspace() -> Dict[str, Any]:
+def create_workspace(name: Optional[str] = None) -> Dict[str, Any]:
     workspace_id = f"ws-{uuid.uuid4().hex[:8]}"
     now = _now()
     workspace = {
         "id": workspace_id,
+        "name": name,
         "status": "waiting_for_documents",
         "document_count": 0,
         "latest_snapshot_json": {},

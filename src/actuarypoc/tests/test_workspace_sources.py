@@ -472,3 +472,18 @@ def test_picker_flows_work_when_head_is_unusable(monkeypatch: pytest.MonkeyPatch
     sources = view.json()["sources"]
     assert sources[0]["missing"] is False
     assert sources[0]["changedSinceAnalyzed"] is False
+
+
+def test_create_records_an_optional_name(client: TestClient) -> None:
+    created = client.post(
+        "/api/workspaces",
+        json={
+            "name": "Promise UL — real filings (Oct 26)",
+            "sources": [{"bucket": "filings", "prefix": "promise-ul/"}],
+        },
+    )
+    assert created.status_code == 200
+    assert created.json()["workspace"]["name"] == "Promise UL — real filings (Oct 26)"
+    workspace_id = created.json()["workspace"]["id"]
+    view = client.get(f"/api/workspaces/{workspace_id}")
+    assert view.json()["workspace"]["name"] == "Promise UL — real filings (Oct 26)"
