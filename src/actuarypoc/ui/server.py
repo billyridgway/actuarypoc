@@ -320,6 +320,7 @@ def _workspace_to_api(ws: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         "id": ws.get("id"),
+        "name": ws.get("name"),
         "status": ws.get("status"),
         "documentCount": ws.get("document_count", 0),
         "createdAt": ws.get("created_at"),
@@ -352,6 +353,7 @@ class WorkspaceSourceSelection(BaseModel):  # type: ignore[misc]
 
 
 class WorkspaceCreateRequest(BaseModel):  # type: ignore[misc]
+    name: Optional[str] = None
     sources: Optional[List[WorkspaceSourceSelection]] = None
 
 
@@ -503,7 +505,7 @@ def api_create_workspace(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    ws = create_workspace()
+    ws = create_workspace(name=(payload.name if payload is not None else None))
     if ws is None:
         raise HTTPException(status_code=503, detail="Workspace storage is not available in MinIO")
 
