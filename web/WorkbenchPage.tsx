@@ -70,6 +70,7 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
   const [data, setData] = React.useState<any>(snapshot ?? null);
   const [meta, setMeta] = React.useState<any>(null);
   const [documents, setDocuments] = React.useState<any[]>([]);
+  const [sources, setSources] = React.useState<any[]>([]);
   const [activeTab, setActiveTab] = React.useState<BenchTab>(initialTab ?? "ledger");
   const ws = useProjectionWorkspace(data, workspaceId);
 
@@ -81,6 +82,7 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
       if (body?.snapshot) setData(body.snapshot);
       setMeta(body?.workspace ?? null);
       setDocuments(Array.isArray(body?.documents) ? body.documents : []);
+      setSources(Array.isArray(body?.sources) ? body.sources : []);
     } catch {
       /* keep the current bench state if a refresh fails */
     }
@@ -330,6 +332,47 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
               </ul>
             ) : (
               <p className="muted">No documents listed for this workspace.</p>
+            )}
+            {sources.length > 0 && (
+              <>
+                <h3>Sources in the object store</h3>
+                <p className="muted">
+                  These documents are referenced in place — the workspace holds no copy. The
+                  version analyzed is the one cited by the analysis and its equations.
+                </p>
+                <ul className="muted">
+                  {sources.map((source: any) => (
+                    <li key={source.documentId ?? `${source.bucket}/${source.key}`}>
+                      <strong>{source.filename || source.key}</strong>
+                      <br />
+                      {source.bucket}/{source.key}
+                      {source.analyzedEtag
+                        ? ` · analyzed version ${String(source.analyzedEtag).slice(0, 8)}…`
+                        : " · not yet analyzed"}
+                      {source.missing ? (
+                        <>
+                          {" "}
+                          <span className="basis-tag">Not found in the store</span>
+                        </>
+                      ) : source.changedSinceAnalyzed ? (
+                        <>
+                          {" "}
+                          <span className="basis-tag">
+                            Changed since analyzed — re-run analysis to use the current version
+                          </span>
+                        </>
+                      ) : null}
+                      {source.changedAtAnalyze ? (
+                        <>
+                          <br />
+                          The source changed between selection and the last analyze; the analyze
+                          read the current version and updated the pin to it.
+                        </>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              </>
             )}
             <p>
               <a href={`/web?workspace=${encodeURIComponent(workspaceId)}&view=analysis`}>

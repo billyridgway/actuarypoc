@@ -136,6 +136,7 @@ def create_workspace_document(
     kind: str = "workspace",
     object_hash: Optional[str] = None,
     filing_id: Optional[str] = None,
+    source: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     workspace = get_workspace(workspace_id)
     if workspace is None:
@@ -153,6 +154,10 @@ def create_workspace_document(
         "object_hash": object_hash,
         "created_at": now,
     }
+    if source is not None:
+        # A source-referenced document (docs/workspace-sources.md): the
+        # record carries the reference; no bytes are stored for it.
+        document["source"] = source
     _write_json(_document_key(workspace_id, document_id), document)
 
     workspace["document_count"] = len(list_workspace_documents(workspace_id))
@@ -166,6 +171,18 @@ def create_workspace_document(
 def list_workspace_documents(workspace_id: str) -> List[Dict[str, Any]]:
     documents = _list_json(f"workspaces/{workspace_id}/documents/")
     return sorted(documents, key=lambda row: (str(row.get("created_at") or ""), int(row.get("id") or 0)))
+
+
+def update_workspace_document(
+    workspace_id: str, document: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """Persist a mutated document record (e.g. a refreshed source pin)."""
+
+    document_id = document.get("id")
+    if document_id is None or get_workspace(workspace_id) is None:
+        return None
+    _write_json(_document_key(workspace_id, int(document_id)), document)
+    return document
 
 
 def store_workspace_executable_mechanics(

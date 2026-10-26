@@ -36,7 +36,12 @@ from actuarypoc.extract.slice_extraction import (
     extract_product_metadata_from_slices,
 )
 from actuarypoc.extract.table_extractor import extract_tables_from_pdf_bytes
-from actuarypoc.storage.minio_client import ensure_bucket, get_bucket_name, get_minio_client
+from actuarypoc.storage.minio_client import (
+    document_object_location,
+    ensure_bucket,
+    get_bucket_name,
+    get_minio_client,
+)
 
 
 def _dispatch_budget() -> int:
@@ -56,11 +61,10 @@ def _put_json(key: str, value: Dict[str, Any]) -> None:
     )
 
 
-def _read_object(key: str) -> bytes:
+def _read_object(key: str, bucket: Optional[str] = None) -> bytes:
     client = get_minio_client()
     ensure_bucket(client)
-    bucket = get_bucket_name()
-    response = client.get_object(bucket, key)
+    response = client.get_object(bucket or get_bucket_name(), key)
     try:
         return response.read()
     finally:
@@ -86,11 +90,21 @@ def _process_document(workspace_id: str, document: Dict[str, Any]) -> Dict[str, 
         "objectPath": object_path,
         "status": "failed",
     }
-    if Path(object_path).suffix.lower() != ".pdf":
+    source = document.get("source")
+    if isinstance(source, dict) and source.get("bucket"):
+        # Provenance for a referenced document cites the object in the
+        # store (bucket + key + the etag this analyze actually read).
+        record["source"] = {
+            "bucket": source.get("bucket"),
+            "key": source.get("key"),
+            "etag": source.get("analyzedEtag") or source.get("etag"),
+        }
+    if Path(object_path).suffix.lower() != ".pdf" and Path(filename).suffix.lower() != ".pdf":
         record.update({"status": "skipped", "reason": "not a PDF document"})
         return record
 
-    content = _read_object(object_path)
+    source_bucket, source_key = document_object_location(document, get_bucket_name())
+    content = _read_object(source_key, bucket=source_bucket)
     doc_id = str(document.get("id") or object_path)
     slug = _doc_storage_slug(document)
     prefix = f"workspaces/{workspace_id}/analysis/documents/{slug}"
@@ -118,7 +132,10 @@ def _process_document(workspace_id: str, document: Dict[str, Any]) -> Dict[str, 
 
     tables = extract_tables_from_pdf_bytes(content, document=filename, object_path=object_path)
     tables_key = f"{prefix}/tables.json"
-    _put_json(tables_key, {"document": filename, "objectPath": object_path, "tables": tables})
+    tables_payload: Dict[str, Any] = {"document": filename, "objectPath": object_path, "tables": tables}
+    if record.get("source"):
+        tables_payload["source"] = record["source"]
+    _put_json(tables_key, tables_payload)
 
     gaps = coverage_gaps(doc_map.slices, doc_map.total_chars)
     record.update(
@@ -344,6 +361,7 @@ def run_workspace_slice_extraction(
             {
                 "document": r.get("document"),
                 "objectPath": r.get("objectPath"),
+                "source": r.get("source"),
                 "mapKey": r.get("mapKey"),
                 "slicesKey": r.get("slicesKey"),
                 "pageCount": r.get("pageCount"),

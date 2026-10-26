@@ -24,7 +24,19 @@ from PyPDF2 import PdfReader
 from actuarypoc.connectors.base import CSVConnector
 from actuarypoc.domain.product_definition_v1 import ProductDefinitionLineage, ProductDefinitionV1
 from actuarypoc.product_registry import get_product_definition
-from actuarypoc.storage.minio_client import ensure_bucket, get_minio_client, get_bucket_name
+from actuarypoc.storage.minio_client import (
+    document_object_location,
+    ensure_bucket,
+    fetch_document_bytes,
+    get_minio_client,
+    get_bucket_name,
+)
+from actuarypoc.storage.object_store import (
+    list_store_buckets,
+    list_store_objects,
+    resolve_source_selections,
+    stat_store_object,
+)
 from actuarypoc.config.assumptions import (
     list_assumption_sets,
     approve_assumption_set,
@@ -144,6 +156,7 @@ from actuarypoc.storage.workspace_store import (
     get_workspace,
     create_workspace_document,
     list_workspace_documents,
+    update_workspace_document,
     update_workspace_analysis,
     delete_workspace_and_documents,
     create_feature_request,
@@ -329,18 +342,259 @@ def _workspace_to_api(ws: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+class WorkspaceSourceSelection(BaseModel):  # type: ignore[misc]
+    """One picker selection: explicit keys, or a prefix resolved at
+    creation time (docs/workspace-sources.md)."""
+
+    bucket: str
+    keys: Optional[List[str]] = None
+    prefix: Optional[str] = None
+
+
+class WorkspaceCreateRequest(BaseModel):  # type: ignore[misc]
+    sources: Optional[List[WorkspaceSourceSelection]] = None
+
+
+class WorkspaceSourcesRequest(BaseModel):  # type: ignore[misc]
+    sources: List[WorkspaceSourceSelection]
+
+
+def _source_record_from_ref(ref: Dict[str, Any]) -> Dict[str, Any]:
+    """The pinned reference stored on a source document record."""
+
+    return {
+        "bucket": ref["bucket"],
+        "key": ref["key"],
+        "etag": ref.get("etag"),
+        "size": ref.get("size"),
+        "lastModified": ref.get("lastModified"),
+        "selectedAt": _correction_now(),
+        "analyzedEtag": None,
+        "changedAtAnalyze": False,
+    }
+
+
+def _add_source_documents(
+    workspace_id: str,
+    selections: List[Dict[str, Any]],
+    *,
+    existing_documents: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Resolve selections and record them as source documents.
+
+    Resolution happens before any document is written, so a bad key
+    fails the whole request without leaving a partial set behind.
+    Re-selecting an already-referenced (bucket, key) is a reported
+    no-op, not a duplicate document.
+    """
+
+    client = get_minio_client()
+    ensure_bucket(client)
+    try:
+        refs = resolve_source_selections(client, selections)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    existing = existing_documents
+    if existing is None:
+        existing = list_workspace_documents(workspace_id)
+    already = {
+        (str((d.get("source") or {}).get("bucket")), str((d.get("source") or {}).get("key")))
+        for d in existing
+        if isinstance(d.get("source"), dict)
+    }
+    created: List[Dict[str, Any]] = []
+    skipped = 0
+    for ref in refs:
+        if (ref["bucket"], ref["key"]) in already:
+            skipped += 1
+            continue
+        doc = create_workspace_document(
+            workspace_id=workspace_id,
+            kind="object_store",
+            description=Path(ref["key"]).name or ref["key"],
+            object_path=ref["key"],
+            object_hash=None,
+            filing_id=None,
+            source=_source_record_from_ref(ref),
+        )
+        if doc is None:
+            raise HTTPException(
+                status_code=503, detail="Failed to record source document in MinIO"
+            )
+        created.append(doc)
+    return {"created": created, "skippedDuplicates": skipped, "resolved": len(refs)}
+
+
+def _workspace_sources_view(
+    workspace_documents: List[Dict[str, Any]], *, check_live: bool = True
+) -> List[Dict[str, Any]]:
+    """Per-source state for one workspace (docs/workspace-sources.md).
+
+    ``changedSinceAnalyzed`` is a live etag check against the etag the
+    last analyze actually read (or the pin, before any analyze); it is
+    ``None`` when the check itself could not be made.
+    """
+
+    client = None
+    view: List[Dict[str, Any]] = []
+    for document in workspace_documents:
+        source = document.get("source")
+        if not isinstance(source, dict):
+            continue
+        entry: Dict[str, Any] = {
+            "documentId": document.get("id"),
+            "bucket": source.get("bucket"),
+            "key": source.get("key"),
+            "filename": document.get("description"),
+            "pinnedEtag": source.get("etag"),
+            "analyzedEtag": source.get("analyzedEtag"),
+            "size": source.get("size"),
+            "lastModified": source.get("lastModified"),
+            "selectedAt": source.get("selectedAt"),
+            "changedAtAnalyze": bool(source.get("changedAtAnalyze")),
+            "changedSinceAnalyzed": None,
+            "missing": False,
+        }
+        if check_live:
+            try:
+                if client is None:
+                    client = get_minio_client()
+                current = stat_store_object(client, str(source.get("bucket")), str(source.get("key")))
+                baseline = source.get("analyzedEtag") or source.get("etag")
+                entry["changedSinceAnalyzed"] = bool(
+                    baseline is not None and current.get("etag") != baseline
+                )
+                entry["currentEtag"] = current.get("etag")
+            except Exception as exc:  # noqa: BLE001 - the view must not fail
+                if getattr(exc, "code", None) in {"NoSuchKey", "NoSuchObject", "NoSuchBucket"}:
+                    entry["missing"] = True
+                    entry["changedSinceAnalyzed"] = True
+        view.append(entry)
+    return view
+
+
 @app.post("/api/workspaces")
-def api_create_workspace() -> Dict[str, Any]:
-    """Create an empty, document‑first workspace.
+def api_create_workspace(
+    payload: Optional[WorkspaceCreateRequest] = None,
+) -> Dict[str, Any]:
+    """Create a document‑first workspace, optionally with store sources.
 
     No product metadata is required at creation time; the workspace is
-    initially in ``waiting_for_documents`` status.
+    initially in ``waiting_for_documents`` status. With ``sources``, the
+    selections are resolved and pinned at creation (docs/workspace-
+    sources.md) and the workspace starts ``ready_for_analysis``.
     """
+
+    selections = []
+    if payload is not None and payload.sources:
+        selections = [s.model_dump() if hasattr(s, "model_dump") else s.dict() for s in payload.sources]
+    if selections:
+        # Validate + resolve before creating anything, so a bad
+        # selection never leaves an empty workspace behind.
+        client = get_minio_client()
+        ensure_bucket(client)
+        try:
+            resolve_source_selections(client, selections)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     ws = create_workspace()
     if ws is None:
         raise HTTPException(status_code=503, detail="Workspace storage is not available in MinIO")
-    return {"workspace": _workspace_to_api(ws)}
+
+    result: Dict[str, Any] = {"workspace": _workspace_to_api(ws)}
+    if selections:
+        added = _add_source_documents(ws["id"], selections, existing_documents=[])
+        ws = get_workspace(ws["id"]) or ws
+        result["workspace"] = _workspace_to_api(ws)
+        result["sources"] = _workspace_sources_view(added["created"], check_live=False)
+        result["skippedDuplicates"] = added["skippedDuplicates"]
+    else:
+        result["sources"] = []
+    return result
+
+
+@app.post("/api/workspaces/{workspace_id}/sources")
+def api_add_workspace_sources(
+    workspace_id: str, payload: WorkspaceSourcesRequest
+) -> Dict[str, Any]:
+    """Add object-store sources to an existing workspace.
+
+    Adding sources to an analyzed workspace marks its projection stale
+    and records the addition in the change history — the new documents
+    join on the next analyze, never silently.
+    """
+
+    ws = get_workspace(workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    selections = [s.model_dump() if hasattr(s, "model_dump") else s.dict() for s in payload.sources or []]
+    if not selections:
+        raise HTTPException(status_code=400, detail="At least one source selection is required")
+
+    added = _add_source_documents(workspace_id, selections)
+    created = added["created"]
+    if created:
+        names = ", ".join(str(d.get("description") or "") for d in created)
+        append_workspace_mechanics_change(
+            workspace_id,
+            {
+                "id": f"chg-{uuid.uuid4().hex[:12]}",
+                "workspaceId": workspace_id,
+                "slot": None,
+                "mechanic": None,
+                "kind": "sources_added",
+                "who": "workspace_user",
+                "at": _correction_now(),
+                "summary": (
+                    f"{len(created)} source document(s) added from the object store: {names}. "
+                    "They join the workspace on the next analyze."
+                ),
+                "prior": {},
+                "new": {
+                    "sources": [
+                        {"bucket": (d.get("source") or {}).get("bucket"),
+                         "key": (d.get("source") or {}).get("key")}
+                        for d in created
+                    ]
+                },
+            },
+        )
+        if ws.get("status") == "analyzed":
+            set_workspace_projection_stale(workspace_id, stale=True, slots=[])
+    documents = list_workspace_documents(workspace_id)
+    return {
+        "workspaceId": workspace_id,
+        "added": len(created),
+        "skippedDuplicates": added["skippedDuplicates"],
+        "sources": _workspace_sources_view(documents),
+    }
+
+
+@app.get("/api/object-store/buckets")
+def api_object_store_buckets() -> Dict[str, Any]:
+    """Buckets the app's store identity can see (docs/workspace-sources.md)."""
+
+    client = get_minio_client()
+    return {"buckets": list_store_buckets(client)}
+
+
+@app.get("/api/object-store/objects")
+def api_object_store_objects(
+    bucket: str = Query(...),
+    prefix: str = Query(""),
+    recursive: bool = Query(False),
+) -> Dict[str, Any]:
+    """One page of a bucket listing for the source picker."""
+
+    client = get_minio_client()
+    try:
+        return list_store_objects(client, bucket, prefix, recursive=recursive)
+    except Exception as exc:  # noqa: BLE001
+        if getattr(exc, "code", None) in {"NoSuchBucket", "NoSuchKey", "NoSuchObject"}:
+            raise HTTPException(status_code=404, detail=f"Bucket not found: {bucket}") from exc
+        raise
 
 
 @app.get("/api/workspaces")
@@ -364,18 +618,25 @@ def _build_document_inventory(
 
     inventory: List[Dict[str, Any]] = []
     for d in workspace_documents:
-        inventory.append(
-            {
-                "id": d.get("id"),
-                "description": d.get("description"),
-                "kind": d.get("kind"),
-                "objectPath": d.get("object_path"),
-                "createdAt": d.get("created_at"),
-                "processingStatus": d.get("processing_status") or "uploaded",
-                "pageCount": d.get("page_count"),
-                "textLength": d.get("text_length"),
+        entry: Dict[str, Any] = {
+            "id": d.get("id"),
+            "description": d.get("description"),
+            "kind": d.get("kind"),
+            "objectPath": d.get("object_path"),
+            "createdAt": d.get("created_at"),
+            "processingStatus": d.get("processing_status") or "uploaded",
+            "pageCount": d.get("page_count"),
+            "textLength": d.get("text_length"),
+        }
+        if isinstance(d.get("source"), dict):
+            # Provenance for a referenced document cites the object in
+            # the store (bucket + key + the etag actually analyzed).
+            entry["source"] = {
+                "bucket": d["source"].get("bucket"),
+                "key": d["source"].get("key"),
+                "etag": d["source"].get("analyzedEtag") or d["source"].get("etag"),
             }
-        )
+        inventory.append(entry)
     return inventory
 
 
@@ -398,10 +659,8 @@ def _extract_workspace_documents(
         document = dict(original)
         object_path = str(document.get("object_path") or "")
         filename = str(document.get("description") or Path(object_path).name)
-        response = None
         try:
-            response = client.get_object(bucket, object_path)
-            content = response.read()
+            content = fetch_document_bytes(client, document, bucket)
             reader = PdfReader(io.BytesIO(content))
             pages = [str(page.extract_text() or "") for page in reader.pages]
             text_length = sum(len(page) for page in pages)
@@ -416,10 +675,6 @@ def _extract_workspace_documents(
         except Exception as exc:  # noqa: BLE001
             logging.warning("[workspace-analysis] Could not extract %s: %s", object_path, exc)
             document.update({"processing_status": "extraction_failed", "page_count": None, "text_length": 0})
-        finally:
-            if response is not None:
-                response.close()
-                response.release_conn()
         processed.append(document)
 
     return processed, corpus
@@ -442,19 +697,14 @@ def _extract_workspace_executable_mechanics(
         filename = str(document.get("description") or "")
         if Path(filename).suffix.lower() not in {".csv", ".tsv", ".xlsx", ".xlsm", ".pdf"}:
             continue
-        response = None
         try:
-            response = client.get_object(bucket, str(document.get("object_path") or ""))
-            extracted = extract_ul_mechanics(filename, response.read())
+            content = fetch_document_bytes(client, document, bucket)
+            extracted = extract_ul_mechanics(filename, content)
             for mechanic, rows in (extracted.get("mechanics") or {}).items():
                 combined["mechanics"].setdefault(mechanic, []).extend(rows or [])
             combined["warnings"].extend(extracted.get("warnings") or [])
         except Exception as exc:  # noqa: BLE001
             combined["warnings"].append(f"{filename}: structured extraction rejected: {exc}")
-        finally:
-            if response is not None:
-                response.close()
-                response.release_conn()
     combined["usable"] = usable_mechanics(combined)
     combined["candidates"] = {"coi": [], "surrender": [], "fees": [], "nar_factors": [], "corridor": []}
     for mechanic, rows in combined["mechanics"].items():
@@ -1889,16 +2139,17 @@ def api_get_workspace(workspace_id: str) -> Dict[str, Any]:
     # Shape documents similar to existing list_product_documents surface.
     documents_payload: List[Dict[str, Any]] = []
     for d in docs:
-        documents_payload.append(
-            {
-                "id": d.get("id"),
-                "kind": d.get("kind"),
-                "description": d.get("description"),
-                "objectPath": d.get("object_path"),
-                "createdAt": d.get("created_at"),
-                "filingId": d.get("serff_id"),
-            }
-        )
+        entry: Dict[str, Any] = {
+            "id": d.get("id"),
+            "kind": d.get("kind"),
+            "description": d.get("description"),
+            "objectPath": d.get("object_path"),
+            "createdAt": d.get("created_at"),
+            "filingId": d.get("serff_id"),
+        }
+        if isinstance(d.get("source"), dict):
+            entry["source"] = d["source"]
+        documents_payload.append(entry)
 
     raw_snapshot = ws.get("latest_snapshot_json") or {}
     if not isinstance(raw_snapshot, dict):
@@ -1922,6 +2173,7 @@ def api_get_workspace(workspace_id: str) -> Dict[str, Any]:
     return {
         "workspace": _workspace_to_api(ws),
         "documents": documents_payload,
+        "sources": _workspace_sources_view(docs),
         "snapshot": snapshot,
     }
 
@@ -2072,6 +2324,94 @@ async def api_workspace_upload_document(
     }
 
 
+def _refresh_source_documents(
+    workspace_id: str, documents: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Re-stat source documents at analyze time (docs/workspace-sources.md).
+
+    The pin discipline: analyze always reads the object's CURRENT
+    bytes, but never silently. When the current etag differs from the
+    etag pinned at selection, the document record is updated —
+    ``changedAtAnalyze`` set, the pin advanced to the etag actually
+    read (also kept as ``analyzedEtag``, which is what derived
+    artifacts cite) — and the change lands in the workspace change
+    history. Uploaded documents pass through untouched.
+    """
+
+    client = None
+    refreshed: List[Dict[str, Any]] = []
+    changed: List[Tuple[Dict[str, Any], Optional[str], Optional[str]]] = []
+    for original in documents:
+        document = dict(original)
+        source = document.get("source")
+        if not isinstance(source, dict):
+            refreshed.append(document)
+            continue
+        source = dict(source)
+        document["source"] = source
+        try:
+            if client is None:
+                client = get_minio_client()
+            current = stat_store_object(
+                client, str(source.get("bucket")), str(source.get("key"))
+            )
+        except Exception as exc:  # noqa: BLE001 - analyze proceeds; reads will surface it
+            logging.warning(
+                "[workspace-analysis] source stat failed for %s/%s: %s",
+                source.get("bucket"), source.get("key"), exc,
+            )
+            refreshed.append(document)
+            continue
+        current_etag = current.get("etag")
+        pinned = source.get("etag")
+        source["analyzedEtag"] = current_etag
+        source["size"] = current.get("size")
+        source["lastModified"] = current.get("lastModified")
+        if pinned is not None and current_etag != pinned:
+            source["changedAtAnalyze"] = True
+            source["previousEtag"] = pinned
+            source["etag"] = current_etag
+            changed.append((document, pinned, current_etag))
+        else:
+            source["changedAtAnalyze"] = False
+        try:
+            update_workspace_document(workspace_id, document)
+        except Exception as exc:  # noqa: BLE001 - persistence is best-effort here
+            logging.warning(
+                "[workspace-analysis] could not persist source refresh for %s: %s",
+                document.get("id"), exc,
+            )
+        refreshed.append(document)
+    for document, pinned, current_etag in changed:
+        source = document.get("source") or {}
+        try:
+            append_workspace_mechanics_change(
+                workspace_id,
+                {
+                    "id": f"chg-{uuid.uuid4().hex[:12]}",
+                    "workspaceId": workspace_id,
+                    "slot": None,
+                    "mechanic": None,
+                    "kind": "source_changed",
+                    "who": "workspace_user",
+                    "at": _correction_now(),
+                    "summary": (
+                        f"Source {source.get('bucket')}/{source.get('key')} changed since it was "
+                        f"selected (etag {pinned} -> {current_etag}); this analyze read the "
+                        "current version and the pin was updated to what was read."
+                    ),
+                    "prior": {"etag": pinned},
+                    "new": {"etag": current_etag},
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            logging.warning(
+                "[workspace-analysis] could not record source change for %s: %s",
+                document.get("id"), exc,
+            )
+    return refreshed
+
+
 @app.post("/api/workspaces/{workspace_id}/analyze")
 def api_workspace_analyze(workspace_id: str) -> Dict[str, Any]:
     """Run an understanding analysis for a workspace (MVP).
@@ -2093,6 +2433,7 @@ def api_workspace_analyze(workspace_id: str) -> Dict[str, Any]:
         docs_for_inventory = list_workspace_documents(workspace_id)
     except Exception:
         docs_for_inventory = []
+    docs_for_inventory = _refresh_source_documents(workspace_id, docs_for_inventory)
     mechanics_artifact = _extract_workspace_executable_mechanics(docs_for_inventory)
     # Phase 2: workspace slot edits are durable product inputs, not
     # analysis by-products — re-apply them onto the fresh artifact so a
@@ -15549,8 +15890,10 @@ async def ui_view(key: str, view: str = Query("actuarial", description="View mod
 # The workspace is now the only public application flow. The legacy product,
 # projection, review, and debug implementations remain private helpers where
 # workspace analysis still uses them, but their HTTP routes are deliberately
-# removed from the application surface.
-_PUBLIC_ROUTE_PREFIXES = ("/api/workspaces", "/web", "/assets")
+# removed from the application surface. The object-store browsing routes
+# (/api/object-store/*) are public because the workspace creation flow's
+# source picker is built on them (docs/workspace-sources.md).
+_PUBLIC_ROUTE_PREFIXES = ("/api/workspaces", "/api/object-store", "/web", "/assets")
 _PUBLIC_EXACT_ROUTES = {
     "/health",
     "/ui/dev",
