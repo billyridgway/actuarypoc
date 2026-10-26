@@ -2395,8 +2395,12 @@ def api_accept_synthetic_coi(workspace_id: str, payload: SyntheticCoiAcceptReque
         raise HTTPException(status_code=409, detail="An evidenced COI table is already loaded and cannot be replaced by synthetic data")
     artifact.setdefault("usable", {})["coi"] = rows
     artifact.setdefault("status", {})["coi"] = "synthetic_scenario"
+    # A fallback preview's parameters were never produced by the model;
+    # the persisted provenance must say so, not "ai_synthetic".
+    coi_fallback = bool((preview["parameters"] or {}).get("agentFallback"))
     artifact.setdefault("synthetic", {})["coi"] = {
-        "sourceType": "ai_synthetic",
+        "sourceType": "deterministic_fallback" if coi_fallback else "ai_synthetic",
+        "agentFallback": coi_fallback,
         "model": payload.model,
         "generatedAt": payload.generatedAt or preview["generatedAt"],
         "acceptedAt": datetime.utcnow().isoformat() + "Z",
@@ -2463,8 +2467,12 @@ def api_accept_synthetic_surrender(workspace_id: str, payload: SyntheticCoiAccep
         raise HTTPException(status_code=409, detail="An evidenced surrender schedule is already loaded and cannot be replaced by synthetic data")
     artifact.setdefault("usable", {})["surrender"] = rows
     artifact.setdefault("status", {})["surrender"] = "synthetic_scenario"
+    # A fallback preview's parameters were never produced by the model;
+    # the persisted provenance must say so, not "ai_synthetic".
+    surrender_fallback = bool((preview["parameters"] or {}).get("agentFallback"))
     artifact.setdefault("synthetic", {})["surrender"] = {
-        "sourceType": "ai_synthetic",
+        "sourceType": "deterministic_fallback" if surrender_fallback else "ai_synthetic",
+        "agentFallback": surrender_fallback,
         "model": payload.model,
         "generatedAt": payload.generatedAt or preview["generatedAt"],
         "acceptedAt": datetime.utcnow().isoformat() + "Z",
@@ -11989,7 +11997,7 @@ def build_ul_illustration_for_product(product_code: str, request: Dict[str, Any]
             "unit": None if executable.get("coi") else "rate",
             "status": (
                 "synthetic_assumption"
-                if any((row.get("provenance") or {}).get("sourceType") == "ai_synthetic" for row in (executable.get("coi") or []))
+                if any((row.get("provenance") or {}).get("sourceType") in {"ai_synthetic", "deterministic_fallback"} for row in (executable.get("coi") or []))
                 else "evidenced" if executable.get("coi") else "placeholder"
             ),
             "source": _mechanics_source(executable.get("coi")) if executable.get("coi") else "Flat rate applied to face amount; filed COI table not loaded",
@@ -12012,7 +12020,7 @@ def build_ul_illustration_for_product(product_code: str, request: Dict[str, Any]
             "value": f"{len(executable.get('surrender') or [])} executable rows" if executable.get("surrender") else f"{cfg.max_surrender_pct:.2%} of account value declining over {cfg.surrender_period_years} years",
             "status": (
                 "synthetic_assumption"
-                if any((row.get("provenance") or {}).get("sourceType") == "ai_synthetic" for row in (executable.get("surrender") or []))
+                if any((row.get("provenance") or {}).get("sourceType") in {"ai_synthetic", "deterministic_fallback"} for row in (executable.get("surrender") or []))
                 else "evidenced" if executable.get("surrender") else "placeholder"
             ),
             "source": _mechanics_source(executable.get("surrender")) if executable.get("surrender") else "Simplified runtime schedule; filed schedule not loaded",

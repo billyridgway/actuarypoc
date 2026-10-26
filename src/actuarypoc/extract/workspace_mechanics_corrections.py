@@ -180,6 +180,8 @@ def _source_phrase(provenance: Dict[str, Any]) -> str:
         return f"as filed{where}" + (" (accepted)" if status == "accepted" else " (pending review)")
     if source_type == "ai_synthetic":
         return "from the synthetic schedule"
+    if source_type == "deterministic_fallback":
+        return "from the deterministic fallback schedule (AI model unavailable)"
     if source_type == "workspace_edit":
         return "as set by a workspace edit"
     if source_type == CORRECTION_SOURCE_TYPE:
