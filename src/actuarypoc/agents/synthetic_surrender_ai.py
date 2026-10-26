@@ -10,6 +10,31 @@ from typing import Any, Dict, List, Mapping, Optional
 from openai import OpenAI
 
 
+# Label persisted wherever a proposal's model is recorded when the model
+# never produced the parameters: the deterministic fallback below. It must
+# never read as an AI generation.
+FALLBACK_MODEL_LABEL = "Deterministic fallback (AI model unavailable)"
+
+# The product context is a JSON dump of the whole workspace snapshot; only
+# a bounded excerpt goes to the model (CPU prefill cost on local models).
+_CONTEXT_EXCERPT_CHARS = 6000
+
+
+def _agent_timeout_seconds() -> float:
+    """Per-call timeout for the synthetic-agent model request.
+
+    Bounded so the generate flow always answers: the production model
+    endpoint serialises requests and sleeps when idle, and the OpenAI SDK
+    default (~600s, with retries) turned a slow or cold call into a button
+    that hung for minutes. Override with SYNTHETIC_AGENT_TIMEOUT_S.
+    """
+
+    try:
+        return float(os.getenv("SYNTHETIC_AGENT_TIMEOUT_S", "45"))
+    except ValueError:
+        return 45.0
+
+
 DEFAULT_PARAMETERS: Dict[str, Any] = {
     "initial_charge_percent_account_value": 0.10,
     "terminal_charge_percent_account_value": 0.0,
@@ -98,38 +123,68 @@ def _repair_agent_parameters(raw: Mapping[str, Any]) -> Dict[str, Any]:
     return _validate_parameters(repaired)
 
 
+def _fallback_parameters(*, reason: str) -> Dict[str, Any]:
+    """Deterministic stand-in proposal, truthfully labelled as a fallback.
+
+    Used whenever the model cannot produce parameters. The model field
+    names the fallback (never a model), ``agentFallback`` is set, and the
+    rationale states that the model was unavailable and the standard
+    default parameters were used — so a schedule built from these
+    parameters is never mistaken for an AI generation downstream.
+    """
+
+    parameters = _validate_parameters({})
+    parameters["rationale"] = (
+        f"AI model unavailable ({reason}); standard default parameters were used. "
+        f"{DEFAULT_PARAMETERS['rationale']}"
+    )
+    parameters["agentFallback"] = True
+    parameters["model"] = FALLBACK_MODEL_LABEL
+    return parameters
+
+
 def propose_synthetic_surrender_parameters(
     *, product_code: str, product_context: str, model: Optional[str] = None,
 ) -> Dict[str, Any]:
+    """Ask the model for bounded schedule parameters, with a bounded wait.
+
+    The client is constructed with an explicit timeout and no retries.
+    ANY model failure — timeout, connection error, invalid JSON, missing
+    API key — returns the deterministic fallback parameters instead of
+    raising, so the generate flow always answers.
+    """
+
+    selected_model = model or os.getenv("SYNTHETIC_SURRENDER_MODEL", os.getenv("ASSUMPTION_EXTRACT_MODEL", "gpt-4o-mini"))
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is not set in the environment")
-    selected_model = model or os.getenv("SYNTHETIC_SURRENDER_MODEL", os.getenv("ASSUMPTION_EXTRACT_MODEL", "gpt-4o-mini"))
+        return _fallback_parameters(reason="no API key is configured")
     prompt = (
         "Propose a conservative synthetic surrender-charge schedule for projection testing only. "
         "Surrender charges are expressed as a percentage of the policy account value. "
         "It is not filed evidence. Return one JSON object containing initial_charge_percent_account_value, "
         "terminal_charge_percent_account_value, period_years, curve_shape (linear, front_loaded, or back_loaded), "
-        f"and rationale.\nProduct: {product_code}\nContext:\n{product_context[:20000]}"
+        f"and rationale.\nProduct: {product_code}\nContext:\n{product_context[:_CONTEXT_EXCERPT_CHARS]}"
     )
-    response = OpenAI(api_key=api_key).chat.completions.create(
-        model=selected_model,
-        messages=[
-            {"role": "system", "content": "You are an actuarial modeling assistant. Output valid JSON only."},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.1,
-    )
-    content = (response.choices[0].message.content or "").strip()
-    if content.startswith("```"):
-        content = content.split("\n", 1)[1] if "\n" in content else ""
-        content = content.rsplit("```", 1)[0].strip()
     try:
+        response = OpenAI(
+            api_key=api_key, timeout=_agent_timeout_seconds(), max_retries=0,
+        ).chat.completions.create(
+            model=selected_model,
+            messages=[
+                {"role": "system", "content": "You are an actuarial modeling assistant. Output valid JSON only."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.1,
+        )
+        content = (response.choices[0].message.content or "").strip()
+        if content.startswith("```"):
+            content = content.split("\n", 1)[1] if "\n" in content else ""
+            content = content.rsplit("```", 1)[0].strip()
         proposed = json.loads(content)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"AI surrender proposal was not valid JSON: {exc}") from exc
-    if not isinstance(proposed, dict):
-        raise RuntimeError("AI surrender proposal must be a JSON object")
+        if not isinstance(proposed, dict):
+            raise RuntimeError("AI surrender proposal must be a JSON object")
+    except Exception as exc:
+        return _fallback_parameters(reason=f"model request failed: {type(exc).__name__}")
     try:
         validated = _validate_parameters(proposed)
     except (TypeError, ValueError):
@@ -140,6 +195,18 @@ def propose_synthetic_surrender_parameters(
 
 def build_synthetic_surrender_schedule(*, parameters: Mapping[str, Any]) -> List[Dict[str, Any]]:
     validated = _validate_parameters(parameters)
+    if validated.get("agentFallback"):
+        # The model never produced these parameters; the rows must not be
+        # stamped as an AI generation.
+        provenance = {
+            "filename": "Deterministic fallback synthetic surrender schedule (AI model unavailable; standard parameters)",
+            "sourceType": "deterministic_fallback",
+        }
+    else:
+        provenance = {
+            "filename": "AI-generated synthetic surrender schedule",
+            "sourceType": "ai_synthetic",
+        }
     period = validated["period_years"]
     rows: List[Dict[str, Any]] = []
     for duration in range(1, period + 1):
@@ -158,27 +225,32 @@ def build_synthetic_surrender_schedule(*, parameters: Mapping[str, Any]) -> List
             "sex": None,
             "charge": round(charge, 8),
             "charge_unit": "percent_account_value",
-            "provenance": {
-                "filename": "AI-generated synthetic surrender schedule",
-                "sourceType": "ai_synthetic",
-            },
+            "provenance": dict(provenance),
         })
     return rows
 
 
 def synthetic_surrender_preview(*, parameters: Mapping[str, Any]) -> Dict[str, Any]:
     rows = build_synthetic_surrender_schedule(parameters=parameters)
+    validated = _validate_parameters(parameters)
+    fallback = bool(validated.get("agentFallback"))
     return {
         "mechanic": "surrender",
-        "parameters": _validate_parameters(parameters),
+        "parameters": validated,
+        "agentFallback": fallback,
         "rowCount": len(rows),
         "maximumCharge": max(row["charge"] for row in rows),
         "minimumCharge": min(row["charge"] for row in rows),
         "sampleRows": rows[:3] + ([] if len(rows) <= 4 else [rows[-1]]),
         "rows": rows,
-        "disclaimer": "Synthetic AI-generated scenario data. Not a filed, approved, or evidenced surrender schedule.",
+        "disclaimer": (
+            "Synthetic scenario data built from standard default parameters because the AI model "
+            "was unavailable. Not a filed, approved, or evidenced surrender schedule."
+            if fallback else
+            "Synthetic AI-generated scenario data. Not a filed, approved, or evidenced surrender schedule."
+        ),
         "generatedAt": datetime.now(timezone.utc).isoformat(),
     }
 
 
-__all__ = ["build_synthetic_surrender_schedule", "propose_synthetic_surrender_parameters", "synthetic_surrender_preview"]
+__all__ = ["FALLBACK_MODEL_LABEL", "build_synthetic_surrender_schedule", "propose_synthetic_surrender_parameters", "synthetic_surrender_preview"]

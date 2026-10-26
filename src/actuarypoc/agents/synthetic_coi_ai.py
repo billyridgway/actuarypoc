@@ -15,6 +15,31 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 from openai import OpenAI
 
 
+# Label persisted wherever a proposal's model is recorded when the model
+# never produced the parameters: the deterministic fallback below. It must
+# never read as an AI generation.
+FALLBACK_MODEL_LABEL = "Deterministic fallback (AI model unavailable)"
+
+# The product context is a JSON dump of the whole workspace snapshot; only
+# a bounded excerpt goes to the model (CPU prefill cost on local models).
+_CONTEXT_EXCERPT_CHARS = 6000
+
+
+def _agent_timeout_seconds() -> float:
+    """Per-call timeout for the synthetic-agent model request.
+
+    Bounded so the generate flow always answers: the production model
+    endpoint serialises requests and sleeps when idle, and the OpenAI SDK
+    default (~600s, with retries) turned a slow or cold call into a button
+    that hung for minutes. Override with SYNTHETIC_AGENT_TIMEOUT_S.
+    """
+
+    try:
+        return float(os.getenv("SYNTHETIC_AGENT_TIMEOUT_S", "45"))
+    except ValueError:
+        return 45.0
+
+
 DEFAULT_PARAMETERS: Dict[str, Any] = {
     "base_rate_per_1000_annual": 0.35,
     "reference_age": 40,
@@ -60,42 +85,75 @@ def _validate_parameters(raw: Mapping[str, Any], risk_classes: Sequence[str]) ->
     return parameters
 
 
+def _fallback_parameters(*, risk_classes: Sequence[str], reason: str) -> Dict[str, Any]:
+    """Deterministic stand-in proposal, truthfully labelled as a fallback.
+
+    Used whenever the model cannot produce parameters. The model field
+    names the fallback (never a model), ``agentFallback`` is set, and the
+    rationale states that the model was unavailable and the standard
+    default parameters were used — so a table built from these parameters
+    is never mistaken for an AI generation downstream.
+    """
+
+    parameters = _validate_parameters({}, risk_classes)
+    parameters["rationale"] = (
+        f"AI model unavailable ({reason}); standard default parameters were used. "
+        f"{DEFAULT_PARAMETERS['rationale']}"
+    )
+    parameters["agentFallback"] = True
+    parameters["model"] = FALLBACK_MODEL_LABEL
+    return parameters
+
+
 def propose_synthetic_coi_parameters(
     *, product_code: str, product_context: str, risk_classes: Sequence[str], model: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Ask OpenAI for bounded parameters, falling back is deliberately not automatic."""
+    """Ask the model for bounded parameters, with a bounded wait.
 
+    The client is constructed with an explicit timeout and no retries.
+    ANY model failure — timeout, connection error, invalid JSON, unusable
+    parameters, missing API key — returns the deterministic fallback
+    parameters instead of raising, so the generate flow always answers.
+    (This supersedes the module's earlier no-automatic-fallback stance:
+    with a local endpoint behind the facade, an unbounded/raising call
+    left the UI button permanently unanswered.)
+    """
+
+    selected_model = model or os.getenv("SYNTHETIC_COI_MODEL", os.getenv("ASSUMPTION_EXTRACT_MODEL", "gpt-4o-mini"))
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is not set in the environment")
-    selected_model = model or os.getenv("SYNTHETIC_COI_MODEL", os.getenv("ASSUMPTION_EXTRACT_MODEL", "gpt-4o-mini"))
+        return _fallback_parameters(risk_classes=risk_classes, reason="no API key is configured")
     prompt = (
         "Propose conservative synthetic annual COI rate parameters for projection testing only. "
         "They are not filed rates and must not be described as evidence. Return one JSON object with: "
         "base_rate_per_1000_annual, reference_age, annual_age_growth, male_multiplier, "
         "tobacco_multiplier, risk_class_multipliers (object keyed by the supplied classes), "
         "minimum_rate, maximum_rate, and rationale.\n"
-        f"Product: {product_code}\nRisk classes: {list(risk_classes)}\nContext:\n{product_context[:20000]}"
+        f"Product: {product_code}\nRisk classes: {list(risk_classes)}\nContext:\n{product_context[:_CONTEXT_EXCERPT_CHARS]}"
     )
-    response = OpenAI(api_key=api_key).chat.completions.create(
-        model=selected_model,
-        messages=[
-            {"role": "system", "content": "You are an actuarial modeling assistant. Output valid JSON only."},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.1,
-    )
-    content = (response.choices[0].message.content or "").strip()
-    if content.startswith("```"):
-        content = content.split("\n", 1)[1] if "\n" in content else ""
-        content = content.rsplit("```", 1)[0].strip()
     try:
+        response = OpenAI(
+            api_key=api_key, timeout=_agent_timeout_seconds(), max_retries=0,
+        ).chat.completions.create(
+            model=selected_model,
+            messages=[
+                {"role": "system", "content": "You are an actuarial modeling assistant. Output valid JSON only."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.1,
+        )
+        content = (response.choices[0].message.content or "").strip()
+        if content.startswith("```"):
+            content = content.split("\n", 1)[1] if "\n" in content else ""
+            content = content.rsplit("```", 1)[0].strip()
         proposed = json.loads(content)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"AI COI proposal was not valid JSON: {exc}") from exc
-    if not isinstance(proposed, dict):
-        raise RuntimeError("AI COI proposal must be a JSON object")
-    validated = _validate_parameters(proposed, risk_classes)
+        if not isinstance(proposed, dict):
+            raise RuntimeError("AI COI proposal must be a JSON object")
+        validated = _validate_parameters(proposed, risk_classes)
+    except Exception as exc:
+        return _fallback_parameters(
+            risk_classes=risk_classes, reason=f"model request failed: {type(exc).__name__}",
+        )
     validated["model"] = selected_model
     return validated
 
@@ -109,6 +167,18 @@ def build_synthetic_coi_table(
         raise ValueError("Synthetic COI ages must be between 0 and 120")
     classes = [str(value).strip() for value in risk_classes if str(value).strip()] or ["Standard"]
     validated = _validate_parameters(parameters, classes)
+    if validated.get("agentFallback"):
+        # The model never produced these parameters; the rows must not be
+        # stamped as an AI generation.
+        provenance = {
+            "filename": "Deterministic fallback synthetic COI table (AI model unavailable; standard parameters)",
+            "sourceType": "deterministic_fallback",
+        }
+    else:
+        provenance = {
+            "filename": "AI-generated synthetic COI table",
+            "sourceType": "ai_synthetic",
+        }
     rows: List[Dict[str, Any]] = []
     for attained_age in range(minimum_age, maximum_age + 1):
         age_factor = (1.0 + validated["annual_age_growth"]) ** (attained_age - validated["reference_age"])
@@ -130,10 +200,7 @@ def build_synthetic_coi_table(
                         "tobacco_status": tobacco_status,
                         "rate": round(rate, 6),
                         "rate_unit": "per_1000_annual",
-                        "provenance": {
-                            "filename": "AI-generated synthetic COI table",
-                            "sourceType": "ai_synthetic",
-                        },
+                        "provenance": dict(provenance),
                     })
     return rows
 
@@ -141,16 +208,24 @@ def build_synthetic_coi_table(
 def synthetic_coi_preview(*, parameters: Mapping[str, Any], risk_classes: Sequence[str]) -> Dict[str, Any]:
     rows = build_synthetic_coi_table(parameters=parameters, risk_classes=risk_classes)
     rates = [row["rate"] for row in rows]
+    validated = _validate_parameters(parameters, risk_classes or ["Standard"])
+    fallback = bool(validated.get("agentFallback"))
     return {
-        "parameters": _validate_parameters(parameters, risk_classes or ["Standard"]),
+        "parameters": validated,
+        "agentFallback": fallback,
         "rowCount": len(rows),
         "minimumRate": min(rates),
         "maximumRate": max(rates),
         "sampleRows": [rows[0], rows[len(rows) // 2], rows[-1]],
         "rows": rows,
-        "disclaimer": "Synthetic AI-generated scenario data. Not filed, approved, or evidenced rates.",
+        "disclaimer": (
+            "Synthetic scenario data built from standard default parameters because the AI model "
+            "was unavailable. Not filed, approved, or evidenced rates."
+            if fallback else
+            "Synthetic AI-generated scenario data. Not filed, approved, or evidenced rates."
+        ),
         "generatedAt": datetime.now(timezone.utc).isoformat(),
     }
 
 
-__all__ = ["build_synthetic_coi_table", "propose_synthetic_coi_parameters", "synthetic_coi_preview"]
+__all__ = ["FALLBACK_MODEL_LABEL", "build_synthetic_coi_table", "propose_synthetic_coi_parameters", "synthetic_coi_preview"]

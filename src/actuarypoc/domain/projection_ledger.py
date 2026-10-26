@@ -47,7 +47,7 @@ def _kind_from_source(source: Optional[Dict[str, Any]]) -> str:
     source_type = str((source or {}).get("sourceType") or "")
     if source_type == "filed_pdf":
         return "filed"
-    if source_type == "ai_synthetic":
+    if source_type in {"ai_synthetic", "deterministic_fallback"}:
         return "synthetic"
     if source_type == "correction":
         return "corrected"
