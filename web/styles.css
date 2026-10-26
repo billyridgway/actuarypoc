@@ -1503,14 +1503,61 @@ details > summary {
   margin-top: 1.25rem;
 }
 
-/* Actuary workbench: one surface per product. Ledger primary in the
-   main column, bench tooling (product inputs, equations) in the side
-   column, validation + filing + activity along the bottom, and the
-   calculation map as a collapsed debugging detail. */
+/* Actuary workbench: one bench per product, organized as tabs under
+   a global header. Ledger is the home tab; product inputs + equations,
+   validation, filing, and activity each get their own tab surface.
+   Panels stay mounted and are hidden with CSS so switching tabs
+   loses nothing. The calculation map is a collapsed debugging detail
+   inside the Ledger tab. */
 
 .workbench {
   display: flex;
   flex-direction: column;
+}
+
+/* Bench tabs: large and unmistakably tabs, active tab obvious at a
+   glance. The strip scrolls inside its own region on narrow screens
+   so the page itself never overflows. */
+.workbench__tabs {
+  display: flex;
+  gap: 0.35rem;
+  overflow-x: auto;
+  border-bottom: 2px solid var(--border);
+  margin-bottom: 1.25rem;
+  scrollbar-width: thin;
+}
+
+.workbench__tab {
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: transparent;
+  border: 2px solid transparent;
+  border-bottom: none;
+  border-radius: 10px 10px 0 0;
+  padding: 0.8rem 1.4rem;
+  min-height: 52px;
+  cursor: pointer;
+  position: relative;
+  top: 2px;
+}
+
+.workbench__tab:hover {
+  color: var(--text-main);
+  background: var(--accent-soft);
+}
+
+.workbench__tab.is-active {
+  color: var(--text-main);
+  background: #fff;
+  border-color: var(--border);
+  box-shadow: inset 0 -3px 0 var(--text-main);
+}
+
+.workbench__tabpanel[hidden] {
+  display: none !important;
 }
 
 .workbench__header h1 {
@@ -1584,8 +1631,7 @@ details > summary {
 }
 
 .workbench__main,
-.workbench__side,
-.workbench__band-col {
+.workbench__side {
   min-width: 0;
 }
 
@@ -1605,13 +1651,6 @@ details > summary {
 
 .workbench__map .logic-graph-section {
   margin-top: 0.75rem;
-}
-
-.workbench__band {
-  display: grid;
-  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
-  gap: 1.25rem;
-  align-items: start;
 }
 
 .logic-results__chart-details {
@@ -1690,8 +1729,7 @@ details > summary {
 }
 
 @media (max-width: 1100px) {
-  .workbench__grid,
-  .workbench__band {
+  .workbench__grid {
     grid-template-columns: minmax(0, 1fr);
   }
 }

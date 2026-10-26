@@ -9,13 +9,15 @@ import {
   ProjectionGraphSection,
 } from "./ProjectionLogicPage";
 
-// The actuary workbench: one surface per product. The ledger is the
-// reading surface (numbers first, derivations one click in, tables in
-// force attached); product inputs, equations, and suggestions are bench
-// tooling in the side column; validation and the activity record run
-// along the bottom; the filing summary is a compact section; and the
-// calculation graph survives only as a collapsed debugging detail —
-// it is not the interface actuaries work in.
+// The actuary workbench: one bench per product, organized as tabs —
+// not one forever-long page. The header (identity, trust state,
+// scenario + Run) stays global above the tabs; each tab is a full
+// working surface with one job. Tabs stay MOUNTED when inactive
+// (hidden with CSS, never unmounted), so switching loses nothing: no
+// refetch, no lost scroll, no lost in-progress edits. The ledger is
+// the home tab; the calculation graph survives only as a collapsed
+// debugging detail inside it — it is not the interface actuaries
+// work in.
 
 const trustLevelLabel = (value?: string | null): string => {
   switch ((value || "").toLowerCase()) {
@@ -39,18 +41,36 @@ const humanize = (value?: string | null): string =>
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
     .join(" ");
 
+export type BenchTab = "ledger" | "inputs" | "validation" | "filing" | "activity";
+
+const BENCH_TABS: Array<{ id: BenchTab; label: string }> = [
+  { id: "ledger", label: "Ledger" },
+  { id: "inputs", label: "Inputs & Equations" },
+  { id: "validation", label: "Validation" },
+  { id: "filing", label: "Filing" },
+  { id: "activity", label: "Activity" },
+];
+
 interface WorkbenchPageProps {
   snapshot: any;
   workspaceId: string;
   /** Deep links to the old graph page (view=map / view=logic) land on
-   *  the bench with the calculation-map detail already expanded. */
+   *  the Ledger tab with the calculation-map detail already expanded. */
   expandMap?: boolean;
+  /** Deep link view=details lands on the Filing tab. */
+  initialTab?: BenchTab;
 }
 
-export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({ snapshot, workspaceId, expandMap }) => {
+export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
+  snapshot,
+  workspaceId,
+  expandMap,
+  initialTab,
+}) => {
   const [data, setData] = React.useState<any>(snapshot ?? null);
   const [meta, setMeta] = React.useState<any>(null);
   const [documents, setDocuments] = React.useState<any[]>([]);
+  const [activeTab, setActiveTab] = React.useState<BenchTab>(initialTab ?? "ledger");
   const ws = useProjectionWorkspace(data, workspaceId);
 
   const reload = React.useCallback(async () => {
@@ -69,6 +89,16 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({ snapshot, workspac
   React.useEffect(() => {
     void reload();
   }, [reload]);
+
+  // Filing-tab gap links point at a slot card on the Inputs tab:
+  // switch tabs (the panel stays mounted, so this only reveals it),
+  // then scroll the slot into view once it is visible.
+  const openSlot = React.useCallback((slotId: string) => {
+    setActiveTab("inputs");
+    window.setTimeout(() => {
+      document.getElementById(`slot-${slotId}`)?.scrollIntoView({ block: "start" });
+    }, 60);
+  }, []);
 
   const product = data?.product ?? {};
   const understanding = data?.productUnderstanding ?? {};
@@ -116,6 +146,19 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({ snapshot, workspac
     );
   };
 
+  const tabPanel = (id: BenchTab, children: React.ReactNode) => (
+    <div
+      key={id}
+      role="tabpanel"
+      id={`bench-panel-${id}`}
+      aria-labelledby={`bench-tab-${id}`}
+      className="workbench__tabpanel"
+      hidden={activeTab !== id}
+    >
+      {children}
+    </div>
+  );
+
   return (
     <div className="workbench">
       <header className="card workbench__header">
@@ -136,7 +179,7 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({ snapshot, workspac
           {(inputsStale || ws.dirty) && (
             <p className="workbench__stale" role="status">
               {inputsStale
-                ? "Inputs changed since the last analysis — the saved projection may be stale. Re-run analysis from Product inputs, or re-run the projection with the scenario below."
+                ? "Inputs changed since the last analysis — the saved projection may be stale. Re-run analysis from the Inputs & Equations tab, or re-run the projection with the scenario below."
                 : "Scenario inputs changed — re-run the projection to update the ledger."}
             </p>
           )}
@@ -170,7 +213,7 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({ snapshot, workspac
             <button type="submit" className="button" disabled={ws.running || !ws.selectorReady}>
               {ws.running ? "Running projection…" : "Run projection"}
             </button>
-            <a className="button button-secondary" href={`/web?workspace=${encodeURIComponent(workspaceId)}&view=details`}>
+            <a className="button button-secondary" href={`/web?workspace=${encodeURIComponent(workspaceId)}&view=analysis`}>
               Full filing analysis
             </a>
           </div>
@@ -191,82 +234,113 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({ snapshot, workspac
         {ws.runMessage && <p className="logic-workspace__success" role="status">{ws.runMessage}</p>}
       </header>
 
-      <div className="workbench__grid">
-        <div className="workbench__main">
-          <ProjectionResultsSection ws={ws} />
-        </div>
-        <aside className="workbench__side">
-          <MechanicsPanel workspaceId={workspaceId} onSnapshotReload={reload} />
-          <EquationsPanel workspaceId={workspaceId} />
-        </aside>
+      <div className="workbench__tabs" role="tablist" aria-label="Workbench sections">
+        {BENCH_TABS.map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            role="tab"
+            id={`bench-tab-${tab.id}`}
+            aria-selected={activeTab === tab.id}
+            aria-controls={`bench-panel-${tab.id}`}
+            className={`workbench__tab${activeTab === tab.id ? " is-active" : ""}`}
+            onClick={() => setActiveTab(tab.id)}
+          >
+            {tab.label}
+          </button>
+        ))}
       </div>
 
-      <details className="card workbench__map" open={expandMap || undefined}>
-        <summary>Details — calculation map (debugging)</summary>
-        <p className="muted">
-          The dependency graph behind the projection, for tracing how an input reaches a
-          result. It is a debugging aid — the bench above is where the product is worked.
-        </p>
-        <ProjectionGraphSection ws={ws} />
-      </details>
-
-      <div className="workbench__band">
-        <ValidationPanel workspaceId={workspaceId} />
-        <div className="workbench__band-col">
-          <section className="card home-card workbench__filing" id="filing">
-            <h2>Filing</h2>
-            <p>
-              {productName}
-              {productType ? ` — a ${productType} product` : ""}
-              {understanding.confidence ? ` · understanding confidence: ${humanize(understanding.confidence).toLowerCase()}` : ""}
-              {understanding.documentsReviewed != null ? ` · ${understanding.documentsReviewed} document(s) reviewed` : ""}
+      {tabPanel("ledger", (
+        <>
+          <ProjectionResultsSection ws={ws} />
+          <details className="card workbench__map" open={expandMap || undefined}>
+            <summary>Details — calculation map (debugging)</summary>
+            <p className="muted">
+              The dependency graph behind the projection, for tracing how an input reaches a
+              result. It is a debugging aid — the bench is where the product is worked.
             </p>
-            <details>
-              <summary>Review detail</summary>
-              {readiness.overallExplanation && <p className="muted">{readiness.overallExplanation}</p>}
-              {gapItems.length > 0 && (
-                <>
-                  <h3>Open gaps</h3>
-                  <ul className="muted">
-                    {gapItems.slice(0, 12).map((gap: any, index: number) => (
-                      <li key={gap.id ?? index}>
-                        <strong>{gap.title || gap.name || "Gap"}</strong>
-                        {gap.description ? ` — ${gap.description}` : ""}
-                        {gap.slotId ? (
-                          <>
-                            {" "}
-                            <a href={`#slot-${gap.slotId}`}>Open in product inputs</a>
-                          </>
-                        ) : null}
-                      </li>
-                    ))}
-                  </ul>
-                </>
-              )}
-              <h3>Documents</h3>
-              {documents.length > 0 ? (
+            <ProjectionGraphSection ws={ws} />
+          </details>
+        </>
+      ))}
+
+      {tabPanel("inputs", (
+        <div className="workbench__grid">
+          <div className="workbench__main">
+            <MechanicsPanel workspaceId={workspaceId} onSnapshotReload={reload} />
+          </div>
+          <aside className="workbench__side">
+            <EquationsPanel workspaceId={workspaceId} />
+          </aside>
+        </div>
+      ))}
+
+      {tabPanel("validation", <ValidationPanel workspaceId={workspaceId} />)}
+
+      {tabPanel("filing", (
+        <section className="card home-card workbench__filing" id="filing">
+          <h2>Filing</h2>
+          <p>
+            {productName}
+            {productType ? ` — a ${productType} product` : ""}
+            {understanding.confidence ? ` · understanding confidence: ${humanize(understanding.confidence).toLowerCase()}` : ""}
+            {understanding.documentsReviewed != null ? ` · ${understanding.documentsReviewed} document(s) reviewed` : ""}
+          </p>
+          <details>
+            <summary>Review detail</summary>
+            {readiness.overallExplanation && <p className="muted">{readiness.overallExplanation}</p>}
+            {gapItems.length > 0 && (
+              <>
+                <h3>Open gaps</h3>
                 <ul className="muted">
-                  {documents.map((doc: any) => (
-                    <li key={doc.id ?? doc.objectPath ?? doc.createdAt}>
-                      {doc.description || doc.objectPath || "Document"}
-                      {doc.kind ? ` · ${doc.kind}` : ""}
-                      {doc.createdAt ? ` · ${doc.createdAt}` : ""}
+                  {gapItems.slice(0, 12).map((gap: any, index: number) => (
+                    <li key={gap.id ?? index}>
+                      <strong>{gap.title || gap.name || "Gap"}</strong>
+                      {gap.description ? ` — ${gap.description}` : ""}
+                      {gap.slotId ? (
+                        <>
+                          {" "}
+                          <a
+                            href={`#slot-${gap.slotId}`}
+                            onClick={(event) => {
+                              event.preventDefault();
+                              openSlot(String(gap.slotId));
+                            }}
+                          >
+                            Open in product inputs
+                          </a>
+                        </>
+                      ) : null}
                     </li>
                   ))}
                 </ul>
-              ) : (
-                <p className="muted">No documents listed for this workspace.</p>
-              )}
-              <p>
-                <a href={`/web?workspace=${encodeURIComponent(workspaceId)}&view=details`}>
-                  Open the full filing analysis →
-                </a>
-              </p>
-            </details>
-          </section>
-          <ActivityPanel workspaceId={workspaceId} />
-        </div>
-      </div>
+              </>
+            )}
+            <h3>Documents</h3>
+            {documents.length > 0 ? (
+              <ul className="muted">
+                {documents.map((doc: any) => (
+                  <li key={doc.id ?? doc.objectPath ?? doc.createdAt}>
+                    {doc.description || doc.objectPath || "Document"}
+                    {doc.kind ? ` · ${doc.kind}` : ""}
+                    {doc.createdAt ? ` · ${doc.createdAt}` : ""}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="muted">No documents listed for this workspace.</p>
+            )}
+            <p>
+              <a href={`/web?workspace=${encodeURIComponent(workspaceId)}&view=analysis`}>
+                Open the full filing analysis →
+              </a>
+            </p>
+          </details>
+        </section>
+      ))}
+
+      {tabPanel("activity", <ActivityPanel workspaceId={workspaceId} />)}
     </div>
   );
 };

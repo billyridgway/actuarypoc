@@ -87,17 +87,19 @@ export const WorkspacePage: React.FC<{ workspaceId: string; view?: string }> = (
     // Once analysis has populated the snapshot and the workspace has
     // reached the analyzed state, the actuary workbench is the
     // workspace's main surface. The old deep links keep working:
-    // view=details opens the full filing analysis (the former details
-    // page, now a detail view), and view=map / view=logic land on the
-    // bench with its calculation-map debugging detail expanded — the
-    // graph is no longer a peer page.
-    return view === "details" ? (
+    // view=details lands on the bench's Filing tab, view=map /
+    // view=logic land on the Ledger tab with its calculation-map
+    // debugging detail expanded — the graph is no longer a peer page.
+    // The full filing analysis (the former details page) remains
+    // reachable as its own view=analysis.
+    return view === "analysis" ? (
       <ProductWorkspacePage snapshot={snapshot} workspaceId={workspaceId} />
     ) : (
       <WorkbenchPage
         snapshot={snapshot}
         workspaceId={workspaceId}
         expandMap={view === "map" || view === "logic"}
+        initialTab={view === "details" ? "filing" : "ledger"}
       />
     );
   }
