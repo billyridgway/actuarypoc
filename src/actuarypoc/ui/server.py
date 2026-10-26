@@ -3732,6 +3732,8 @@ def api_harvest_equations(
         "skippedCount": len(outcome.get("skipped") or []),
         "warnings": outcome.get("warnings") or [],
         "modelReadings": outcome.get("modelReadings"),
+        "repairLog": outcome.get("repairLog") or [],
+        "coverage": outcome.get("coverage") or [],
     }
     return view
 

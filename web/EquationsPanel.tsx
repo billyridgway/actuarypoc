@@ -650,10 +650,12 @@ export const EquationsPanel: React.FC<{ workspaceId: string }> = ({ workspaceId 
                   </h4>
                   {statementBlock(eq)}
                   <p className="muted">
-                    The filing states this calculation, but it could not be structured into
-                    an equation automatically. It is recorded here so it is never silently
-                    dropped: write the equation from the statement, or reject the record.
-                    Until then this mechanic does not calculate from it.
+                    {eq.source?.note
+                      ? String(eq.source.note)
+                      : "The filing states this calculation, but it could not be structured into " +
+                        "an equation automatically. It is recorded here so it is never silently " +
+                        "dropped: write the equation from the statement, or reject the record. " +
+                        "Until then this mechanic does not calculate from it."}
                   </p>
                   <p className="muted">{provenanceLine(eq)}</p>
                   {editorMechanic === eq.mechanic ? (
