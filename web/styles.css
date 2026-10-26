@@ -1720,6 +1720,39 @@ details > summary {
   box-sizing: border-box;
 }
 
+.equation-editor select {
+  font: inherit;
+  padding: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.equation-body-input {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace !important;
+  font-size: 0.85rem;
+}
+
+.equation-errors {
+  background: var(--warning-soft);
+  border: 1px solid var(--warning);
+  border-radius: 8px;
+  padding: 0.5rem 0.75rem;
+  margin-top: 0.6rem;
+}
+
+.equation-preview {
+  background: var(--accent-soft);
+  border-radius: 8px;
+  padding: 0.5rem 0.75rem;
+  margin-top: 0.6rem;
+}
+
+.equation-card--missing {
+  border-style: dashed;
+}
+
 .activity-list {
   padding-left: 1.1rem;
 }
