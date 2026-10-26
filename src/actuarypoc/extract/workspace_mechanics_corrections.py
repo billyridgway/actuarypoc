@@ -25,16 +25,21 @@ that overrides a filed value wins — explicit user intent — but the
 ledger derivation and the change history say so (basis ``corrected``,
 the filed value kept in the record).
 
-Application is deterministic.  Table-shaped corrections (surrender
-basis) materialise into ``usable`` rows stamped with correction
-provenance, validated by the same validators ingestion uses.
-Setting-shaped corrections (COI timing, NAR definition) ride into the
-projection loop through ``executable_settings`` and are applied by the
-loop's own arithmetic.  No model interprets a correction at run time;
-free text is only ever *suggested* a mapping at authoring time (see
-``suggest_variant``), and the user confirms or rejects the suggestion.
-Unmapped text is captured as a feature request by the caller — never
-dropped, never guessed at.
+Application is deterministic.  Phase 7 (the Equation Doctrine): every
+rule-shaped correction is re-expressed as an EQUATION artifact through
+the approval machinery in ``workspace_equations`` — a surrender basis
+or banded schedule becomes the workspace's approved ``surrender_charge``
+equation, a COI timing correction sets the timing attribute on the
+approved ``coi_charge`` equation (its body transcribed from the table
+or equation in force), a NAR definition correction becomes the
+approved ``nar_definition`` equation.  The correction record remains
+the audit trail (its provenance rides on the equation it created, so
+the ledger keeps the ``corrected`` basis and cites the correction).
+No model interprets a correction at run time; free text is only ever
+*suggested* a mapping at authoring time (see ``suggest_variant``), and
+the user confirms or rejects the suggestion.  Unmapped text is
+captured as a feature request by the caller — never dropped, never
+guessed at.
 
 Corrections survive analysis re-runs exactly like Phase 2 edits: the
 analysis rebuilds the artifact from documents and then re-applies edits
@@ -49,12 +54,13 @@ import re
 from typing import Any, Dict, List, Optional
 import uuid
 
-from actuarypoc.domain import rule_bank
+from actuarypoc.domain import equations as _equations
+from actuarypoc.extract import workspace_equations as _ws_equations
 from actuarypoc.extract.workspace_mechanics_panel import (
+    SLOT_BY_ID,
     _change_record,
     _slot_status,
     _summarize_rows,
-    _validate_canonical_rows,
 )
 
 
@@ -64,39 +70,30 @@ CORRECTION_SOURCE_TYPE = "correction"
 # corrections are captured (see the server's correction endpoints).
 CORRECTION_REQUEST_CAPABILITY_ID = "mechanics_correction"
 
-# Phase 4 (the rule bank): the correction variants resolve through the
-# bank — the vocabularies below are the bank registry's, so a timing,
-# definition, or basis the bank does not know cannot be corrected into
-# existence here either.
-COI_TIMINGS = tuple(rule_bank.COI_TIMING_SWITCHES)
-NAR_DEFINITIONS = tuple(rule_bank.NAR_DEFINITION_SWITCHES)
-_GRADED_SWITCH = rule_bank.get_switch("surrender.schedule.graded")
-SURRENDER_BASES = next(
-    spec.choices for spec in _GRADED_SWITCH.params if spec.name == "basis"
-)
+# Phase 7: the correction vocabularies are the formula language's —
+# a timing, definition, or basis the language cannot express cannot be
+# corrected into existence here either.
+COI_TIMINGS = _equations.COI_TIMINGS
+NAR_DEFINITIONS = ("factor_adjusted", "unadjusted")
+SURRENDER_BASES = ("percent_account_value", "percent_face", "flat_amount")
 
 # Structured variants, keyed by the slot they attach to.  Each variant
-# names the banked switches it resolves through (``bankSwitches``):
-# corrections and slot defaults alike execute bank code, never a
-# private copy of a formula.
+# names the equation mechanic it resolves into (``equationMechanic``):
+# applying the correction creates that mechanic's approved equation
+# through the workspace_equations approval machinery.
 VARIANTS_BY_SLOT: Dict[str, List[Dict[str, Any]]] = {
     "surrender": [
         {
             "id": "surrender_basis",
             "label": "Change the surrender charge basis",
             "params": ["basis", "percent", "amount", "gradingYears"],
-            "bankSwitches": [
-                "surrender.basis.percent_account_value",
-                "surrender.basis.percent_face",
-                "surrender.basis.fixed",
-                "surrender.schedule.graded",
-            ],
+            "equationMechanic": "surrender_charge",
         },
         {
             "id": "surrender_banded",
             "label": "Set a banded (piecewise) surrender schedule",
             "params": ["bands"],
-            "bankSwitches": ["surrender.schedule.banded"],
+            "equationMechanic": "surrender_charge",
         },
     ],
     "coi": [
@@ -104,17 +101,13 @@ VARIANTS_BY_SLOT: Dict[str, List[Dict[str, Any]]] = {
             "id": "coi_timing",
             "label": "Change when the COI charge is deducted",
             "params": ["timing"],
-            "bankSwitches": [
-                "coi.timing.beginning",
-                "coi.timing.middle",
-                "coi.timing.end",
-            ],
+            "equationMechanic": "coi_charge",
         },
         {
             "id": "coi_banded",
             "label": "Set banded COI rates by policy duration",
             "params": ["bands"],
-            "bankSwitches": ["coi.schedule.banded"],
+            "equationMechanic": "coi_charge",
         },
     ],
     "nar": [
@@ -122,10 +115,7 @@ VARIANTS_BY_SLOT: Dict[str, List[Dict[str, Any]]] = {
             "id": "nar_definition",
             "label": "Change the net amount at risk definition",
             "params": ["definition"],
-            "bankSwitches": [
-                "nar.definition.factor_adjusted",
-                "nar.definition.unadjusted",
-            ],
+            "equationMechanic": "nar_definition",
         },
     ],
 }
@@ -262,8 +252,8 @@ def describe_current(artifact: Dict[str, Any], slot: Dict[str, Any]) -> Dict[str
             return {
                 "status": status,
                 "description": (
-                    "no surrender schedule is in force; a placeholder declining "
-                    "percentage of the ending account value is charged instead"
+                    "no surrender schedule is in force; no surrender charge "
+                    "is calculated"
                 ),
                 "rows": [],
             }
@@ -341,84 +331,81 @@ def _validate_spec(slot: Dict[str, Any], spec: Dict[str, Any]) -> Dict[str, Any]
             )
         return {"definition": definition}
     if variant in ("surrender_banded", "coi_banded"):
-        # Band shapes are validated by the rule bank (contiguous from
-        # year 1, no gaps or overlaps, banked units, sane ranges).
+        # Band shapes are validated by the formula language's band
+        # rules (contiguous from year 1, no gaps or overlaps, stated
+        # units, sane ranges).
         mechanic = "surrender" if variant == "surrender_banded" else "coi"
-        bands = rule_bank.validate_bands(mechanic, params.get("bands"))
+        bands = _ws_equations.validate_bands(mechanic, params.get("bands"))
         return {"bands": bands}
     raise ValueError(f"Unknown correction variant: {variant!r}")
 
 
-def _graded_surrender_rows(
-    params: Dict[str, Any],
-    *,
-    who: str,
-    at: str,
-    correction_id: str,
-    text: Optional[str],
-    confirm_back: str,
-) -> List[Dict[str, Any]]:
-    """Materialise a surrender-basis correction into validated rows.
+def _equation_for_record(
+    artifact: Dict[str, Any],
+    record: Dict[str, Any],
+) -> Dict[str, Any]:
+    """The equation a correction creates: {"mechanic", "body", "timing"}.
 
-    The schedule starts at the corrected value in year 1 and grades
-    linearly to zero at the end of the grading period — the shape Eddy
-    described ("8% of account value, grading to 0 over 10 years").
-    Phase 4: the row construction is the rule bank's graded-schedule
-    materializer (surrender.schedule.graded); this function validates
-    the rows with the same validators ingestion uses and stamps the
-    correction provenance so the ledger can label them.
+    Phase 7 re-expression of what used to be row/settings
+    materialisation.  Raises ValueError when the correction cannot be
+    expressed — a COI timing correction with no COI equation and no COI
+    table in force has nothing to attach its timing to.
     """
 
-    canonical = _validate_canonical_rows(
-        "surrender", rule_bank.materialize_graded_surrender(params)
-    )
-    provenance = {
-        "sourceType": CORRECTION_SOURCE_TYPE,
-        "filename": "Workspace correction",
-        "correctionId": correction_id,
-        "correctedBy": who,
-        "correctedAt": at,
-        "correctionText": text,
-        "confirmBack": confirm_back,
-    }
-    return [{**row, "provenance": dict(provenance)} for row in canonical]
-
-
-def _banded_rows(
-    mechanic: str,
-    params: Dict[str, Any],
-    *,
-    who: str,
-    at: str,
-    correction_id: str,
-    text: Optional[str],
-    confirm_back: str,
-) -> List[Dict[str, Any]]:
-    """Materialise a banded-schedule correction into validated rows.
-
-    The bank's banded materializer (surrender.schedule.banded /
-    coi.schedule.banded) builds one row per duration, each tagged
-    with its band; the tag moves into the row provenance — the
-    projection loop's source summary carries it from there, so the
-    ledger derivation can name the band applied for a period.
-    """
-
-    materialised = rule_bank.materialize_banded_rows(mechanic, params["bands"])
-    bands = [row.pop("_band", None) for row in materialised]
-    canonical = _validate_canonical_rows(mechanic, materialised)
-    provenance = {
-        "sourceType": CORRECTION_SOURCE_TYPE,
-        "filename": "Workspace correction",
-        "correctionId": correction_id,
-        "correctedBy": who,
-        "correctedAt": at,
-        "correctionText": text,
-        "confirmBack": confirm_back,
-    }
-    return [
-        {**row, "provenance": {**provenance, "band": band}}
-        for row, band in zip(canonical, bands)
-    ]
+    variant = str(record.get("variant") or "")
+    params = dict(record.get("params") or {})
+    if variant == "surrender_basis":
+        value = (
+            float(params["percent"])
+            if params["basis"] != "flat_amount"
+            else float(params["amount"])
+        )
+        return {
+            "mechanic": "surrender_charge",
+            "body": _ws_equations.graded_surrender_body(
+                str(params["basis"]), value, int(params["gradingYears"])
+            ),
+            "timing": None,
+        }
+    if variant == "surrender_banded":
+        return {
+            "mechanic": "surrender_charge",
+            "body": _ws_equations.banded_surrender_body(params["bands"]),
+            "timing": None,
+        }
+    if variant == "coi_banded":
+        current = _ws_equations.in_force(artifact, "coi_charge")
+        return {
+            "mechanic": "coi_charge",
+            "body": _ws_equations.banded_coi_body(params["bands"]),
+            "timing": (current or {}).get("timing") or "beginning",
+        }
+    if variant == "coi_timing":
+        current = _ws_equations.in_force(artifact, "coi_charge")
+        if current is not None and current.get("body") is not None:
+            body = deepcopy(current["body"])
+        else:
+            rows = list((artifact.get("usable") or {}).get("coi") or [])
+            unit = next(
+                (str(row.get("rate_unit")) for row in rows if row.get("rate_unit")),
+                None,
+            )
+            if unit is None:
+                raise ValueError(
+                    "A COI timing correction needs a COI charge equation or "
+                    "a COI table in force to attach the timing to; this "
+                    "workspace has neither, so the timing has nothing to "
+                    "govern yet."
+                )
+            body = _ws_equations.coi_body_for_unit(unit)
+        return {"mechanic": "coi_charge", "body": body, "timing": params["timing"]}
+    if variant == "nar_definition":
+        return {
+            "mechanic": "nar_definition",
+            "body": _ws_equations.nar_body(str(params["definition"])),
+            "timing": None,
+        }
+    raise ValueError(f"Unknown correction variant: {variant!r}")
 
 
 def _confirm_back(
@@ -546,25 +533,11 @@ def _build_correction(
             ),
         },
     }
-    if variant == "surrender_basis":
-        record["rows"] = _graded_surrender_rows(
-            params,
-            who=who,
-            at=at,
-            correction_id=record["id"],
-            text=text,
-            confirm_back=confirm_back,
-        )
-    if variant in ("surrender_banded", "coi_banded"):
-        record["rows"] = _banded_rows(
-            str(slot.get("mechanic") or ""),
-            params,
-            who=who,
-            at=at,
-            correction_id=record["id"],
-            text=text,
-            confirm_back=confirm_back,
-        )
+    # Phase 7: the correction's meaning is the equation it will create.
+    # Deriving it here means a preview shows exactly what would be put
+    # in force, and an inexpressible correction fails before anyone
+    # confirms it.
+    record["equation"] = _equation_for_record(artifact, record)
     return record
 
 
@@ -614,11 +587,13 @@ def apply_correction(
     """Apply a validated, user-confirmed correction to a copy of the artifact.
 
     Returns ``{"artifact": ..., "correction": ..., "change": ...}``.
-    Table-shaped corrections replace the mechanic's ``usable`` rows;
-    setting-shaped corrections are recorded and reach the projection
-    through :func:`executable_settings`.  The document-derived state
-    (``mechanics`` / ``candidates`` / ``reviews``) is left untouched, and
-    the replaced in-force rows are preserved inside the record.
+    Phase 7: the correction record is stored as the audit trail AND the
+    equation it expresses is created through the approval machinery
+    (actuary-confirmed here, correction provenance on the record), so
+    the equation — never materialised rows or hidden settings — is
+    what the projection executes.  The document-derived state
+    (``mechanics`` / ``candidates`` / ``reviews``) is left untouched,
+    and the replaced in-force rows are preserved inside the record.
     """
 
     result = deepcopy(artifact or {})
@@ -627,11 +602,31 @@ def apply_correction(
 
     prior_correction = (result.get("corrections") or {}).get(mechanic)
     result.setdefault("corrections", {})[mechanic] = record
-    if record.get("rows") is not None:
-        # Table-shaped corrections (surrender_basis, the banded
-        # schedules) replace the mechanic's usable rows outright.
-        result.setdefault("usable", {})[mechanic] = deepcopy(record["rows"])
     result.setdefault("status", {})[mechanic] = "corrected"
+
+    equation_spec = record["equation"]
+    authored = _ws_equations.author_equation(
+        result,
+        str(equation_spec["mechanic"]),
+        equation_spec["body"],
+        who=who,
+        at=at,
+        timing=equation_spec.get("timing"),
+        statement=record.get("text"),
+        source_kind="correction",
+        extra_source={
+            "correction": {
+                "id": record["id"],
+                "who": who,
+                "at": at,
+                "text": record.get("text"),
+                "confirmBack": record["confirmBack"],
+            }
+        },
+    )
+    result = authored["artifact"]
+    record = result["corrections"][mechanic]
+    record["equationId"] = authored["record"]["id"]
 
     summary = record["confirmBack"]
     if prior_correction:
@@ -655,30 +650,51 @@ def apply_correction(
             "variant": record["variant"],
             "params": record["params"],
             "correctionId": record["id"],
+            "equationId": record.get("equationId"),
         },
     )
     change["correctionId"] = record["id"]
+    change["equationId"] = record.get("equationId")
     change["correctionText"] = record["text"]
+    status = result.setdefault("status", {})
+    if isinstance(status, dict):
+        status[mechanic] = "corrected"
     return {"artifact": result, "correction": record, "change": change}
 
 
 def executable_settings(artifact: Dict[str, Any]) -> Dict[str, Any]:
-    """Projection-loop settings implied by the active corrections.
+    """The current timing / NAR-definition state, for descriptions.
 
-    Rides inside the executable-mechanics dict under ``_settings`` so
-    every projection consumer (analysis, GET-time rebuild, diagnostic)
-    applies the same corrected arithmetic.
+    Phase 7: the source of truth is the approved equation in force
+    (the coi_charge record's timing attribute; the nar_definition
+    record's body).  Correction records remain as a fallback for
+    artifacts whose equations have not been derived yet.  The
+    projection loop does not read these settings — it executes the
+    equations themselves.
     """
 
-    corrections = (artifact or {}).get("corrections") or {}
+    artifact = artifact or {}
     settings: Dict[str, Any] = {}
+    coi_record = _ws_equations.in_force(artifact, "coi_charge")
+    if coi_record is not None and coi_record.get("timing"):
+        settings["coiTiming"] = coi_record["timing"]
+    nar_record = _ws_equations.in_force(artifact, "nar_definition")
+    if nar_record is not None and nar_record.get("body") is not None:
+        settings["narDefinition"] = (
+            "unadjusted"
+            if nar_record["body"] == _ws_equations.nar_body("unadjusted")
+            else "factor_adjusted"
+        )
+    corrections = artifact.get("corrections") or {}
     coi = corrections.get("coi") or {}
     if coi.get("variant") == "coi_timing":
-        settings["coiTiming"] = (coi.get("params") or {}).get("timing")
+        settings.setdefault("coiTiming", (coi.get("params") or {}).get("timing"))
         settings["coiTimingCorrection"] = correction_citation(coi)
     nar = corrections.get("nar_factors") or {}
     if nar.get("variant") == "nar_definition":
-        settings["narDefinition"] = (nar.get("params") or {}).get("definition")
+        settings.setdefault(
+            "narDefinition", (nar.get("params") or {}).get("definition")
+        )
         settings["narDefinitionCorrection"] = correction_citation(nar)
     return settings
 
@@ -686,14 +702,18 @@ def executable_settings(artifact: Dict[str, Any]) -> Dict[str, Any]:
 def executable_mechanics_view(artifact: Dict[str, Any]) -> Dict[str, Any]:
     """The executable-mechanics dict for a projection request.
 
-    The artifact's ``usable`` tables plus the correction settings, so
-    the projection loop charges exactly what the panel shows in force.
+    The artifact's ``usable`` tables plus the approved equations in
+    force under ``_equations``, so the projection loop calculates
+    exactly what the panel shows approved.
     """
 
     usable = deepcopy((artifact or {}).get("usable") or {})
     settings = executable_settings(artifact or {})
     if settings:
         usable["_settings"] = settings
+    equations = _ws_equations.in_force_map(artifact or {})
+    if equations:
+        usable["_equations"] = deepcopy(equations)
     return usable
 
 
@@ -705,43 +725,67 @@ def reapply_corrections(
     Corrections are durable statements of how the calculation should
     work; a re-run rebuilds the artifact from documents, so without
     this step a re-run would silently discard them.  They are applied
-    after workspace edits (corrections outrank edits), and their
-    materialised rows are regenerated deterministically from the stored
-    parameters with the original correction's provenance.
+    after workspace edits (corrections outrank edits).  Phase 7: each
+    correction's equation is re-derived deterministically from the
+    stored parameters with the original correction's provenance —
+    unless the fresh artifact already carries that correction's
+    equation (the analysis carry-over moves equation records verbatim,
+    and the carried record wins).
     """
 
     if not prior_corrections:
         return fresh_artifact
     fresh_artifact["corrections"] = deepcopy(prior_corrections)
-    usable = fresh_artifact.setdefault("usable", {})
     status = fresh_artifact.setdefault("status", {})
     for mechanic, record in prior_corrections.items():
         if not isinstance(record, dict):
             continue
-        if record.get("variant") == "surrender_basis":
-            rows = _graded_surrender_rows(
-                dict(record.get("params") or {}),
-                who=str(record.get("who") or "workspace_user"),
-                at=str(record.get("at") or ""),
-                correction_id=str(record.get("id") or ""),
-                text=record.get("text"),
-                confirm_back=str(record.get("confirmBack") or ""),
-            )
-            usable[mechanic] = rows
-            record["rows"] = deepcopy(rows)
-        elif record.get("variant") in ("surrender_banded", "coi_banded"):
-            rows = _banded_rows(
-                mechanic,
-                dict(record.get("params") or {}),
-                who=str(record.get("who") or "workspace_user"),
-                at=str(record.get("at") or ""),
-                correction_id=str(record.get("id") or ""),
-                text=record.get("text"),
-                confirm_back=str(record.get("confirmBack") or ""),
-            )
-            usable[mechanic] = rows
-            record["rows"] = deepcopy(rows)
         status[mechanic] = "corrected"
+        slot = SLOT_BY_ID.get(str(record.get("slot") or ""))
+        if slot is None:
+            continue
+        existing = _ws_equations.in_force(
+            fresh_artifact,
+            str((record.get("equation") or {}).get("mechanic") or ""),
+        ) if record.get("equation") else None
+        if (
+            existing is not None
+            and (existing.get("source") or {}).get("correction", {}).get("id")
+            == record.get("id")
+        ):
+            continue
+        try:
+            equation_spec = _equation_for_record(fresh_artifact, record)
+        except ValueError:
+            # The correction's equation cannot be re-derived against
+            # the fresh state (e.g. a timing correction whose COI table
+            # is gone); the correction record itself is preserved, and
+            # the mechanic simply has no equation from it.
+            continue
+        authored = _ws_equations.author_equation(
+            fresh_artifact,
+            str(equation_spec["mechanic"]),
+            equation_spec["body"],
+            who=str(record.get("who") or "workspace_user"),
+            at=str(record.get("at") or ""),
+            timing=equation_spec.get("timing"),
+            statement=record.get("text"),
+            source_kind="correction",
+            extra_source={
+                "correction": {
+                    "id": record.get("id"),
+                    "who": record.get("who"),
+                    "at": record.get("at"),
+                    "text": record.get("text"),
+                    "confirmBack": record.get("confirmBack"),
+                }
+            },
+        )
+        fresh_artifact.clear()
+        fresh_artifact.update(authored["artifact"])
+        stored = (fresh_artifact.get("corrections") or {}).get(mechanic) or {}
+        stored["equationId"] = authored["record"]["id"]
+        stored["equation"] = equation_spec
     return fresh_artifact
 
 

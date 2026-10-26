@@ -217,4 +217,8 @@ def test_diagnostic_projection_preserves_full_user_scenario() -> None:
     assert inputs["premium"]["source"] == "Annualized from user-entered modal premium"
     assert inputs["scenario_basis"]["value"] == "Guaranteed/default diagnostic scenario"
     assert inputs["premium_timing"]["value"] == "Beginning of policy year"
-    assert inputs["charge_timing"]["value"] == "End of policy year"
+    # Phase 7: charge timing is an attribute of the approved COI
+    # equation; this diagnostic product config carries none, and the
+    # input says so instead of claiming a hard-coded timing.
+    assert inputs["charge_timing"]["value"] == "No COI charge equation in force"
+    assert inputs["charge_timing"]["status"] == "missing"

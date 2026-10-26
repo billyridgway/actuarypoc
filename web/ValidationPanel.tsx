@@ -64,6 +64,12 @@ interface RunCase {
   mechanicsMode: string;
   mechanicsFingerprint: string;
   switchesUsed: string[];
+  appliedEquations?: Array<{
+    equationId: string;
+    mechanic: string;
+    version?: number;
+    approvedBy?: string;
+  }>;
   results: RunResult[];
 }
 
@@ -84,7 +90,7 @@ interface RunReport {
   productCode?: string | null;
   ranBy: string;
   ranAt: string;
-  engine: { ledgerVersion?: number | null; switchesUsed: string[] };
+  engine: { ledgerVersion?: number | null; switchesUsed: string[]; appliedEquations?: Array<{ equationId: string; mechanic: string; version?: number; approvedBy?: string }> };
   summary: RunSummaryCounts;
   standInLines: Array<{ caseId: string; duration: number; field: string; basis: string }>;
   cases: RunCase[];
@@ -482,7 +488,19 @@ function ReportView({ report, base }: { report: RunReport; base: string }) {
         )}
       </p>
       <p className="muted">
-        Rule-bank switches used: {report.engine.switchesUsed.join(", ") || "none recorded"}.{" "}
+        {report.engine.appliedEquations && report.engine.appliedEquations.length > 0 ? (
+          <>
+            Approved equations applied:{" "}
+            {report.engine.appliedEquations
+              .map((e) => `${e.mechanic} (v${e.version ?? "?"}, approved by ${e.approvedBy ?? "—"})`)
+              .join(", ")}
+            .{" "}
+          </>
+        ) : (
+          <>
+            Rule-bank switches used: {report.engine.switchesUsed.join(", ") || "none recorded"}.{" "}
+          </>
+        )}
         <a href={`${base}/validation-runs/${encodeURIComponent(report.id)}/report.txt`} download>
           Download text report
         </a>{" "}

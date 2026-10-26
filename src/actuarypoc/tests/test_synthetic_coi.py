@@ -128,8 +128,8 @@ def test_projection_uses_synthetic_demographic_rows_after_acceptance() -> None:
         horizon_years=1,
     )
 
-    assert preferred["mechanicsExecution"]["coi"]["fullyApplied"] is True
-    assert tobacco["mechanicsExecution"]["coi"]["fullyApplied"] is True
+    assert preferred["mechanicsExecution"]["coi_charge"]["applied"] is True
+    assert tobacco["mechanicsExecution"]["coi_charge"]["applied"] is True
     assert tobacco["rows"][0]["coiCharge"] > preferred["rows"][0]["coiCharge"]
 
 

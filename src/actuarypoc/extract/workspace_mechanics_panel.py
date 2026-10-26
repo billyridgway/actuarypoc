@@ -57,6 +57,13 @@ SLOT_BY_ID: Dict[str, Dict[str, Any]] = {slot["id"]: slot for slot in MECHANIC_S
 # The projection-gap ids the workspace view emits (see
 # ``_build_ul_projection_view``) and the slot that resolves each one.
 GAP_SLOT_MAP: Dict[str, str] = {
+    # Phase 7 gap ids (missing-equation states) plus the legacy ids,
+    # which can still appear in snapshots stored before Phase 7.
+    "missing_coi_equation": "coi",
+    "missing_surrender_equation": "surrender",
+    "missing_policy_fees_equation": "fees",
+    "missing_nar_equation": "nar",
+    "missing_crediting_equation": "crediting",
     "missing_coi_table": "coi",
     "surrender_schedule_placeholder": "surrender",
     "policy_admin_fee_missing": "fees",

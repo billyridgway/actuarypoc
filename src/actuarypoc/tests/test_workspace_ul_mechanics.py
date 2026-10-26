@@ -519,10 +519,15 @@ def test_projection_executes_rates_surrender_and_fee_schedules() -> None:
     assert row["coiCharge"] == pytest.approx(97.0727917051)
     assert row["policyFee"] == 120.0
     assert row["surrenderCharge"] == 5_000.0
-    assert projection["mechanicsExecution"]["coi"]["fullyApplied"] is True
+    assert projection["mechanicsExecution"]["coi_charge"]["applied"] is True
+    assert projection["mechanicsExecution"]["coi_charge"]["failedYears"] == []
 
 
-def test_projection_retains_placeholder_for_unmatched_coi_selector() -> None:
+def test_projection_charges_nothing_for_unmatched_coi_selector() -> None:
+    # Phase 7: the only COI row is for sex M and the scenario is F, so
+    # the approved equation's table lookup finds no row.  There is no
+    # placeholder to fall back to: the mechanic contributes nothing
+    # and the run is flagged incomplete, naming the failure.
     config = server.load_ul_runtime_config("ICC18 P18PR UL")
     config.executable_mechanics = {
         "coi": [
@@ -543,8 +548,14 @@ def test_projection_retains_placeholder_for_unmatched_coi_selector() -> None:
         horizon_years=1,
     )
 
-    assert projection["rows"][0]["coiCharge"] == pytest.approx(400.0)
-    assert projection["mechanicsExecution"]["coi"]["fallbackYears"] == [1]
+    assert projection["rows"][0]["coiCharge"] == 0.0
+    execution = projection["mechanicsExecution"]["coi_charge"]
+    assert execution["applied"] is True
+    assert execution["failedYears"] == [1]
+    assert "COI table" in execution["failureReasons"]["1"]
+    assert projection["incomplete"] is True
+    missing = {m["mechanic"]: m for m in projection["missingMechanics"]}
+    assert missing["coi_charge"]["reason"] == "evaluation_failed"
 
 
 def test_engine_capabilities_do_not_depend_on_workspace_schedule_availability() -> None:
@@ -601,7 +612,8 @@ def test_projection_selects_attained_age_sex_and_class_coi_row() -> None:
     )
 
     assert projection["rows"][0]["coiCharge"] == pytest.approx(194.124377314)
-    assert projection["mechanicsExecution"]["coi"]["fullyApplied"] is True
+    assert projection["mechanicsExecution"]["coi_charge"]["applied"] is True
+    assert projection["mechanicsExecution"]["coi_charge"]["failedYears"] == []
 
 
 def test_projection_selects_coi_by_tobacco_status() -> None:
@@ -688,8 +700,8 @@ def test_projection_executes_fixed_surrender_schedule_and_modal_fee() -> None:
     assert projection["rows"][1]["surrenderCharge"] == 0.0
     assert projection["rows"][0]["policyFee"] == 120.0
     assert projection["rows"][1]["policyFee"] == 120.0
-    assert projection["mechanicsExecution"]["surrender"]["fullyApplied"] is True
-    assert projection["mechanicsExecution"]["fees"]["fullyApplied"] is True
+    assert projection["mechanicsExecution"]["surrender_charge"]["applied"] is True
+    assert projection["mechanicsExecution"]["policy_fees"]["applied"] is True
 
 
 def test_projection_executes_premium_load_admin_and_monthly_expense_charges() -> None:
@@ -709,8 +721,12 @@ def test_projection_executes_premium_load_admin_and_monthly_expense_charges() ->
     row = projection["rows"][0]
     assert row["premiumLoad"] == 300.0
     assert row["policyFee"] == pytest.approx(371.4)
-    assert row["endingPolicyValue"] == pytest.approx(1974.268449, rel=1e-6)
-    assert projection["mechanicsExecution"]["fees"]["fullyApplied"] is True
+    # Phase 7: the pre-doctrine expected value embedded the flat
+    # placeholder COI ($400/yr on this face amount, plus its interest
+    # knock-on, $404.32 in year 1).  No COI table is in force here, so
+    # no COI equation exists and no COI charge is deducted.
+    assert row["endingPolicyValue"] == pytest.approx(2378.588673, rel=1e-6)
+    assert projection["mechanicsExecution"]["policy_fees"]["applied"] is True
 
 
 def test_projection_applies_filed_nar_factor_and_cvat_corridor() -> None:
@@ -797,7 +813,11 @@ def test_complete_filing_projection_reconciles_every_annual_row() -> None:
 
     reconciliation = projection["reconciliation"]
     assert reconciliation["passed"] is True
-    assert reconciliation["checkCount"] == 180
+    # Phase 7: reconciliation checks only the universal identities
+    # (roll-forward, cash == ending, surrender value) — 3 per year.
+    # The old count also checked the NAR definition and the corridor
+    # shape, which are document-stated mechanics, not identities.
+    assert reconciliation["checkCount"] == 90
     assert reconciliation["failedYears"] == []
     assert reconciliation["maxResidual"] <= 0.01
 

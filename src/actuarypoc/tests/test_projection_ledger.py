@@ -176,16 +176,19 @@ def test_coi_matches_rate_times_net_amount_at_risk(unit: str, rate: float) -> No
     assert len({round(charge, 2) for charge in actual}) == 3
 
 
-def test_placeholder_coi_is_labelled_placeholder_in_the_ledger() -> None:
+def test_missing_coi_equation_is_stated_in_the_ledger() -> None:
+    # Phase 7 (equation doctrine): with no approved COI equation the
+    # mechanic does not calculate at all — the old flat fraction of face
+    # is unreachable, and the ledger states the absence plainly.
     projection, _ = _run_ul_projection(request=dict(REQUEST), config=_config({}), horizon_years=5)
     ledger = build_projection_ledger(projection)
     coi = _component(ledger["rows"][0], "coi")
-    assert coi["basis"] == "placeholder"
-    assert "flat" in coi["formula"].lower()
-    # The placeholder really is the old flat fraction of face: it does not
-    # move with the account value, and the ledger says so.
+    assert coi["basis"] == "missing"
+    assert "Not calculated" in coi["formula"]
+    assert "no approved COI charge equation" in coi["formula"]
     charges = {round(row["coiCharge"], 2) for row in ledger["rows"]}
-    assert charges == {200_000 * 0.004}
+    assert charges == {0.0}
+    assert projection["incomplete"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -205,16 +208,15 @@ def test_surrender_charge_is_schedule_percentage_of_account_value() -> None:
     assert _component(ledger["rows"][10], "surrender_charge")["formula"].startswith("No surrender charge")
 
 
-def test_placeholder_surrender_is_percentage_of_account_value_not_face() -> None:
+def test_missing_surrender_equation_charges_nothing() -> None:
+    # Phase 7: the old simplified surrender pattern (a percentage of the
+    # account value declining over 19 years) is deleted, not relabelled.
+    # With no approved surrender equation there is no charge at all.
     projection, _ = _run_ul_projection(request=dict(REQUEST), config=_config({}), horizon_years=30)
     ledger = build_projection_ledger(projection)
-    for row in ledger["rows"][:19]:
-        expected_pct = 0.10 * (19 - row["year"] + 1) / 19
-        assert row["surrenderCharge"] == pytest.approx(expected_pct * row["endingValue"], rel=1e-9)
-        # The August-7 defect: the same percentage applied to the face amount.
-        assert row["surrenderCharge"] != pytest.approx(expected_pct * 200_000, rel=1e-6)
-        assert _component(row, "surrender_charge")["basis"] == "placeholder"
-    assert ledger["rows"][19]["surrenderCharge"] == 0.0
+    for row in ledger["rows"]:
+        assert row["surrenderCharge"] == 0.0
+        assert _component(row, "surrender_charge")["basis"] == "missing"
 
 
 def test_filed_schedule_keeps_the_basis_it_states() -> None:
@@ -227,7 +229,11 @@ def test_filed_schedule_keeps_the_basis_it_states() -> None:
     ledger = build_projection_ledger(projection)
     first = ledger["rows"][0]
     assert first["surrenderCharge"] == pytest.approx(200_000 / 1000.0 * 8.0)
-    assert "as stated in the schedule" in _component(first, "surrender_charge")["formula"]
+    component = _component(first, "surrender_charge")
+    # The derivation printed is the approved equation that ran, cited.
+    assert "surrender schedule charge" in component["formula"]
+    assert component["basis"] == "filed"
+    assert component["equation"]["mechanic"] == "surrender_charge"
 
 
 # ---------------------------------------------------------------------------
@@ -235,26 +241,36 @@ def test_filed_schedule_keeps_the_basis_it_states() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _equations_for(mechanics):
+    from actuarypoc.extract.workspace_equations import (
+        in_force_map,
+        materialize_legacy_equations,
+    )
+
+    artifact = {"usable": mechanics}
+    artifact = materialize_legacy_equations(artifact, at="2026-01-01T00:00:00Z")["artifact"]
+    return in_force_map(artifact)
+
+
 def test_rate_tables_in_force_carry_the_full_tables() -> None:
     mechanics = {"coi": _coi_rows(), "surrender": _surrender_rows()}
-    tables = build_rate_tables_in_force(
-        mechanics, coi_rate_flat=0.004, max_surrender_pct=0.10, surrender_period_years=19,
-    )
+    tables = build_rate_tables_in_force(mechanics, equations=_equations_for(mechanics))
     assert tables["coi"]["rowCount"] == 30
     assert len(tables["coi"]["rows"]) == 30
     assert tables["coi"]["rows"][0]["rate"] == pytest.approx(0.35)
+    assert tables["coi"]["status"] == "workspace_table"
+    assert tables["coi"]["equation"]["mechanic"] == "coi_charge"
     assert tables["surrender"]["rowCount"] == 10
     assert tables["surrender"]["rows"][0]["charge_unit"] == "percent_account_value"
 
 
-def test_rate_tables_in_force_state_the_placeholder_plainly() -> None:
-    tables = build_rate_tables_in_force(
-        {}, coi_rate_flat=0.004, max_surrender_pct=0.10, surrender_period_years=19,
-    )
-    assert tables["coi"]["status"] == "placeholder"
-    assert "flat placeholder" in tables["coi"]["placeholder"]["description"]
-    assert tables["surrender"]["status"] == "placeholder"
-    assert "account value" in tables["surrender"]["placeholder"]["description"]
+def test_rate_tables_in_force_state_the_absence_plainly() -> None:
+    tables = build_rate_tables_in_force({})
+    assert tables["coi"]["status"] == "missing"
+    assert "No COI rate table is in force" in tables["coi"]["missingTable"]["description"]
+    assert "placeholder" not in tables["coi"]
+    assert tables["surrender"]["status"] == "missing"
+    assert "No surrender charge schedule is in force" in tables["surrender"]["missingTable"]["description"]
 
 
 # ---------------------------------------------------------------------------
@@ -347,13 +363,13 @@ def test_workspace_view_carries_ledger_tables_and_reconciliation() -> None:
     assert "surrender_schedule_placeholder" not in {item["id"] for item in gaps}
 
 
-def test_workspace_view_placeholder_gap_still_detected() -> None:
+def test_workspace_view_missing_equation_gap_still_detected() -> None:
     view, _mechanics, _warnings, _notes, gaps = server._build_ul_projection_view("ICC18 P18PR UL", {})
     assert view is not None
     gap_ids = {item["id"] for item in gaps}
-    assert "missing_coi_table" in gap_ids
-    assert "surrender_schedule_placeholder" in gap_ids
-    assert _component(view["ledger"]["rows"][0], "coi")["basis"] == "placeholder"
+    assert "missing_coi_equation" in gap_ids
+    assert "missing_surrender_equation" in gap_ids
+    assert _component(view["ledger"]["rows"][0], "coi")["basis"] == "missing"
 
 
 # ---------------------------------------------------------------------------
@@ -383,7 +399,7 @@ def test_explanation_formula_text_matches_the_applied_basis() -> None:
     assert "ending account value" in steps["surrender_charge"]["formulaText"]
 
 
-def test_explanation_labels_the_placeholder_basis() -> None:
+def test_explanation_states_the_missing_equation() -> None:
     config = server.load_ul_runtime_config("ICC18 P18PR UL")
     projection, normalised = server._run_ul_projection(
         request={"age": 45, "faceAmount": 250_000, "premiumMode": "ANNUAL"},
@@ -398,6 +414,7 @@ def test_explanation_labels_the_placeholder_basis() -> None:
         year=1,
     )
     steps = {step["id"]: step for step in explanation["steps"]}
-    assert steps["coi_charge_deducted"]["formulaText"].startswith("Placeholder")
-    assert steps["surrender_charge"]["formulaText"].startswith("Placeholder")
-    assert "ending account value" in steps["surrender_charge"]["formulaText"]
+    assert steps["coi_charge_deducted"]["formulaText"].startswith("Not calculated")
+    assert "no approved COI charge equation" in steps["coi_charge_deducted"]["formulaText"]
+    assert steps["surrender_charge"]["formulaText"].startswith("Not calculated")
+    assert "no approved surrender charge equation" in steps["surrender_charge"]["formulaText"]

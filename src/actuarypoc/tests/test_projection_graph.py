@@ -151,12 +151,12 @@ def test_graph_distinguishes_values_selectors_settings_and_context_edges() -> No
     assert ("input:scenario_basis", "scenario_context") in kinds
 
 
-def test_missing_coi_table_discloses_fallback_and_disables_selector_lookups() -> None:
+def test_missing_coi_equation_is_disclosed_and_disables_selector_lookups() -> None:
     graph = compile_projection_graph(
         product_code="UL-1",
         product_type="UL",
         inputs=[
-            _input("face_amount"), _input("coi_rate", "placeholder"), _input("issue_age"),
+            _input("face_amount"), _input("coi_rate", "missing"), _input("issue_age"),
             _input("sex"), _input("risk_class"), _input("tobacco_status"),
             _input("charge_timing"), _input("scenario_basis", "diagnostic"),
         ],
@@ -165,11 +165,14 @@ def test_missing_coi_table_discloses_fallback_and_disables_selector_lookups() ->
 
     nodes = {node["id"]: node for node in graph["nodes"]}
     disclosure = nodes["input:coi_rate"]["fallbackDisclosure"]
-    assert disclosure["missingEvidence"] == "Filed COI rate table"
-    assert disclosure["fallback"] == "Flat placeholder COI rate"
+    assert disclosure["mode"] == "missing_equation"
+    assert disclosure["missingEvidence"] == "Approved COI charge equation"
+    # Phase 7: there is no fallback calculation to disclose.
+    assert "fallback" not in disclosure
+    assert "Not calculated" in nodes["input:coi_rate"]["equation"]
     selector_edges = [edge for edge in graph["edges"] if edge["kind"] == "conditional_lookup"]
     assert selector_edges
-    assert all(edge["status"] == "inactive_fallback" for edge in selector_edges)
+    assert all(edge["status"] == "inactive_missing_equation" for edge in selector_edges)
 
 
 def test_synthetic_coi_table_remains_provisional_but_activates_selector_lookups() -> None:
@@ -215,41 +218,45 @@ def _compile(inputs, steps=(), context=None):
     )
 
 
-def test_fallback_equations_derive_from_node_state_without_run_context() -> None:
-    # Legacy snapshots carry no ledger or applied-mechanics record: the
-    # equations must still be stated, from the node's own state.
+def test_equations_without_run_context_state_the_missing_equation() -> None:
+    # Legacy snapshots carry no ledger or applied-mechanics record, and
+    # no tables are in force here: every mechanic input states plainly
+    # that it is not calculated.  (Before Phase 7 these nodes stated the
+    # placeholder formulas; those calculations no longer exist.)
     graph = _compile([
-        {"id": "surrender_schedule", "label": "Surrender charge schedule", "status": "placeholder",
-         "value": "10.00% of face declining over 19 years", "source": "Simplified runtime schedule"},
-        {"id": "coi_rate", "label": "COI schedule", "status": "placeholder", "value": 0.004, "unit": "rate"},
-        {"id": "policy_fee", "label": "Annual policy/admin fee", "status": "missing", "value": 0.0, "unit": "USD"},
+        {"id": "surrender_schedule", "label": "Surrender charge schedule", "status": "missing",
+         "value": None, "source": "No approved surrender charge equation is in force"},
+        {"id": "coi_rate", "label": "COI schedule", "status": "missing", "value": None, "unit": None},
+        {"id": "policy_fee", "label": "Annual policy/admin fee", "status": "missing", "value": None, "unit": "USD"},
     ])
     nodes = _nodes(graph)
 
-    surrender = nodes["input:surrender_schedule"]["equation"]
-    assert "10.00% of face amount" in surrender
-    assert "declining linearly to zero over 19 years" in surrender
-    assert "no filed surrender schedule is in force" in surrender
-
     coi = nodes["input:coi_rate"]["equation"]
-    assert "face amount x flat annual placeholder rate of 0.40% / 12" in coi
-    assert "table rate x the net amount at risk" in coi
+    assert "Not calculated" in coi
+    assert "no approved COI charge equation" in coi
+
+    surrender = nodes["input:surrender_schedule"]["equation"]
+    assert "Not calculated" in surrender
+    assert "no approved surrender charge equation" in surrender
 
     fee = nodes["input:policy_fee"]["equation"]
-    assert "No fee schedule is in force" in fee
-    assert "configured annual policy/admin fee / 12" in fee
-    assert "$0.00" in fee
-    assert "no fee is deducted" in fee
+    assert "Not calculated" in fee
+    assert "no approved policy fees equation" in fee
 
 
-def test_account_value_fallback_surrender_equation_names_account_value() -> None:
-    graph = _compile([
-        {"id": "surrender_schedule", "label": "Surrender", "status": "placeholder",
-         "value": "10.00% of account value declining over 19 years"},
-    ])
+def test_surrender_equation_names_the_ending_account_value() -> None:
+    context = {
+        "rateTables": {
+            "surrender": {"status": "filed", "rows": [{"duration": 1, "charge": 0.1, "charge_unit": "percent_account_value"}]},
+        }
+    }
+    graph = _compile(
+        [{"id": "surrender_schedule", "label": "Surrender", "status": "evidenced", "value": "10 executable rows"}],
+        context=context,
+    )
     equation = _nodes(graph)["input:surrender_schedule"]["equation"]
-    assert "10.00% of ending account value" in equation
-    assert "declining linearly" in equation
+    assert "ending account value" in equation
+    assert "surrender schedule charge" in equation
 
 
 def test_filed_table_equations_carry_the_table_unit_basis() -> None:
@@ -268,19 +275,38 @@ def test_filed_table_equations_carry_the_table_unit_basis() -> None:
     )
     nodes = _nodes(graph)
     surrender = nodes["input:surrender_schedule"]["equation"]
-    assert "(face amount / 1,000) x the schedule charge per $1,000" in surrender
+    assert "face amount / 1000" in surrender
+    assert "surrender schedule charge" in surrender
     assert "filed schedule in force" in surrender
     coi = nodes["input:coi_rate"]["equation"]
-    assert "(COI net amount at risk / 1,000) x the monthly rate per $1,000" in coi
+    assert "net amount at risk / 1000" in coi
+    assert "COI table rate" in coi
 
 
 def test_synthetic_table_equations_are_labelled_synthetic() -> None:
+    from actuarypoc.domain import equations as _eq
+
     context = {
         "appliedMechanics": {
-            "surrender": {"basis": "table", "chargeUnit": "percent_account_value",
-                          "source": {"sourceType": "ai_synthetic"}},
-            "coi": {"basis": "table", "rateUnit": "per_1000_annual", "timing": "beginning",
-                    "narDefinition": "factor_adjusted", "source": {"sourceType": "ai_synthetic"}},
+            "surrender": {
+                "equation": {
+                    "rendering": _eq.render_equation(
+                        _eq.surrender_body_for_unit("percent_account_value"), "surrender_charge"
+                    ),
+                    "tableSourceType": "ai_synthetic",
+                },
+                "missing": False,
+                "rowApplied": True,
+            },
+            "coi": {
+                "equation": {
+                    "rendering": _eq.render_with_timing(
+                        _eq.coi_body_for_unit("per_1000_annual"), "beginning"
+                    ),
+                    "tableSourceType": "ai_synthetic",
+                },
+                "missing": False,
+            },
         }
     }
     graph = _compile(
@@ -296,33 +322,39 @@ def test_synthetic_table_equations_are_labelled_synthetic() -> None:
     assert "ending account value" in surrender
     coi = nodes["input:coi_rate"]["equation"]
     assert "synthetic schedule in force" in coi
-    assert "(COI net amount at risk / 1,000) x (the annual rate per $1,000 / 12)" in coi
-    assert "Net amount at risk = death benefit / NAR factor - account value" in coi
+    assert "net amount at risk / 1000" in coi
+    assert "COI table rate" in coi
 
 
-def test_applied_placeholder_and_fee_unit_equations() -> None:
+def test_applied_missing_and_fee_equation() -> None:
+    from actuarypoc.domain import equations as _eq
+
     context = {
         "appliedMechanics": {
-            "surrender": {"basis": "placeholder", "percent": 0.10, "base": "account_value"},
-            "coi": {"basis": "placeholder", "flatRate": 0.004},
-            "fees": [{"component": "policy_fee", "feeUnit": "per_1000_face_annual",
-                      "amount": 1.2, "basis": "table", "source": {"sourceType": "filed_pdf"}}],
+            "surrender": {"equation": None, "missing": True},
+            "coi": {"equation": None, "missing": True},
+            "fees": {
+                "equation": {
+                    "rendering": _eq.render_equation(_eq.policy_fees_body(), "policy_fees"),
+                    "tableSourceType": "filed_pdf",
+                },
+                "missing": False,
+            },
         }
     }
     graph = _compile(
         [
-            {"id": "surrender_schedule", "label": "Surrender", "status": "placeholder", "value": "fallback"},
-            {"id": "coi_rate", "label": "COI schedule", "status": "placeholder", "value": 0.004},
+            {"id": "surrender_schedule", "label": "Surrender", "status": "missing", "value": None},
+            {"id": "coi_rate", "label": "COI schedule", "status": "missing", "value": None},
             {"id": "policy_fee", "label": "Fee", "status": "evidenced", "value": "3 executable rows"},
         ],
         context=context,
     )
     nodes = _nodes(graph)
-    surrender = nodes["input:surrender_schedule"]["equation"]
-    assert "placeholder percentage x ending account value" in surrender
-    assert "10.00%" in surrender
+    assert "Not calculated" in nodes["input:surrender_schedule"]["equation"]
+    assert "Not calculated" in nodes["input:coi_rate"]["equation"]
     fee = nodes["input:policy_fee"]["equation"]
-    assert "fee = (face amount / 1,000) x the annual amount / 12" in fee
+    assert "sum over the fee schedule rows in force" in fee
 
 
 def test_ledger_formulas_are_reused_verbatim_when_the_run_carries_them() -> None:
@@ -359,9 +391,14 @@ def test_scenario_fee_and_remaining_calculation_inputs_have_equations() -> None:
     nodes = _nodes(graph)
     fee = nodes["input:policy_fee"]["equation"]
     assert "$240.00" in fee and "user-entered" in fee
-    assert "monthly rate = (1 + annual rate)^(1/12) - 1" in nodes["input:guaranteed_rate"]["equation"]
+    assert "not applied" in fee
+    crediting = nodes["input:guaranteed_rate"]["equation"]
+    assert "(1 + the guaranteed annual rate)" in crediting
+    assert "Guaranteed annual rate in force: 2.00%" in crediting
     assert "modal premium x payments per year" in nodes["input:premium"]["equation"]
-    assert "greater of the face amount and the corridor" in nodes["input:death_benefit_option"]["equation"]
+    death_benefit = nodes["input:death_benefit_option"]["equation"]
+    assert "the greater of (the face amount" in death_benefit
+    assert "corridor" in death_benefit
     # Selectors and plain scenario values carry no applied equation.
     assert nodes["input:sex"]["equation"] is None
     assert nodes["input:face_amount"]["equation"] is None

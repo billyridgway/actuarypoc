@@ -1125,6 +1125,11 @@ export const ProductWorkspacePage: React.FC<{
   const hasMaterialProjectionGaps = gapItems.some((g) => {
     const id = (g.id || "").toString().toLowerCase();
     return (
+      id === "missing_coi_equation" ||
+      id === "missing_surrender_equation" ||
+      id === "missing_policy_fees_equation" ||
+      id === "missing_nar_equation" ||
+      // Legacy ids from snapshots stored before Phase 7.
       id === "missing_coi_table" ||
       id === "surrender_schedule_placeholder" ||
       id === "policy_admin_fee_missing"
@@ -2284,22 +2289,20 @@ export const ProductWorkspacePage: React.FC<{
                   <strong>Why diagnostic only?</strong>
                 </p>
                 <ul className="muted">
-                  {gapItems.some((g) => (g.id || "") === "missing_coi_table") && (
+                  {gapItems.some((g) => (g.id || "") === "missing_coi_equation") && (
                     <li>
-                      COI rates are placeholder. Actual cost of insurance tables may materially change policy charges
-                      and cash values.
+                      No approved COI charge equation is in force, so no COI charge is calculated. Harvest the
+                      filing's stated calculation and approve it, or enter the equation, to calculate COI charges.
                     </li>
                   )}
-                  {gapItems.some((g) => (g.id || "") === "surrender_schedule_placeholder") && (
+                  {gapItems.some((g) => (g.id || "") === "missing_surrender_equation") && (
                     <li>
-                      Surrender charges use a simplified schedule. Filed surrender patterns may change early duration
-                      surrender values.
+                      No approved surrender charge equation is in force, so no surrender charge is calculated.
                     </li>
                   )}
-                  {gapItems.some((g) => (g.id || "") === "policy_admin_fee_missing") && (
+                  {gapItems.some((g) => (g.id || "") === "missing_policy_fees_equation") && (
                     <li>
-                      Policy/admin fees are missing. Actual fee schedules will reduce projected account and surrender
-                      values.
+                      No approved policy fees equation is in force, so no policy or admin fees are calculated.
                     </li>
                   )}
                 </ul>

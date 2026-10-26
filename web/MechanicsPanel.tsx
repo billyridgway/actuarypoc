@@ -72,17 +72,18 @@ interface CorrectionVariant {
   label: string;
   /** Names of the parameters the variant takes (the form is per-variant). */
   params: string[];
-  /** Phase 4: the rule-bank switches this variant resolves through. */
-  bankSwitches?: string[];
+  /** Phase 7: the equation mechanic this variant puts in force. */
+  equationMechanic?: string;
 }
 
 interface ProposalView {
   id: string;
-  kind: "filed_table" | "switch_setting";
+  kind: "filed_table" | "equation";
   slot: string;
   label: string;
   confirmBack: string;
-  switch?: string | null;
+  equationMechanic?: string | null;
+  rendering?: string | null;
   evidence?: {
     filename?: string | null;
     page?: number | null;
@@ -91,11 +92,30 @@ interface ProposalView {
   } | null;
 }
 
-interface RuleBankSwitch {
+interface EquationRecordView {
   id: string;
   mechanic: string;
-  kind: string;
-  description: string;
+  version?: number;
+  state: string;
+  rendering?: string | null;
+  timing?: string | null;
+  conflict?: boolean;
+  source?: Record<string, any>;
+  approval?: { by?: string; at?: string } | null;
+}
+
+interface EquationsView {
+  mechanics: Record<
+    string,
+    {
+      label: string;
+      inForce?: EquationRecordView | null;
+      records: EquationRecordView[];
+      missing: boolean;
+      resolution?: string;
+    }
+  >;
+  conflicts: Array<Record<string, any>>;
 }
 
 interface PanelPayload {
@@ -113,9 +133,9 @@ interface PanelPayload {
   projectionStale: boolean;
   projectionStaleSince?: string | null;
   projectionStaleSlots: string[];
-  /** Phase 4: pending extraction proposals + the rule-bank catalog. */
+  /** Pending extraction proposals + the Phase 7 equation state. */
   proposals?: ProposalView[];
-  ruleBank?: RuleBankSwitch[];
+  equations?: EquationsView;
 }
 
 /** One editable row of a banded (piecewise) schedule correction. */
@@ -622,8 +642,13 @@ export const MechanicsPanel: React.FC<{
             <div key={proposal.id} className="slot-candidate">
               <p>
                 <strong>{proposal.label}</strong>
-                {proposal.switch ? <span className="basis-tag">{proposal.switch}</span> : null}
+                {proposal.kind === "equation" ? (
+                  <span className="basis-tag">equation</span>
+                ) : null}
               </p>
+              {proposal.kind === "equation" && proposal.rendering ? (
+                <p className="muted">Equation: {proposal.rendering}</p>
+              ) : null}
               {proposal.evidence && (
                 <p className="muted">
                   Evidence: {proposal.evidence.filename || "the filing"}
@@ -650,6 +675,55 @@ export const MechanicsPanel: React.FC<{
               </button>
             </div>
           ))}
+        </div>
+      )}
+      {panel?.equations && (
+        <div className="slot-card" id="equations-in-force">
+          <h3>Equations in force</h3>
+          <p className="muted">
+            Only approved equations calculate. A mechanic with no approved equation is
+            not calculated — the projection states the absence instead of substituting
+            a fallback.
+          </p>
+          {Object.entries(panel.equations.mechanics).map(([mechanic, view]) => (
+            <div key={mechanic} className="slot-candidate">
+              <p>
+                <strong>{view.label}</strong>{" "}
+                {view.inForce ? (
+                  <span className="basis-tag">approved</span>
+                ) : (
+                  <span className="basis-tag">not calculated</span>
+                )}
+                {view.records.some((r) => r.conflict) ? (
+                  <span className="basis-tag">conflict</span>
+                ) : null}
+              </p>
+              {view.inForce ? (
+                <p className="muted">
+                  {view.inForce.rendering}
+                  {view.inForce.approval?.by ? (
+                    <> — approved by {view.inForce.approval.by}</>
+                  ) : null}
+                </p>
+              ) : (
+                <p className="muted">{view.resolution}</p>
+              )}
+              {view.records
+                .filter((r) => r.state === "pending")
+                .map((r) => (
+                  <p key={r.id} className="muted">
+                    Pending approval: {r.rendering ?? "(stated, not yet structured)"}
+                  </p>
+                ))}
+            </div>
+          ))}
+          {panel.equations.conflicts.length > 0 && (
+            <p className="muted">
+              {panel.equations.conflicts.length} stated calculation(s) conflict with an
+              equation in force or could not be structured — see the equation records;
+              nothing was silently dropped or auto-approved.
+            </p>
+          )}
         </div>
       )}
       {panel?.slots.map((slot) => (
@@ -1049,9 +1123,10 @@ export const MechanicsPanel: React.FC<{
               const variant = (slot.correctionVariants ?? []).find(
                 (v) => v.id === (corrVariant[slot.id] ?? ""),
               );
-              return variant?.bankSwitches && variant.bankSwitches.length > 0 ? (
+              return variant?.equationMechanic ? (
                 <p className="muted">
-                  Runs through the rule bank: {variant.bankSwitches.join(", ")}.
+                  Puts an approved {variant.equationMechanic.replace(/_/g, " ")}{" "}
+                  equation in force — the correction is the equation.
                 </p>
               ) : null;
             })()}

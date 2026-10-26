@@ -444,14 +444,19 @@ def test_runner_matches_the_hand_computed_filed_case(
             _hand_computed(3)[year]["accountValue"], abs=0.02
         )
 
-    # The engine record names the banked switches the run executed.
-    switches = report["engine"]["switchesUsed"]
-    assert "coi.rate.per_1000_monthly" in switches
-    assert "coi.timing.beginning" in switches
-    assert "surrender.basis.per_1000_face" in switches
+    # Phase 7: the engine record names the approved equations the run
+    # executed (the switch fingerprint is retired).
+    equations = report["engine"]["appliedEquations"]
+    mechanics = {e["mechanic"] for e in equations}
+    assert {"coi_charge", "surrender_charge"} <= mechanics
+    assert all(e["equationId"] and e["approvedBy"] for e in equations)
+    assert report["cases"][0]["appliedEquations"] == equations or set(
+        e["equationId"] for e in report["cases"][0]["appliedEquations"]
+    ) == {e["equationId"] for e in equations}
     # Nothing in this run rests on a stand-in.
     assert report["standInLines"] == []
-    assert report["engine"]["ledgerVersion"] == 1
+    # Ledger version 2: Phase 7 (derivations cite approved equations).
+    assert report["engine"]["ledgerVersion"] == 2
 
     # The run is persisted and listed as the pack's last run.
     stored = server.api_get_validation_run(workspace_id, report["id"])["report"]
@@ -569,7 +574,7 @@ def test_deliberate_slot_error_is_caught(
 # ---------------------------------------------------------------------------
 
 
-def test_placeholder_mismatch_explains_itself(store: FakeMinio) -> None:
+def test_missing_equation_mismatch_explains_itself(store: FakeMinio) -> None:
     workspace_id = _seed_workspace(store, _empty_artifact())
     payload = {
         "name": "Expectations against an empty product",
@@ -594,18 +599,21 @@ def test_placeholder_mismatch_explains_itself(store: FakeMinio) -> None:
     assert report["summary"]["status"] == "fail"
 
     coi = _result(report, 1, "coiCharge")
-    assert coi["basis"] == "placeholder"
+    assert coi["basis"] == "missing"
     assert coi["status"] == "fail"
-    assert "PLACEHOLDER" in coi["explanation"]
-    # The flat placeholder is the config's 0.4% of face: $400.00/year.
-    assert coi["actual"] == pytest.approx(400.00)
+    assert "NOT CALCULATED" in coi["explanation"]
+    assert "no approved equation" in coi["explanation"]
+    # Phase 7: no placeholder figure exists to compare — the actual is
+    # the honest zero of a mechanic that did not calculate.
+    assert coi["actual"] == pytest.approx(0.0)
 
     surrender = _result(report, 1, "surrenderCharge")
-    assert surrender["basis"] == "placeholder"
-    # Both stand-in lines are named in the report's stand-in list.
-    standin_fields = {line["field"] for line in report["standInLines"]}
-    assert {"coiCharge", "surrenderCharge"} <= standin_fields
-    assert "coi.placeholder.flat_face" in report["engine"]["switchesUsed"]
+    assert surrender["basis"] == "missing"
+    assert surrender["status"] == "pass"  # expected 0.0, actual 0.0
+    # Nothing ran: no equations recorded, and no stand-in lines (a
+    # missing mechanic is an absence, not a stand-in).
+    assert report["engine"]["appliedEquations"] == []
+    assert report["standInLines"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -648,7 +656,9 @@ def test_pinned_case_runs_its_own_mechanics(store: FakeMinio) -> None:
     by_id = {case["caseId"]: case for case in report["cases"]}
 
     workspace_result = by_id["workspace-case"]["results"][0]
-    assert workspace_result["basis"] == "placeholder"
+    # Phase 7: the empty workspace calculates nothing — the basis is
+    # the missing-equation state, not a placeholder.
+    assert workspace_result["basis"] == "missing"
     assert workspace_result["status"] == "fail"
 
     pinned_result = by_id["pinned-case"]["results"][0]
@@ -697,14 +707,15 @@ def test_exported_report_is_complete(store: FakeMinio, pinned_config: None) -> N
     assert fetched["workspaceId"] == workspace_id
     assert fetched["ranBy"] == "eddy"
     assert fetched["ranAt"]
-    assert fetched["engine"]["switchesUsed"]
+    assert fetched["engine"]["appliedEquations"]
     assert fetched["summary"]["expectations"] == 15
 
     response = server.api_get_validation_run_report_text(workspace_id, report["id"])
     text = response.body.decode("utf-8")
     assert "VALIDATION REPORT" in text
     assert "Promise UL filed-mechanics pack" in text
-    assert "coi.rate.per_1000_monthly" in text
+    assert "approved equations applied" in text
+    assert "coi_charge" in text
     assert "Filed base case" in text
     assert "PASS" in text
 
