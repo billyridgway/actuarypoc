@@ -461,11 +461,15 @@ def _workspace_sources_view(
                 if client is None:
                     client = get_minio_client()
                 current = stat_store_object(client, str(source.get("bucket")), str(source.get("key")))
-                baseline = source.get("analyzedEtag") or source.get("etag")
-                entry["changedSinceAnalyzed"] = bool(
-                    baseline is not None and current.get("etag") != baseline
-                )
-                entry["currentEtag"] = current.get("etag")
+                if current is None:
+                    entry["missing"] = True
+                    entry["changedSinceAnalyzed"] = True
+                else:
+                    baseline = source.get("analyzedEtag") or source.get("etag")
+                    entry["changedSinceAnalyzed"] = bool(
+                        baseline is not None and current.get("etag") != baseline
+                    )
+                    entry["currentEtag"] = current.get("etag")
             except Exception as exc:  # noqa: BLE001 - the view must not fail
                 if getattr(exc, "code", None) in {"NoSuchKey", "NoSuchObject", "NoSuchBucket"}:
                     entry["missing"] = True
@@ -2359,6 +2363,13 @@ def _refresh_source_documents(
             logging.warning(
                 "[workspace-analysis] source stat failed for %s/%s: %s",
                 source.get("bucket"), source.get("key"), exc,
+            )
+            refreshed.append(document)
+            continue
+        if current is None:
+            logging.warning(
+                "[workspace-analysis] source object missing at analyze: %s/%s",
+                source.get("bucket"), source.get("key"),
             )
             refreshed.append(document)
             continue

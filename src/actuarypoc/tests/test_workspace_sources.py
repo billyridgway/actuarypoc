@@ -434,3 +434,41 @@ def test_analyze_over_source_documents_produces_document_maps(
     doc = workspace_store.list_workspace_documents(workspace_id)[0]
     assert doc["source"]["analyzedEtag"] == _etag(long_pdf_bytes)
     assert doc["source"]["changedAtAnalyze"] is False
+
+
+class HeaderQuirkMinio(BucketFakeMinio):
+    """A store whose HEAD answers Last-Modified in a form the MinIO
+    client's header parser rejects (observed live against Roost). The
+    picker must never depend on stat/HEAD: listings carry everything
+    it needs."""
+
+    def stat_object(self, bucket, name, **kwargs):  # noqa: D102 - test fake
+        raise ValueError(
+            "time data '2026-10-26T11:43:15.143Z' does not match HTTP header format"
+        )
+
+
+def test_picker_flows_work_when_head_is_unusable(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = HeaderQuirkMinio()
+    fake.make_bucket("app-bucket")
+    fake.put("filings-bucket", "promise/memo.pdf", b"%PDF-memo")
+    for module in (workspace_store, server, slice_pipeline):
+        monkeypatch.setattr(module, "get_minio_client", lambda: fake)
+        monkeypatch.setattr(module, "ensure_bucket", lambda c: None)
+    monkeypatch.setattr(workspace_store, "get_bucket_name", lambda: "app-bucket")
+    monkeypatch.setattr(server, "get_bucket_name", lambda: "app-bucket")
+    monkeypatch.setattr(slice_pipeline, "get_bucket_name", lambda: "app-bucket")
+
+    client = TestClient(server.app)
+    created = client.post(
+        "/api/workspaces",
+        json={"sources": [{"bucket": "filings-bucket", "keys": ["promise/memo.pdf"]}]},
+    )
+    assert created.status_code == 200
+    workspace_id = created.json()["workspace"]["id"]
+
+    view = client.get(f"/api/workspaces/{workspace_id}")
+    assert view.status_code == 200
+    sources = view.json()["sources"]
+    assert sources[0]["missing"] is False
+    assert sources[0]["changedSinceAnalyzed"] is False

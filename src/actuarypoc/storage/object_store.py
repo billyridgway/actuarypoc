@@ -93,17 +93,27 @@ def list_store_objects(
     }
 
 
-def stat_store_object(client: Any, bucket: str, key: str) -> Dict[str, Any]:
-    """The reference facts for one object (raises the client's error)."""
+def stat_store_object(client: Any, bucket: str, key: str) -> Optional[Dict[str, Any]]:
+    """The reference facts for one object, or None when it is absent.
 
-    stat = client.stat_object(bucket, key)
-    return {
-        "bucket": bucket,
-        "key": key,
-        "etag": _clean_etag(getattr(stat, "etag", None)),
-        "size": getattr(stat, "size", None),
-        "lastModified": _iso(getattr(stat, "last_modified", None)),
-    }
+    Resolved through a listing rather than HEAD/stat: the MinIO client
+    strictly parses HEAD's Last-Modified header, and some stores (Roost
+    included) answer it in a form that parser rejects, which would make
+    every stat raise. Listing responses parse cleanly against the same
+    stores, and existence + etag + size is all the picker needs.
+    Listing errors (e.g. a missing bucket) still raise.
+    """
+
+    for item in client.list_objects(bucket, prefix=key, recursive=True):
+        if getattr(item, "object_name", None) == key:
+            return {
+                "bucket": bucket,
+                "key": key,
+                "etag": _clean_etag(getattr(item, "etag", None)),
+                "size": getattr(item, "size", None),
+                "lastModified": _iso(getattr(item, "last_modified", None)),
+            }
+    return None
 
 
 def resolve_source_selections(
@@ -145,11 +155,14 @@ def resolve_source_selections(
                 if not key:
                     raise ValueError(f"Empty object key in selection for bucket {bucket}.")
                 try:
-                    _add(stat_store_object(client, bucket, key))
+                    stat = stat_store_object(client, bucket, key)
                 except Exception as exc:  # noqa: BLE001 - surface as 400 text
                     raise ValueError(
                         f"Object not readable: {bucket}/{key} ({getattr(exc, 'code', None) or exc})"
                     ) from exc
+                if stat is None:
+                    raise ValueError(f"Object not found in the store: {bucket}/{key}")
+                _add(stat)
         elif prefix is not None:
             prefix = str(prefix)
             listing = list_store_objects(
