@@ -7,8 +7,11 @@ IDs are versioned execution contracts.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+
+from actuarypoc.domain import rule_bank as _rule_bank
 
 
 GRAPH_VERSION = 1
@@ -148,6 +151,258 @@ def _fallback_disclosure(input_id: str, status: Any) -> Optional[Dict[str, str]]
     return None
 
 
+def _fmt_pct(value: Any) -> Optional[str]:
+    try:
+        return f"{float(value):.2%}"
+    except (TypeError, ValueError):
+        return None
+
+
+def _fmt_money(value: Any) -> Optional[str]:
+    try:
+        return f"${float(value):,.2f}"
+    except (TypeError, ValueError):
+        return None
+
+
+def _switch_description(switch_id: str) -> str:
+    return _rule_bank.get_switch(switch_id).description
+
+
+def _table_kind(raw: Mapping[str, Any], context: Mapping[str, Any], mechanic: str) -> Optional[str]:
+    """The provenance kind of the mechanic table in force, when known.
+
+    Sources, in order: the snapshot's rate-tables view (which classifies
+    rows by provenance), the run's applied-mechanics source record, and
+    the input's own status (synthetic stand-ins are marked on the node).
+    """
+
+    rate_tables = context.get("rateTables") or {}
+    view = rate_tables.get(mechanic) or {}
+    if view.get("status"):
+        return str(view["status"])
+    applied = (context.get("appliedMechanics") or {}).get(mechanic) or {}
+    source = applied.get("source") or {}
+    source_type = str(source.get("sourceType") or "")
+    if source_type == "filed_pdf":
+        return "filed"
+    if source_type in {"ai_synthetic", "deterministic_fallback"}:
+        return "synthetic"
+    if source_type == "correction":
+        return "corrected"
+    if source_type:
+        return "workspace_table"
+    if str(raw.get("status") or "").lower() == "synthetic_assumption":
+        return "synthetic"
+    return None
+
+
+_TABLE_KIND_PREFIX = {
+    "filed": "From the filed schedule in force: ",
+    "corrected": "From the corrected schedule in force: ",
+    "synthetic": "From the synthetic schedule in force (a reviewed scenario stand-in, not filed values): ",
+    "workspace_table": "From the workspace schedule in force: ",
+}
+
+
+def _coi_equation(raw: Mapping[str, Any], context: Mapping[str, Any]) -> Optional[str]:
+    ledger = (context.get("ledgerFormulas") or {}).get("coi")
+    if ledger:
+        return str(ledger)
+    applied = (context.get("appliedMechanics") or {}).get("coi") or {}
+    status = str(raw.get("status") or "").lower()
+    if applied.get("basis") == "table" or (not applied and status in {"evidenced", "synthetic_assumption"}):
+        unit = str(applied.get("rateUnit") or "") or _table_unit(context, "coi", "rate_unit")
+        if unit in _rule_bank.COI_RATE_SWITCH_BY_UNIT:
+            equation = _switch_description(_rule_bank.COI_RATE_SWITCH_BY_UNIT[unit])
+        else:
+            equation = (
+                "COI charge = COI table rate x COI net amount at risk, applied "
+                "monthly from the table in force."
+            )
+        definition = str(applied.get("narDefinition") or "")
+        if definition in _rule_bank.NAR_DEFINITION_SWITCHES:
+            nar_text = _switch_description(_rule_bank.NAR_DEFINITION_SWITCHES[definition])
+            equation += " " + nar_text.split(". ")[0] + "."
+        timing = str(applied.get("timing") or "")
+        if timing == "middle":
+            equation += " The COI charge is deducted in the middle of each month: half before interest is credited and half after."
+        elif timing == "end":
+            equation += " The COI charge is deducted at the end of each month, after interest is credited."
+        elif timing:
+            equation += " The COI charge is deducted at the beginning of each month, before interest is credited."
+        kind = _table_kind(raw, context, "coi")
+        return (_TABLE_KIND_PREFIX.get(kind or "", "") + equation) if kind else equation
+    # Placeholder / missing: the banked placeholder switch is what runs.
+    rate = applied.get("flatRate")
+    if rate is None:
+        rate = raw.get("value")
+    pct = _fmt_pct(rate)
+    rate_clause = f" of {pct}" if pct else ""
+    return (
+        "Placeholder - no COI table is in force: COI charge each month = face amount "
+        f"x flat annual placeholder rate{rate_clause} / 12. A filed COI charge is the "
+        "table rate x the net amount at risk; this placeholder is not, so it stays "
+        "flat and does not move with the account value."
+    )
+
+
+def _table_unit(context: Mapping[str, Any], mechanic: str, field: str) -> str:
+    rows = ((context.get("rateTables") or {}).get(mechanic) or {}).get("rows") or []
+    units = {str(row.get(field)) for row in rows if row.get(field)}
+    return units.pop() if len(units) == 1 else ""
+
+
+def _surrender_equation(raw: Mapping[str, Any], fallback: Optional[Dict[str, str]], context: Mapping[str, Any]) -> Optional[str]:
+    ledger = (context.get("ledgerFormulas") or {}).get("surrender_charge")
+    if ledger:
+        return str(ledger)
+    applied = (context.get("appliedMechanics") or {}).get("surrender") or {}
+    status = str(raw.get("status") or "").lower()
+    table_in_force = applied.get("basis") == "table" or (
+        not applied and status in {"evidenced", "synthetic_assumption"}
+    )
+    if table_in_force:
+        unit = str(applied.get("chargeUnit") or "") or _table_unit(context, "surrender", "charge_unit")
+        kind = _table_kind(raw, context, "surrender")
+        if unit in _rule_bank.SURRENDER_SWITCH_BY_UNIT:
+            equation = _switch_description(_rule_bank.SURRENDER_SWITCH_BY_UNIT[unit])
+            return (_TABLE_KIND_PREFIX.get(kind or "", "") + equation) if kind else equation
+        if kind == "synthetic":
+            return (
+                "Surrender charge = the synthetic schedule in force's charge for "
+                "the duration, applied on the basis the schedule states "
+                "(scenario-only; not filed values)."
+            )
+        return (
+            "Surrender charge = the schedule in force's charge for the duration, "
+            "applied on the basis the schedule states."
+        )
+    if applied.get("basis") == "expired":
+        return "No surrender charge applies: the surrender charge period has ended."
+    if applied.get("basis") == "placeholder" and applied.get("percent") is not None:
+        pct = _fmt_pct(applied.get("percent")) or "the placeholder percentage"
+        return (
+            f"Surrender charge = placeholder percentage x ending account value; the "
+            f"year-1 placeholder percentage is {pct} and declines linearly to zero "
+            "over the surrender period. Placeholder - no surrender schedule is in force."
+        )
+    # Definition-only fallback (legacy snapshots carry no run record): the
+    # node's stated value parameterises the simplified declining pattern.
+    value_text = str(raw.get("value") or "")
+    match = re.search(r"(\d+(?:\.\d+)?%)\s+of\s+(face|account value)\b.*?(\d+)\s*years", value_text)
+    if match:
+        pct, base_word, years = match.group(1), match.group(2), match.group(3)
+        base = "face amount" if base_word == "face" else "ending account value"
+        return (
+            f"Surrender charge = {pct} of {base} in year 1, declining linearly to "
+            f"zero over {years} years: in year t, surrender charge = {base} x {pct} "
+            f"x ({years} - t + 1) / {years}. Simplified fallback - no filed "
+            "surrender schedule is in force."
+        )
+    return "No filed surrender schedule is in force. " + _switch_description(
+        "surrender.placeholder.linear_account_value"
+    )
+
+
+def _fee_equation(raw: Mapping[str, Any], context: Mapping[str, Any]) -> Optional[str]:
+    applied_fees = (context.get("appliedMechanics") or {}).get("fees") or []
+    table_fees = [item for item in applied_fees if item.get("basis") == "table"]
+    if table_fees:
+        units: List[str] = []
+        for item in table_fees:
+            unit = str(item.get("feeUnit") or "")
+            if unit in _rule_bank.FEE_SWITCH_BY_UNIT and unit not in units:
+                units.append(unit)
+        if units:
+            descriptions = " ".join(
+                _switch_description(_rule_bank.FEE_SWITCH_BY_UNIT[unit]) for unit in units
+            )
+            return "From the fee schedule in force: " + descriptions
+    fallback_fees = [item for item in applied_fees if item.get("basis") == "fallback"]
+    status = str(raw.get("status") or "").lower()
+    if fallback_fees or status in {"missing", "not_available", "scenario_assumption"}:
+        amount = fallback_fees[0].get("amount") if fallback_fees else raw.get("value")
+        money = _fmt_money(amount)
+        if status == "scenario_assumption" and not fallback_fees:
+            return (
+                f"Policy/admin fee = the user-entered annual fee of {money or 'the stated amount'}, "
+                "spread evenly over the year (annual fee / 12 each month). Scenario "
+                "assumption - no evidenced fee schedule is in force."
+            )
+        monthly = _fmt_money(float(amount) / 12.0) if isinstance(amount, (int, float)) else None
+        equation = (
+            "No fee schedule is in force, so no filed fee equation applies. The "
+            "projection instead uses the fallback: monthly fee = configured annual "
+            "policy/admin fee / 12"
+        )
+        if money is not None:
+            equation += f", with the configured annual fee at {money}"
+        if monthly is not None:
+            equation += f" ({monthly} per month)"
+        equation += "."
+        if isinstance(amount, (int, float)) and float(amount) == 0.0:
+            equation += " At that amount, no fee is deducted."
+        return equation
+    ledger = (context.get("ledgerFormulas") or {}).get("policy_fee")
+    if ledger:
+        return str(ledger)
+    return (
+        "Policy/admin fees are deducted monthly from the fee schedule in force, "
+        "each row applied on the basis it states (a stated monthly amount, an "
+        "annual amount per $1,000 of face, or a percentage of premium for a "
+        "premium expense charge)."
+    )
+
+
+def _applied_equation(
+    input_id: str,
+    raw: Mapping[str, Any],
+    fallback: Optional[Dict[str, str]],
+    context: Mapping[str, Any],
+) -> Optional[str]:
+    """The equation the engine applies to one input, for the graph panel.
+
+    Eddy's rule (Aug 7, 2026): the formula sits beside every component.
+    Rule nodes already carry their step formulas; this gives each
+    calculation input the equation in force for its own state — the
+    ledger's own derivation when the snapshot carries the run's ledger,
+    otherwise the banked switch description for the state in force, and
+    for fallbacks the fallback's own equation, stated as a fallback.
+    Selector and setting inputs have no applied equation (they choose
+    values; they are not calculated from), so they return None.
+    """
+
+    if input_id == "coi_rate":
+        return _coi_equation(raw, context)
+    if input_id == "surrender_schedule":
+        return _surrender_equation(raw, fallback, context)
+    if input_id == "policy_fee":
+        return _fee_equation(raw, context)
+    if input_id == "guaranteed_rate":
+        equation = _switch_description("crediting.guaranteed_annual")
+        pct = _fmt_pct(raw.get("value"))
+        if pct:
+            equation += f" Guaranteed annual rate in force: {pct}."
+        return equation
+    if input_id == "premium":
+        if str(raw.get("status") or "").lower() == "derived_placeholder":
+            match = re.search(r"(\d+(?:\.\d+)?%)\s+of\s+face", str(raw.get("source") or ""))
+            if match:
+                return (
+                    f"Annual premium = {match.group(1)} x face amount (the default "
+                    "applied because no scenario premium was supplied)."
+                )
+        return "Annual premium = modal premium x payments per year under the selected premium mode."
+    if input_id == "death_benefit_option":
+        return (
+            "Death benefit = the greater of the face amount and the corridor "
+            "minimum death benefit (corridor percentage x ending account value); "
+            "under the option in force the base death benefit is the face amount."
+        )
+    return None
+
+
 def _status(value: Any) -> str:
     raw = str(value or "").lower()
     if raw in {"missing", "not_available"}:
@@ -173,6 +428,7 @@ def compile_projection_graph(
     steps: Sequence[Mapping[str, Any]],
     capabilities: Sequence[Mapping[str, Any]] = (),
     input_configs: Optional[Mapping[str, Mapping[str, Any]]] = None,
+    context: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Compile projection inputs and executed steps into the graph API shape."""
 
@@ -193,6 +449,7 @@ def compile_projection_graph(
         for definition in mechanic_definitions
     }
     configs = input_configs or {}
+    equation_context = context or {}
 
     nodes: List[Dict[str, Any]] = []
     diagnostics: List[Dict[str, Any]] = []
@@ -201,6 +458,11 @@ def compile_projection_graph(
         mechanic_id = input_mechanic.get(input_id, "unmodeled")
         contribution_type, contribution_detail = _contribution(input_id)
         fallback = _fallback_disclosure(input_id, raw.get("status"))
+        equation = (
+            _applied_equation(input_id, raw, fallback, equation_context)
+            if mechanic_id != "unmodeled"
+            else None
+        )
         if mechanic_id == "unmodeled":
             diagnostics.append({
                 "code": "unregistered_input",
@@ -220,6 +482,7 @@ def compile_projection_graph(
             "value": raw.get("value"),
             "unit": raw.get("unit"),
             "source": raw.get("source"),
+            "equation": equation,
             "contributionType": contribution_type,
             "contributionDetail": contribution_detail,
             "fallbackDisclosure": fallback,

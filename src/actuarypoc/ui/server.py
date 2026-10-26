@@ -1758,6 +1758,32 @@ def _projection_graph_input_configs(snapshot: Dict[str, Any]) -> Dict[str, Dict[
     return configs
 
 
+def _graph_equation_context(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    """Run context the graph compiler uses to state each input's applied
+    equation: the first projection row's applied-mechanics record, the
+    year-1 ledger's component formulas (the engine's own derivations,
+    reused verbatim), and the rate tables in force.  Legacy snapshots
+    carry none of these; the compiler then derives equations from each
+    input's own state and the rule bank."""
+
+    illustration = snapshot.get("illustration") or {}
+    rows = illustration.get("rows") or []
+    applied: Dict[str, Any] = {}
+    if rows and isinstance(rows[0], dict):
+        applied = rows[0].get("appliedMechanics") or {}
+    formulas: Dict[str, str] = {}
+    ledger_rows = (illustration.get("ledger") or {}).get("rows") or []
+    if ledger_rows and isinstance(ledger_rows[0], dict):
+        for component in ledger_rows[0].get("components") or []:
+            if component.get("id") and component.get("formula"):
+                formulas[str(component["id"])] = str(component["formula"])
+    return {
+        "appliedMechanics": applied,
+        "ledgerFormulas": formulas,
+        "rateTables": illustration.get("rateTables") or {},
+    }
+
+
 def _compile_snapshot_projection_graph(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     product = snapshot.get("product") or {}
     illustration = snapshot.get("illustration") or {}
@@ -1770,6 +1796,7 @@ def _compile_snapshot_projection_graph(snapshot: Dict[str, Any]) -> Dict[str, An
         steps=mechanics.get("steps") or [],
         capabilities=capabilities,
         input_configs=_projection_graph_input_configs(snapshot),
+        context=_graph_equation_context(snapshot),
     )
 
 

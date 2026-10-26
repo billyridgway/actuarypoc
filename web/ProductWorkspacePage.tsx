@@ -293,6 +293,7 @@ interface LogicGraphNode {
   unit?: string;
   source?: string;
   formula?: string;
+  equation?: string;
   contributionType?: "calculation_input" | "conditional_selector" | "execution_setting" | "scenario_context";
   contributionDetail?: string;
   fallbackDisclosure?: { mode?: string; missingEvidence: string; fallback: string; impact: string };
@@ -319,6 +320,7 @@ export interface ProjectionGraphDefinition {
     unit?: string;
     source?: string;
     formula?: string;
+    equation?: string;
     contributionType?: "calculation_input" | "conditional_selector" | "execution_setting" | "scenario_context";
     contributionDetail?: string;
     fallbackDisclosure?: { mode?: string; missingEvidence: string; fallback: string; impact: string };
@@ -604,7 +606,7 @@ export const ProjectionLogicGraph: React.FC<{
                 ? formatProjectionInputValue(editableValues[selected.inputId], selected.unit)
                 : "No value or assumption supplied"}</p>
             ) : selected.value !== undefined && <p><strong>Current value:</strong> {formatProjectionInputValue(selected.value, selected.unit)}</p>}
-            {selected.formula && <p><strong>Logic:</strong> {selected.formula}</p>}
+            {(selected.formula || selected.equation) && <p><strong>Equation:</strong> {selected.formula || selected.equation}</p>}
             {selected.contributionType && (
               <p><strong>Projection contribution:</strong> {{
                 calculation_input: "Direct calculation input",
