@@ -1,6 +1,6 @@
 import React from "react";
 import { ProductWorkspacePage } from "./ProductWorkspacePage";
-import { ProjectionLogicPage } from "./ProjectionLogicPage";
+import { WorkbenchPage } from "./WorkbenchPage";
 
 interface WorkspaceMeta {
   id: string;
@@ -85,12 +85,22 @@ export const WorkspacePage: React.FC<{ workspaceId: string; view?: string }> = (
 
   if (hasSnapshot && snapshot) {
     // Once analysis has populated the snapshot and the workspace has
-    // reached the analyzed state, reuse the existing Product
-    // Understanding Workspace view directly from the snapshot.
-    return view === "details" ? (
+    // reached the analyzed state, the actuary workbench is the
+    // workspace's main surface. The old deep links keep working:
+    // view=details lands on the bench's Filing tab, view=map /
+    // view=logic land on the Ledger tab with its calculation-map
+    // debugging detail expanded — the graph is no longer a peer page.
+    // The full filing analysis (the former details page) remains
+    // reachable as its own view=analysis.
+    return view === "analysis" ? (
       <ProductWorkspacePage snapshot={snapshot} workspaceId={workspaceId} />
     ) : (
-      <ProjectionLogicPage snapshot={snapshot} workspaceId={workspaceId} />
+      <WorkbenchPage
+        snapshot={snapshot}
+        workspaceId={workspaceId}
+        expandMap={view === "map" || view === "logic"}
+        initialTab={view === "details" ? "filing" : "ledger"}
+      />
     );
   }
 

@@ -1502,3 +1502,289 @@ details > summary {
 .slot-history {
   margin-top: 1.25rem;
 }
+
+/* Actuary workbench: one bench per product, organized as tabs under
+   a global header. Ledger is the home tab; product inputs + equations,
+   validation, filing, and activity each get their own tab surface.
+   Panels stay mounted and are hidden with CSS so switching tabs
+   loses nothing. The calculation map is a collapsed debugging detail
+   inside the Ledger tab. */
+
+.workbench {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Bench tabs: large and unmistakably tabs, active tab obvious at a
+   glance. The strip scrolls inside its own region on narrow screens
+   so the page itself never overflows. */
+.workbench__tabs {
+  display: flex;
+  gap: 0.35rem;
+  overflow-x: auto;
+  border-bottom: 2px solid var(--border);
+  margin-bottom: 1.25rem;
+  scrollbar-width: thin;
+}
+
+.workbench__tab {
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: transparent;
+  border: 2px solid transparent;
+  border-bottom: none;
+  border-radius: 10px 10px 0 0;
+  padding: 0.8rem 1.4rem;
+  min-height: 52px;
+  cursor: pointer;
+  position: relative;
+  top: 2px;
+}
+
+.workbench__tab:hover {
+  color: var(--text-main);
+  background: var(--accent-soft);
+}
+
+.workbench__tab.is-active {
+  color: var(--text-main);
+  background: #fff;
+  border-color: var(--border);
+  box-shadow: inset 0 -3px 0 var(--text-main);
+}
+
+.workbench__tabpanel[hidden] {
+  display: none !important;
+}
+
+.workbench__header h1 {
+  margin: 0.25rem 0 0.15rem;
+}
+
+.workbench__identity-line {
+  margin: 0 0 0.5rem;
+}
+
+.workbench__state {
+  margin: 0.25rem 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.workbench__stale {
+  background: var(--warning-soft);
+  border: 1px solid var(--warning);
+  border-radius: 8px;
+  padding: 0.5rem 0.75rem;
+  margin: 0.5rem 0 0;
+}
+
+.workbench__scenario {
+  border-top: 1px solid var(--border);
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+}
+
+.workbench__scenario-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr));
+  gap: 0.6rem;
+}
+
+.workbench__scenario-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.workbench__scenario-field input,
+.workbench__scenario-field select {
+  font: inherit;
+  color: var(--text-main);
+  padding: 0.45rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+  min-height: 44px;
+}
+
+.workbench__scenario-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+  margin-top: 0.75rem;
+}
+
+.workbench__grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 24rem);
+  gap: 1.25rem;
+  align-items: start;
+}
+
+.workbench__main,
+.workbench__side {
+  min-width: 0;
+}
+
+.workbench__side {
+  display: flex;
+  flex-direction: column;
+}
+
+.workbench__map > summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 1.05rem;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+}
+
+.workbench__map .logic-graph-section {
+  margin-top: 0.75rem;
+}
+
+.logic-results__chart-details {
+  margin-top: 1rem;
+}
+
+.logic-results__chart-details > summary {
+  cursor: pointer;
+  font-weight: 600;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+}
+
+/* Equations pane (Phase 7 contract) */
+
+.equation-group h3 {
+  margin: 1rem 0 0.5rem;
+}
+
+.equation-card h4 {
+  margin: 0 0 0.4rem;
+}
+
+.equation-verbatim {
+  border-left: 3px solid var(--border);
+  background: var(--accent-soft);
+  margin: 0.5rem 0;
+  padding: 0.5rem 0.75rem;
+}
+
+.equation-verbatim cite {
+  display: block;
+  margin-top: 0.35rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  font-style: normal;
+}
+
+.equation-conflict {
+  background: var(--warning-soft);
+  border: 1px solid var(--warning);
+  border-radius: 8px;
+  padding: 0.5rem 0.75rem;
+}
+
+.equation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.6rem;
+}
+
+.equation-editor label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.9rem;
+}
+
+.equation-editor textarea {
+  font: inherit;
+  padding: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.equation-editor select {
+  font: inherit;
+  padding: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.equation-body-input {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace !important;
+  font-size: 0.85rem;
+}
+
+.equation-errors {
+  background: var(--warning-soft);
+  border: 1px solid var(--warning);
+  border-radius: 8px;
+  padding: 0.5rem 0.75rem;
+  margin-top: 0.6rem;
+}
+
+.equation-preview {
+  background: var(--accent-soft);
+  border-radius: 8px;
+  padding: 0.5rem 0.75rem;
+  margin-top: 0.6rem;
+}
+
+.equation-card--missing {
+  border-style: dashed;
+}
+
+.activity-list {
+  padding-left: 1.1rem;
+}
+
+.activity-list li {
+  margin-bottom: 0.35rem;
+}
+
+@media (max-width: 1100px) {
+  .workbench__grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 640px) {
+  .workbench__scenario-fields {
+    grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr));
+  }
+}
+
+/* Phone-width guards for bench regions: wide intrinsic controls
+   (the pack-case editor is cols=100) clamp to their region, and the
+   calculation map scrolls inside its own region when expanded. */
+.workbench textarea {
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.workbench .slot-paste {
+  min-width: 0;
+}
+
+.workbench__map .logic-graph {
+  overflow-x: auto;
+}
