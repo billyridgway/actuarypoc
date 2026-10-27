@@ -206,4 +206,40 @@ the other specimen.
 
 ## Acceptance
 
-(to be filled with the live evidence after deploy)
+Verified on the live deployment after the convergence chain (CI
+Jobs-API success → GHCR `:main` at the new digest on two agreeing
+reads with the image config's GIT_SHA → pod /health reporting the
+commit). The live exercise, per the brief's hard gate:
+
+* ws-b5ea66f5 (the surviving real-filings workspace, read-only):
+  the panel payload proposes the COI table as ONE choice with both
+  specimen candidates as options and a computed diff; the fees
+  choices group by component; candidate coverage reads "121 rows
+  covering durations 1–121"; the crediting slot carries
+  `sourceKind: "assumption"`; the panel's embedded equations view
+  and `GET /equations` agree on every mechanic; the served bundle
+  carries the revamp UI (choice cards, labeled filing review,
+  Details expand). Its `updatedAt` is unchanged by all of this.
+* A throwaway single-document workspace (created, exercised, and
+  deleted): confirming the COI choice puts the transcribed COI
+  equation in force; a selector-less projection is refused up
+  front (409) with the coverage issue naming the missing selectors
+  and the table's Tobacco/Non-Tobacco class; the matching-class
+  projection (M / Standard / Non-Tobacco) runs, COI computes, and
+  the ledger cites the exact COI table row.
+* The other pre-existing workspaces had already been deleted
+  before this build began (observed at build start; the filings
+  themselves untouched, and ws-b5ea66f5 is the surviving workspace).
+  Nothing else remained to touch, and ws-b5ea66f5's recorded state
+  is unchanged by all of the above.
+
+Full suite: 324 passed, exactly the 5 inherited failures (the
+baseline, verified against pristine HEAD before building). Seven
+inherited tests across three files were updated for the deliberate
+contract changes: the choice-shaped proposals (×3), the
+rows-and-coverage phrasing in correction confirm-backs, the
+unmatched-selector run now naming `table_coverage`, and the two
+filed-candidate tests whose union semantics this revamp retires —
+accepting an alternative now supersedes, and a same-selector
+conflict is only possible across different alternative groups,
+where it still refuses.
