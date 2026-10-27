@@ -710,6 +710,317 @@ def apply_proposal(
     raise ValueError(f"Unknown proposal kind: {proposal['kind']!r}")
 
 
+# ---------------------------------------------------------------------------
+# Bulk approval — "approve all uncontested"
+#
+# Billy (Oct 27, 2026): approving a fresh workspace's suggestions one
+# by one is a ten-click slog, so the panel offers one bulk action —
+# under the doctrine, not around it.  A human still approves
+# everything that runs, having seen what it does: the first call
+# PLANS (a summary — what will be approved, counted and listed by
+# kind; what is excluded, named, and why) and changes nothing; only
+# a confirmed call applies, through the same apply_proposal paths as
+# individual confirmations, each item recorded individually in the
+# change history and tagged with the batch id.
+#
+# Eligible: a filed-table candidate whose approval creates no value
+# conflict with rows already in force, and an equation for a mechanic
+# with exactly ONE pending reading and no different equation in
+# force.  Excluded (left pending, named): competing readings for one
+# mechanic — on an earlier workspace a model's wrong policy-fees
+# reading sat beside the correct deterministic one, and bulk approval
+# must never swallow a rival — a pending equation that would replace
+# a different in-force equation, and a table candidate in genuine
+# conflict with a table in force.
+# ---------------------------------------------------------------------------
+
+
+def _bulk_batch_id(workspace_id: Optional[str], who: str, at: str) -> str:
+    canonical = json.dumps(
+        {"workspace": workspace_id, "who": who, "at": at}, sort_keys=True
+    )
+    return "bulk-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
+
+
+def _bulk_item(
+    proposal: Dict[str, Any], kind: str, candidate_id: Optional[str] = None
+) -> Dict[str, Any]:
+    return {
+        "proposalId": proposal["id"],
+        "kind": kind,
+        "slot": proposal.get("slot"),
+        "mechanic": (
+            str(proposal.get("equationMechanic"))
+            if kind == "equation"
+            else str(proposal.get("mechanic"))
+        ),
+        "label": proposal.get("label") or "",
+        "candidateId": candidate_id,
+    }
+
+
+def plan_bulk_approval(
+    artifact: Dict[str, Any],
+    slices: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """What a bulk approval WOULD do — pure, changes nothing.
+
+    Returns {"eligible", "excluded"} item lists; each excluded item
+    carries the reason it stays pending, by name.
+    """
+
+    artifact = artifact or {}
+    proposals = generate_proposals(artifact, slices or [])
+    readings_per_mechanic: Dict[str, int] = {}
+    for proposal in proposals:
+        if proposal.get("kind") == PROPOSAL_KIND_EQUATION:
+            mechanic = str(proposal.get("equationMechanic"))
+            readings_per_mechanic[mechanic] = readings_per_mechanic.get(mechanic, 0) + 1
+
+    eligible: List[Dict[str, Any]] = []
+    excluded: List[Dict[str, Any]] = []
+    for proposal in proposals:
+        kind = proposal.get("kind")
+        if kind in {PROPOSAL_KIND_FILED_TABLE, PROPOSAL_KIND_FILED_TABLE_CHOICE}:
+            conflict = proposal.get("conflict") or {}
+            options = list(proposal.get("options") or [])
+            if conflict:
+                excluded.append({
+                    **_bulk_item(
+                        proposal, "filed_table",
+                        str(conflict.get("candidateId") or "") or None,
+                    ),
+                    "reason": (
+                        f"its rows disagree with a table already in force on "
+                        f"{conflict.get('differingRows')} row(s) where the filings "
+                        "differ — choose which governs, individually"
+                    ),
+                })
+            elif kind == PROPOSAL_KIND_FILED_TABLE_CHOICE and len(options) != 1:
+                excluded.append({
+                    **_bulk_item(proposal, "filed_table"),
+                    "reason": "it needs a choice between filed versions — decide individually",
+                })
+            else:
+                candidate_id = (
+                    str(options[0]["candidateId"]) if options
+                    else str(proposal.get("candidateId") or "")
+                )
+                eligible.append(_bulk_item(proposal, "filed_table", candidate_id))
+        elif kind == PROPOSAL_KIND_EQUATION:
+            mechanic = str(proposal.get("equationMechanic"))
+            label = _eq.MECHANIC_LABELS.get(mechanic, mechanic)
+            rivals = readings_per_mechanic.get(mechanic, 0)
+            if rivals > 1:
+                excluded.append({
+                    **_bulk_item(proposal, "equation"),
+                    "reason": (
+                        f"one of {rivals} competing readings for {label} — "
+                        "approve the right one individually"
+                    ),
+                })
+            elif _ws_equations.in_force(artifact, mechanic) is not None:
+                excluded.append({
+                    **_bulk_item(proposal, "equation"),
+                    "reason": (
+                        f"it would replace the {label} equation already in "
+                        "force — approve the replacement individually"
+                    ),
+                })
+            else:
+                eligible.append(_bulk_item(proposal, "equation"))
+        else:
+            excluded.append({
+                **_bulk_item(proposal, str(kind or "unknown")),
+                "reason": "not eligible for bulk approval — decide individually",
+            })
+    return {"eligible": eligible, "excluded": excluded}
+
+
+def bulk_summary(plan: Dict[str, Any]) -> Dict[str, Any]:
+    """The confirm-back for a bulk plan: counts, the items, the text."""
+
+    eligible = list(plan.get("eligible") or [])
+    excluded = list(plan.get("excluded") or [])
+    tables = [item for item in eligible if item["kind"] == "filed_table"]
+    equations = [item for item in eligible if item["kind"] == "equation"]
+    parts = [
+        f"Approve all uncontested: {len(eligible)} item(s) will be approved"
+        f" — {len(tables)} filed table(s), {len(equations)} equation(s)"
+        " — each recorded in the change history as part of this one"
+        " bulk approval. Nothing else changes."
+    ]
+    if excluded:
+        parts.append(
+            "Left pending: "
+            + "; ".join(
+                f"{item['label']} ({item['reason']})" for item in excluded
+            )
+            + "."
+        )
+    return {
+        "eligibleCount": len(eligible),
+        "tableCount": len(tables),
+        "equationCount": len(equations),
+        "eligible": eligible,
+        "excluded": excluded,
+        "confirmBack": " ".join(parts),
+    }
+
+
+def apply_bulk_approval(
+    artifact: Dict[str, Any],
+    slices: Optional[List[Dict[str, Any]]] = None,
+    *,
+    workspace_id: Optional[str],
+    who: str,
+    at: str,
+) -> Dict[str, Any]:
+    """Apply a planned bulk approval through the single-item paths.
+
+    Items are applied one at a time against the evolving artifact,
+    and each is RE-CHECKED before it applies: a proposal settled by
+    an earlier item in the batch is skipped as settled; a table
+    candidate that now conflicts with rows an earlier item put in
+    force, or an equation whose mechanic gained a different in-force
+    equation, is skipped and reported — never silently merged, never
+    a silent replacement.
+    """
+
+    slices = slices or []
+    plan = plan_bulk_approval(artifact, slices)
+    batch_id = _bulk_batch_id(workspace_id, who, at)
+    result = deepcopy(artifact or {})
+    changes: List[Dict[str, Any]] = []
+    applied: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+
+    for item in plan["eligible"]:
+        current = generate_proposals(result, slices)
+        proposal = next(
+            (p for p in current if p.get("id") == item["proposalId"]), None
+        )
+        if proposal is None and item["kind"] == "filed_table" and item.get("candidateId"):
+            # A filed-table proposal's id changes when it turns into a
+            # conflict choice mid-batch (an earlier item put a table in
+            # force that this candidate now disagrees with).  Find it by
+            # its candidate so the re-check below reports the contest
+            # instead of a misleading "settled".
+            for candidate_proposal in current:
+                if candidate_proposal.get("kind") not in {
+                    PROPOSAL_KIND_FILED_TABLE, PROPOSAL_KIND_FILED_TABLE_CHOICE,
+                }:
+                    continue
+                option_ids = {
+                    str(o.get("candidateId"))
+                    for o in candidate_proposal.get("options") or []
+                }
+                challenger = str(
+                    (candidate_proposal.get("conflict") or {}).get("candidateId") or ""
+                )
+                if item["candidateId"] in option_ids or item["candidateId"] == challenger:
+                    proposal = candidate_proposal
+                    break
+        if proposal is None:
+            skipped.append({
+                **item,
+                "reason": "settled by an earlier approval in this batch",
+            })
+            continue
+        if item["kind"] == "filed_table":
+            options = list(proposal.get("options") or [])
+            if proposal.get("conflict") or (
+                proposal.get("kind") == PROPOSAL_KIND_FILED_TABLE_CHOICE
+                and len(options) != 1
+            ):
+                skipped.append({
+                    **item,
+                    "reason": (
+                        "became contested during this batch — its rows "
+                        "disagree with a table approved earlier in it; "
+                        "decide individually"
+                    ),
+                })
+                continue
+            mechanic = str(proposal.get("mechanic"))
+            candidate = next(
+                (
+                    c for c in (result.get("candidates") or {}).get(mechanic) or []
+                    if isinstance(c, dict) and str(c.get("id") or "") == item["candidateId"]
+                ),
+                None,
+            )
+            usable_rows = list((result.get("usable") or {}).get(mechanic) or [])
+            if candidate is not None and usable_rows:
+                conf = conflicting_row_selectors(
+                    mechanic, candidate_effective_rows(candidate), usable_rows
+                )
+                if conf:
+                    skipped.append({
+                        **item,
+                        "reason": (
+                            f"its rows disagree on {len(conf)} row(s) with a "
+                            "table approved earlier in this batch — decide "
+                            "individually"
+                        ),
+                    })
+                    continue
+            outcome = apply_proposal(
+                result, proposal,
+                workspace_id=workspace_id, who=who, at=at,
+                option_candidate_id=item["candidateId"],
+            )
+        else:
+            mechanic = str(proposal.get("equationMechanic"))
+            rivals = [
+                p for p in current
+                if p.get("kind") == PROPOSAL_KIND_EQUATION
+                and str(p.get("equationMechanic")) == mechanic
+            ]
+            in_force = _ws_equations.in_force(result, mechanic)
+            if len(rivals) > 1:
+                skipped.append({
+                    **item,
+                    "reason": "became contested during this batch — decide individually",
+                })
+                continue
+            if in_force is not None and str(in_force.get("rendering") or "") != str(
+                proposal.get("rendering") or ""
+            ):
+                skipped.append({
+                    **item,
+                    "reason": (
+                        "a different equation for this mechanic went in force "
+                        "earlier in this batch — decide individually"
+                    ),
+                })
+                continue
+            outcome = apply_proposal(
+                result, proposal, workspace_id=workspace_id, who=who, at=at,
+            )
+        change = outcome["change"]
+        change["batchId"] = batch_id
+        change["bulkApproval"] = True
+        changes.append(change)
+        applied.append(item)
+        result = outcome["artifact"]
+
+    summary = bulk_summary(plan)
+    summary["batchId"] = batch_id
+    summary["appliedCount"] = len(applied)
+    summary["applied"] = applied
+    summary["skipped"] = skipped
+    return {
+        "artifact": result,
+        "changes": changes,
+        "batchId": batch_id,
+        "applied": applied,
+        "skipped": skipped,
+        "excluded": plan["excluded"],
+        "summary": summary,
+    }
+
+
 def dismiss_proposal(
     artifact: Dict[str, Any],
     proposal: Dict[str, Any],

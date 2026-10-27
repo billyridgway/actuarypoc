@@ -1,5 +1,7 @@
 import React from "react";
 
+import { EquationDisplay, type MathNode } from "./EquationMath";
+
 // Phase 2 (the chassis): the product-input panel. Each mechanic the UL
 // chassis needs is a slot — COI schedule, surrender schedule, policy and
 // admin fees, NAR factor, corridor, crediting — showing its status, the
@@ -169,10 +171,31 @@ interface EquationRecordView {
   version?: number;
   state: string;
   rendering?: string | null;
+  math?: MathNode | null;
+  timingNote?: string | null;
   timing?: string | null;
   conflict?: boolean;
   source?: Record<string, any>;
   approval?: { by?: string; at?: string } | null;
+}
+
+interface BulkItemView {
+  proposalId: string;
+  kind: "filed_table" | "equation";
+  slot: string;
+  mechanic?: string | null;
+  candidateId?: string | null;
+  label: string;
+  reason?: string;
+}
+
+interface BulkSummaryView {
+  eligibleCount: number;
+  tableCount: number;
+  equationCount: number;
+  eligible: BulkItemView[];
+  excluded: BulkItemView[];
+  confirmBack: string;
 }
 
 interface EquationsView {
@@ -381,6 +404,10 @@ export const MechanicsPanel: React.FC<{
   // for proposal confirm/dismiss actions.
   const [corrBands, setCorrBands] = React.useState<Record<string, BandRow[]>>({});
   const [busyProposal, setBusyProposal] = React.useState<string | null>(null);
+  // Bulk approval ("Approve all uncontested", Oct 27, 2026): the
+  // summary the server returned for review, before anything applied.
+  const [bulkSummary, setBulkSummary] = React.useState<BulkSummaryView | null>(null);
+  const [bulkBusy, setBulkBusy] = React.useState<boolean>(false);
   // Unification revamp: the chosen option of a filed-table choice
   // proposal. Slot-card candidates are approved independently since
   // the selector-slice model (Oct 27, 2026) — no radio choice there.
@@ -732,6 +759,81 @@ export const MechanicsPanel: React.FC<{
     }
   };
 
+  // Bulk approval, step 1: ask the server what WOULD be approved.
+  // The unconfirmed call applies nothing — it answers 400 with the
+  // summary as its detail, the same confirm-back discipline as a
+  // single proposal.
+  const requestBulkSummary = async () => {
+    setBulkBusy(true);
+    setMessage(null);
+    setError(null);
+    try {
+      const resp = await fetch(
+        `/api/workspaces/${encodeURIComponent(workspaceId)}/mechanics-panel/approve-all`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        },
+      );
+      const body = await resp.json().catch(() => null);
+      const detail = body?.detail;
+      if (resp.status === 400 && detail?.code === "confirmation_required" && detail.summary) {
+        setBulkSummary(detail.summary as BulkSummaryView);
+        return;
+      }
+      throw new Error(detail?.message || `Request failed (HTTP ${resp.status})`);
+    } catch (err: any) {
+      setError(err?.message || "Could not prepare the bulk approval summary.");
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
+  // Bulk approval, step 2: the confirmed call applies the uncontested
+  // set through the single-item paths; every item lands in the change
+  // history individually, tagged with the one batch id.
+  const confirmBulkApproval = async () => {
+    setBulkBusy(true);
+    setMessage(null);
+    setError(null);
+    try {
+      const resp = await fetch(
+        `/api/workspaces/${encodeURIComponent(workspaceId)}/mechanics-panel/approve-all`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ confirmed: true }),
+        },
+      );
+      const body = await resp.json().catch(() => null);
+      if (!resp.ok) {
+        const detail = body?.detail;
+        throw new Error(
+          (typeof detail === "string" ? detail : detail?.message) ||
+            `Request failed (HTTP ${resp.status})`,
+        );
+      }
+      const summary = body.summary ?? {};
+      const skipped = (summary.skipped ?? []) as BulkItemView[];
+      setMessage(
+        `Approved ${summary.appliedCount ?? 0} item(s) in one batch (batch ${body.batchId}).` +
+          (skipped.length > 0
+            ? ` ${skipped.length} item(s) became contested during the batch and stayed pending: ${skipped
+                .map((s) => s.label)
+                .join("; ")}.`
+            : ""),
+      );
+      setBulkSummary(null);
+      await loadPanel();
+      if (onSnapshotReload) onSnapshotReload();
+    } catch (err: any) {
+      setError(err?.message || "Bulk approval failed.");
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
   const handleRecordCorrectionNote = async (slot: SlotView) => {
     setBusySlot(slot.id);
     setMessage(null);
@@ -783,6 +885,73 @@ export const MechanicsPanel: React.FC<{
             Nothing is applied until you confirm it — confirming restates the change below
             exactly as it will take effect.
           </p>
+          <div className="bulk-approve">
+            {!bulkSummary ? (
+              <>
+                <button
+                  type="button"
+                  className="button"
+                  disabled={bulkBusy}
+                  onClick={() => void requestBulkSummary()}
+                >
+                  {bulkBusy ? "Checking…" : "Approve all uncontested"}
+                </button>{" "}
+                <span className="muted">
+                  Approves every suggestion below that nothing contests — after showing
+                  you the list. Anything with a rival reading, a replacement, or a
+                  conflicting table stays pending and is named.
+                </span>
+              </>
+            ) : (
+              <>
+                <p>
+                  <strong>{bulkSummary.confirmBack}</strong>
+                </p>
+                {bulkSummary.eligible.length > 0 && (
+                  <ul>
+                    {bulkSummary.eligible.map((item) => (
+                      <li key={item.proposalId}>
+                        {item.kind === "equation" ? "Equation: " : "Filed table: "}
+                        {item.label}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {bulkSummary.excluded.length > 0 && (
+                  <>
+                    <p className="muted">
+                      <strong>Not included — these stay pending:</strong>
+                    </p>
+                    <ul>
+                      {bulkSummary.excluded.map((item) => (
+                        <li key={item.proposalId}>
+                          {item.label} — {item.reason}
+                        </li>
+                      ))}
+                    </ul>
+                  </>
+                )}
+                <button
+                  type="button"
+                  className="button"
+                  disabled={bulkBusy || bulkSummary.eligibleCount === 0}
+                  onClick={() => void confirmBulkApproval()}
+                >
+                  {bulkBusy
+                    ? "Approving…"
+                    : `Confirm — approve ${bulkSummary.eligibleCount} item${bulkSummary.eligibleCount === 1 ? "" : "s"}`}
+                </button>{" "}
+                <button
+                  type="button"
+                  className="button button-secondary"
+                  disabled={bulkBusy}
+                  onClick={() => setBulkSummary(null)}
+                >
+                  Cancel
+                </button>
+              </>
+            )}
+          </div>
           {(panel.proposals ?? []).map((proposal) => {
             const isChoice = proposal.kind === "filed_table_choice";
             const options = proposal.options ?? [];
@@ -901,12 +1070,12 @@ export const MechanicsPanel: React.FC<{
                 ) : null}
               </p>
               {view.inForce ? (
-                <p className="muted">
-                  {view.inForce.rendering}
-                  {view.inForce.approval?.by ? (
-                    <> — approved by {view.inForce.approval.by}</>
-                  ) : null}
-                </p>
+                <EquationDisplay
+                  math={view.inForce.math}
+                  rendering={view.inForce.rendering}
+                  timingNote={view.inForce.timingNote}
+                  approvalBy={view.inForce.approval?.by ?? null}
+                />
               ) : (
                 <p className="muted">{view.resolution}</p>
               )}

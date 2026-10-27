@@ -1,5 +1,7 @@
 import React from "react";
 
+import { EquationDisplay, type MathNode } from "./EquationMath";
+
 // Phase 7 (the equation doctrine): the equations pane is where the
 // calculations stated in a workspace's documents are approved, and
 // where the equation in force for each mechanic is shown with its
@@ -43,6 +45,8 @@ interface EquationRecord {
   timing?: string | null;
   body?: any;
   rendering?: string | null;
+  math?: MathNode | null;
+  timingNote?: string | null;
   source?: EquationSource | null;
   sourceKindLabel?: string | null;
   approval?: { by?: string | null; at?: string | null } | null;
@@ -963,7 +967,14 @@ export const EquationsPanel: React.FC<{
                     </h4>
                     {statementBlock(eq)}
                     {eq.rendering && (
-                      <p><strong>As an equation:</strong> {eq.rendering}</p>
+                      <>
+                        <p><strong>As an equation:</strong></p>
+                        <EquationDisplay
+                          math={eq.math}
+                          rendering={eq.rendering}
+                          timingNote={eq.timingNote}
+                        />
+                      </>
                     )}
                     {eq.conflict?.note && (
                       <p className="equation-conflict">
@@ -1069,7 +1080,13 @@ export const EquationsPanel: React.FC<{
                         {eq.sourceKindLabel || "Approved equation"}
                       </span>
                     </h4>
-                    {eq.rendering && <p>{eq.rendering}</p>}
+                    {eq.rendering && (
+                      <EquationDisplay
+                        math={eq.math}
+                        rendering={eq.rendering}
+                        timingNote={eq.timingNote}
+                      />
+                    )}
                     {statementOf(eq) && (
                       <details>
                         <summary>As stated</summary>

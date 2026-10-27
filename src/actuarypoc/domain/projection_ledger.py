@@ -35,7 +35,11 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence
 
-from actuarypoc.domain.equations import BASIS_BY_SOURCE_KIND
+from actuarypoc.domain.equations import (
+    BASIS_BY_SOURCE_KIND,
+    render_math_tree,
+    timing_sentence,
+)
 
 
 LEDGER_VERSION = 2
@@ -556,11 +560,19 @@ def _citation_view(record: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]
     if not record:
         return None
     source = record.get("source") or {}
+    body = record.get("body")
     return {
         "equationId": record.get("id"),
         "mechanic": record.get("mechanic"),
         "version": record.get("version"),
         "rendering": record.get("rendering"),
+        # Typeset form of the same body (None -> prose alone) and the
+        # timing statement as its own line, as in the record views.
+        "math": (
+            render_math_tree(body, str(record.get("mechanic") or "") or None)
+            if body is not None else None
+        ),
+        "timingNote": timing_sentence(record.get("timing")),
         "timing": record.get("timing"),
         "sourceKind": source.get("kind"),
         "sourceFilename": source.get("filename"),

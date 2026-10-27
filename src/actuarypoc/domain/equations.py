@@ -925,6 +925,229 @@ def _render_rows_sum(spec: Mapping[str, Any], labels: Optional[Dict[str, str]] =
     return text
 
 
+# ---------------------------------------------------------------------------
+# Typeset rendering — the same body as a structured math tree.
+#
+# The prose rendering above is one reading of the formula body; this
+# is the other: a JSON tree the web layer typesets (stacked fractions,
+# function-form lookups, brace cases).  It is a pure, deterministic
+# function of the body — no model, no guessing.  Any node shape the
+# walker does not know makes the WHOLE tree None, and the caller
+# falls back to the prose rendering alone: a formula is never shown
+# blank or invented.
+# ---------------------------------------------------------------------------
+
+#: Short quantity names for the typeset form (the prose labels with
+#: their articles stripped — "the net amount at risk" -> the symbol's
+#: name beside the formula, not inside a sentence).
+MATH_QUANTITY_LABELS: Dict[str, str] = {
+    "duration": "duration",
+    "month_in_year": "month in year",
+    "attained_age": "attained age",
+    "issue_age": "issue age",
+    "face_amount": "face amount",
+    "account_value": "account value",
+    "death_benefit": "death benefit",
+    "nar": "net amount at risk",
+    "premium_due": "premium due this month",
+    "payment_due": "premium due this month (0 or 1)",
+    "guaranteed_rate": "guaranteed annual rate",
+    "row_amount": "row amount",
+    "row_unit": "row unit",
+}
+
+#: What a lookup reads, named as the function the typeset form shows:
+#: ``COI rate(duration, attained age)``.
+LOOKUP_DISPLAY_NAMES: Dict[str, str] = {
+    "coi": "COI rate",
+    "surrender": "surrender charge",
+    "fees": "fee amount",
+    "nar_factors": "NAR factor",
+    "corridor": "corridor percentage",
+}
+
+
+class _UnknownMathNode(Exception):
+    """A body shape the typeset walker does not know."""
+
+
+def timing_sentence(timing: Optional[str]) -> Optional[str]:
+    """The timing statement for a record, as its own labeled line."""
+
+    if timing is None:
+        return None
+    return TIMING_SENTENCES.get(str(timing))
+
+
+def render_math_tree(
+    body: Any, mechanic: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """The typeset math tree for an equation body, or None.
+
+    None means "no typeset form" — an empty body, or any node the
+    walker does not recognise — and callers render the prose alone.
+    """
+
+    if not isinstance(body, Mapping) or not body:
+        return None
+    labels = dict(MATH_QUANTITY_LABELS)
+    if mechanic:
+        for key, prose in (MECHANIC_QUANTITY_LABELS.get(mechanic) or {}).items():
+            labels[key] = prose.removeprefix("the ")
+    try:
+        return _math_node(body, parent_precedence=0, labels=labels)
+    except _UnknownMathNode:
+        return None
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+
+
+def _math_where(where: Optional[Mapping[str, Any]]) -> List[Dict[str, str]]:
+    if not where:
+        return []
+    return [
+        {"field": str(field).replace("_", " "), "value": str(expected)}
+        for field, expected in where.items()
+    ]
+
+
+def _math_node(
+    node: Any, parent_precedence: int, labels: Dict[str, str]
+) -> Dict[str, Any]:
+    if not isinstance(node, Mapping) or len(node) != 1:
+        raise _UnknownMathNode(f"bad node {node!r}")
+    key = next(iter(node))
+    value = node[key]
+
+    if key == "const":
+        return {"t": "num", "v": _fmt_num(value)}
+    if key == "str":
+        return {"t": "str", "v": str(value)}
+    if key == "qty":
+        name = str(value)
+        return {"t": "qty", "v": name, "label": labels.get(name, name.replace("_", " "))}
+    if key in _PRECEDENCE:
+        precedence = _PRECEDENCE[key]
+        if key == "add":
+            tree: Dict[str, Any] = {
+                "t": "add",
+                "items": [_math_node(item, precedence, labels) for item in value],
+            }
+        elif key == "mul":
+            tree = {
+                "t": "mul",
+                "items": [_math_node(item, precedence, labels) for item in value],
+            }
+        elif key == "sub":
+            tree = {
+                "t": "sub",
+                "a": _math_node(value[0], precedence, labels),
+                "b": _math_node(value[1], precedence + 1, labels),
+            }
+        elif key == "div":
+            tree = {
+                "t": "div",
+                "num": _math_node(value[0], 0, labels),
+                "den": _math_node(value[1], 0, labels),
+            }
+        elif key == "neg":
+            tree = {"t": "neg", "x": _math_node(value, precedence, labels)}
+        else:  # pow
+            tree = {
+                "t": "pow",
+                "base": _math_node(value[0], precedence + 1, labels),
+                "exp": _math_node(value[1], 0, labels),
+            }
+        if precedence < parent_precedence:
+            return {"t": "paren", "x": tree}
+        return tree
+    if key == "min":
+        return {"t": "min", "items": [_math_node(item, 0, labels) for item in value]}
+    if key == "max":
+        return {"t": "max", "items": [_math_node(item, 0, labels) for item in value]}
+    if key == "if":
+        return {
+            "t": "cases",
+            "rows": [
+                {
+                    "value": _math_node(value["then"], 0, labels),
+                    "when": _math_node(value["cond"], 0, labels),
+                },
+                {
+                    "value": _math_node(value["else"], 0, labels),
+                    "when": {"t": "text", "v": "otherwise"},
+                },
+            ],
+        }
+    if key == "cmp":
+        op, left, right = value
+        return {
+            "t": "cmp",
+            "op": _CMP_SYMBOLS.get(str(op), str(op)),
+            "a": _math_node(left, 0, labels),
+            "b": _math_node(right, 0, labels),
+        }
+    if key == "and":
+        return {"t": "and", "items": [_math_node(item, 0, labels) for item in value]}
+    if key == "or":
+        return {"t": "or", "items": [_math_node(item, 0, labels) for item in value]}
+    if key == "not":
+        return {"t": "not", "x": _math_node(value, 0, labels)}
+    if key == "bands":
+        rows = []
+        for band in value:
+            start, end = band["from"], band["to"]
+            span = f"year {start}" if end == start else (
+                f"years {start} and later" if end is None else f"years {start}–{end}"
+            )
+            rows.append({
+                "value": _math_node(band["value"], 0, labels),
+                "when": {"t": "text", "v": f"duration in {span}"},
+            })
+        return {"t": "cases", "rows": rows}
+    if key == "lookup":
+        table = str(value["table"])
+        if table not in LOOKUP_DISPLAY_NAMES:
+            raise _UnknownMathNode(f"unknown table {table!r}")
+        tree = {
+            "t": "lookup",
+            "name": LOOKUP_DISPLAY_NAMES[table],
+            "args": ["duration", "attained age"],
+            "where": _math_where(value.get("where")),
+        }
+        if value.get("default") is not None:
+            tree["default"] = _math_node(value["default"], 0, labels)
+        return tree
+    if key == "rows_sum":
+        table = str(value["table"])
+        if table not in TABLE_LABELS:
+            raise _UnknownMathNode(f"unknown table {table!r}")
+        notes = []
+        if value.get("where"):
+            notes.append(
+                "only rows with "
+                + ", ".join(
+                    f"{item['field']} = {item['value']}"
+                    for item in _math_where(value.get("where"))
+                )
+            )
+        if value.get("exclude_where"):
+            notes.append(
+                "excluding rows with "
+                + ", ".join(
+                    f"{item['field']} = {item['value']}"
+                    for item in _math_where(value.get("exclude_where"))
+                )
+            )
+        return {
+            "t": "rows_sum",
+            "tableLabel": TABLE_LABELS[table],
+            "expr": _math_node(value["expr"], 0, labels),
+            "notes": notes,
+        }
+    raise _UnknownMathNode(f"unknown node {key!r}")
+
+
 __all__ = [
     "COI_TIMINGS",
     "MECHANICS",
@@ -938,7 +1161,9 @@ __all__ = [
     "evaluate",
     "quantities_for",
     "render_equation",
+    "render_math_tree",
     "render_with_timing",
+    "timing_sentence",
     "select_row",
     "select_rows",
     "validate_equation",

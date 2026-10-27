@@ -1,5 +1,7 @@
 import React from "react";
 
+import { EquationDisplay } from "./EquationMath";
+
 // Local copy of the workspace currency formatter so this module does not
 // import from ProductWorkspacePage (which imports this component).
 const formatCurrency = (value: any): string => {
@@ -215,10 +217,15 @@ const RateTablesInForce: React.FC<{ rateTables?: any; classification?: any }> = 
             </>
           )}
           {coi.equation ? (
-            <p className="muted">
-              Equation in force: {coi.equation.rendering}
-              {coi.equation.approvedBy ? <> — approved by {coi.equation.approvedBy}</> : null}
-            </p>
+            <>
+              <p className="muted"><strong>Equation in force:</strong></p>
+              <EquationDisplay
+                math={coi.equation.math}
+                rendering={coi.equation.rendering}
+                timingNote={coi.equation.timingNote}
+                approvalBy={coi.equation.approvedBy ?? null}
+              />
+            </>
           ) : null}
           {Array.isArray(coi.sources) && coi.sources.length > 0 && (
             <p className="muted">
@@ -260,10 +267,15 @@ const RateTablesInForce: React.FC<{ rateTables?: any; classification?: any }> = 
             </div>
           )}
           {surrender.equation ? (
-            <p className="muted">
-              Equation in force: {surrender.equation.rendering}
-              {surrender.equation.approvedBy ? <> — approved by {surrender.equation.approvedBy}</> : null}
-            </p>
+            <>
+              <p className="muted"><strong>Equation in force:</strong></p>
+              <EquationDisplay
+                math={surrender.equation.math}
+                rendering={surrender.equation.rendering}
+                timingNote={surrender.equation.timingNote}
+                approvalBy={surrender.equation.approvedBy ?? null}
+              />
+            </>
           ) : null}
         </section>
       )}

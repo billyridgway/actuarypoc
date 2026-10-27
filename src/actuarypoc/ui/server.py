@@ -117,9 +117,12 @@ from actuarypoc.extract.workspace_mechanics_corrections import (
     variants_for_slot as _correction_variants_for_slot,
 )
 from actuarypoc.extract.workspace_mechanics_proposals import (
+    apply_bulk_approval as _apply_bulk_approval,
     apply_proposal as _apply_proposal,
+    bulk_summary as _bulk_summary,
     dismiss_proposal as _dismiss_proposal,
     generate_proposals as _generate_proposals,
+    plan_bulk_approval as _plan_bulk_approval,
 )
 from actuarypoc.extract.workspace_validation_packs import (
     PackValidationError as _PackValidationError,
@@ -4026,6 +4029,62 @@ def api_dismiss_mechanics_proposal(
         "proposal": proposal,
         "change": outcome["change"],
         "proposals": _workspace_proposals(workspace_id, updated),
+    }
+
+
+class BulkApproveRequest(BaseModel):  # type: ignore[misc]
+    confirmed: bool = False
+    who: Optional[str] = None
+
+
+@app.post("/api/workspaces/{workspace_id}/mechanics-panel/approve-all")
+def api_approve_all_uncontested(
+    workspace_id: str, payload: BulkApproveRequest
+) -> Dict[str, Any]:
+    """Approve every uncontested pending suggestion in one action.
+
+    The confirm-back discipline, at batch scale: an unconfirmed call
+    refuses and returns the SUMMARY — what will be approved, counted
+    and listed by kind, and what is excluded and why, by name — and
+    changes nothing.  A confirmed call applies each eligible item
+    through the same paths as an individual confirmation, recording
+    every item individually in the change history, tagged with the
+    batch id.  Contested items (competing readings, replacements of
+    an in-force equation, conflicting tables) are never swallowed:
+    they stay pending for individual decisions.
+    """
+
+    if get_workspace(workspace_id) is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    artifact = load_workspace_executable_mechanics(workspace_id) or {}
+    slices = _load_workspace_slices(workspace_id)
+    plan = _plan_bulk_approval(artifact, slices)
+    summary = _bulk_summary(plan)
+    if not payload.confirmed:
+        raise HTTPException(status_code=400, detail={
+            "code": "confirmation_required",
+            "message": "Confirm the bulk approval summary before it is applied.",
+            "confirmBack": summary["confirmBack"],
+            "summary": summary,
+        })
+    who = str(payload.who or "workspace_user")
+    at = _correction_now()
+    outcome = _apply_bulk_approval(
+        artifact, slices, workspace_id=workspace_id, who=who, at=at
+    )
+    if outcome["changes"]:
+        updated = outcome["artifact"]
+        updated["objectKey"] = store_workspace_executable_mechanics(workspace_id, updated)
+        for change in outcome["changes"]:
+            append_workspace_mechanics_change(workspace_id, change)
+        slots = sorted({str(item.get("slot")) for item in outcome["applied"] if item.get("slot")})
+        set_workspace_projection_stale(workspace_id, stale=True, slots=slots)
+    return {
+        "applied": bool(outcome["applied"]),
+        "batchId": outcome["batchId"],
+        "summary": outcome["summary"],
+        "changes": outcome["changes"],
+        "panel": api_get_mechanics_panel(workspace_id),
     }
 
 

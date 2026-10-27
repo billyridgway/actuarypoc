@@ -139,11 +139,17 @@ def citation(record: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
     if record is None:
         return None
     source = record.get("source") or {}
+    body = record.get("body")
     view = {
         "equationId": record.get("id"),
         "mechanic": record.get("mechanic"),
         "version": record.get("version"),
         "rendering": record.get("rendering"),
+        "math": (
+            _eq.render_math_tree(body, str(record.get("mechanic") or "") or None)
+            if body is not None else None
+        ),
+        "timingNote": _eq.timing_sentence(record.get("timing")),
         "timing": record.get("timing"),
         "sourceKind": source.get("kind"),
         "sourceKindLabel": SOURCE_KIND_LABELS.get(str(source.get("kind") or "")),
@@ -167,6 +173,17 @@ def record_view(record: Mapping[str, Any]) -> Dict[str, Any]:
     view = deepcopy(dict(record))
     source = view.get("source") or {}
     view["sourceKindLabel"] = SOURCE_KIND_LABELS.get(str(source.get("kind") or ""))
+    # Typeset form: the same body as a structured math tree the web
+    # layer renders as a real equation, plus the timing statement as
+    # its own line.  ``math`` is None when the body has a shape the
+    # typeset walker does not know — the prose rendering then stands
+    # alone, exactly as before.
+    body = view.get("body")
+    view["math"] = (
+        _eq.render_math_tree(body, str(view.get("mechanic") or "") or None)
+        if body is not None else None
+    )
+    view["timingNote"] = _eq.timing_sentence(view.get("timing"))
     return view
 
 

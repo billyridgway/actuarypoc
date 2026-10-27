@@ -1966,3 +1966,115 @@ details > summary {
     display: none !important;
   }
 }
+
+/* Typeset equations (Oct 27, 2026) — hand-rolled math layout for the
+   structured formula tree; see EquationMath.tsx. */
+.equation-display {
+  margin: 0.5rem 0;
+}
+
+.equation-math {
+  font-size: 1.08rem;
+  line-height: 1.9;
+  padding: 0.6rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-raised, #fff);
+  overflow-x: auto;
+}
+
+.equation-timing {
+  margin: 0.35rem 0 0;
+  font-size: 0.9rem;
+}
+
+.equation-words {
+  margin-top: 0.35rem;
+}
+
+.m-frac {
+  display: inline-flex;
+  flex-direction: column;
+  text-align: center;
+  vertical-align: middle;
+  margin: 0 0.15em;
+}
+
+.m-frac-num {
+  padding: 0 0.35em;
+  line-height: 1.35;
+}
+
+.m-frac-den {
+  border-top: 1.5px solid currentColor;
+  padding: 0 0.35em;
+  line-height: 1.35;
+}
+
+.m-pow sup {
+  font-size: 0.72em;
+  margin-left: 0.1em;
+}
+
+.m-cases {
+  display: inline-flex;
+  align-items: stretch;
+  vertical-align: middle;
+  margin: 0.15em 0;
+}
+
+.m-brace {
+  font-size: 2.2em;
+  line-height: 1;
+  align-self: center;
+  font-weight: 300;
+  margin-right: 0.15em;
+}
+
+.m-case-rows {
+  display: inline-flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.15em;
+}
+
+.m-case-cond {
+  color: var(--muted, #666);
+  font-size: 0.88em;
+  margin-left: 0.6em;
+}
+
+.m-sigma {
+  font-size: 1.15em;
+}
+
+.m-sigma sub {
+  font-size: 0.62em;
+  margin-left: 0.15em;
+}
+
+.m-note {
+  color: var(--muted, #666);
+  font-size: 0.88em;
+}
+
+.m-str {
+  font-style: italic;
+}
+
+/* Bulk approval summary (Oct 27, 2026). */
+.bulk-approve {
+  margin: 0.75rem 0;
+  padding: 0.75rem;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+}
+
+.bulk-approve ul {
+  margin: 0.35rem 0 0.35rem 1.1rem;
+  padding: 0;
+}
+
+.bulk-approve li {
+  margin: 0.15rem 0;
+}
