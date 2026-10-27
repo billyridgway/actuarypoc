@@ -50,6 +50,7 @@ interface EquationRecord {
   conflict?: { note?: string | null; withEquationId?: string | null } | null;
   createdAt?: string | null;
   updatedAt?: string | null;
+  tableDependencies?: TableDependency[];
 }
 
 interface MechanicView {
@@ -65,6 +66,63 @@ interface EquationsPayload {
   workspaceId?: string;
   mechanics: Record<string, MechanicView>;
   conflicts: Array<Record<string, any>>;
+  tables?: TableSummary[];
+}
+
+// The equation <-> table linkage (docs/equation-table-linkage.md):
+// dependencies are derived server-side by walking the equation's
+// formula structure — a lookup names its table — and resolved
+// against the workspace's tables in force.
+interface TableDependency {
+  table: string;
+  label: string;
+  field: string;
+  via: string;
+  status: "filed" | "missing";
+  basis?: string;
+  rowCount: number;
+  sourceFilename?: string | null;
+  sourcePage?: number | null;
+  acceptedBy?: string | null;
+  acceptedAt?: string | null;
+  missingReason?: string;
+  note?: string;
+}
+
+interface TableSummary {
+  table: string;
+  label: string;
+  status: "filed" | "missing";
+  statusLabel?: string;
+  rowCount: number;
+  sourceFilename?: string | null;
+  sourcePage?: number | null;
+  acceptedBy?: string | null;
+  acceptedAt?: string | null;
+  usedBy: string[];
+  usedByPending: string[];
+  unused: boolean;
+}
+
+interface TableHistoryEntry {
+  kind: string;
+  who?: string | null;
+  at?: string | null;
+  summary?: string | null;
+  recordedAs?: string;
+}
+
+interface TableDetail extends TableSummary {
+  rows: Array<Record<string, any>>;
+  rowsReturned: number;
+  truncated: boolean;
+  sources: Array<{
+    filename?: string | null;
+    page?: number | null;
+    tableHeading?: string | null;
+    valueBasis?: string | null;
+  }>;
+  history: TableHistoryEntry[];
 }
 
 const MECHANIC_ORDER = [
@@ -198,6 +256,280 @@ const detailMessage = (data: any, status: number): string => {
   return `Request failed (HTTP ${status})`;
 };
 
+const HISTORY_KIND_LABELS: Record<string, string> = {
+  filed_acceptance: "Filed table accepted",
+  proposal_accept: "Proposal accepted",
+  table_replace: "Table replaced",
+  nar_factor: "Factor table set",
+  correction: "Correction applied",
+  correction_note: "Correction note",
+  workspace_edit: "Workspace edit",
+};
+
+const ROW_COLUMN_ORDER = [
+  "duration", "attained_age", "issue_age", "sex", "risk_class",
+  "tobacco_status", "premium_mode", "fee_unit", "start_duration",
+  "end_duration", "rate", "rate_unit", "amount", "charge",
+  "charge_unit", "factor", "percentage",
+];
+
+const tableDetailCache = new Map<string, Promise<TableDetail>>();
+
+const fetchTableDetail = (
+  workspaceId: string,
+  table: string,
+): Promise<TableDetail> => {
+  const key = `${workspaceId}:${table}`;
+  const cached = tableDetailCache.get(key);
+  if (cached) return cached;
+  const request = (async () => {
+    const resp = await fetch(
+      `/api/workspaces/${encodeURIComponent(workspaceId)}/tables/${encodeURIComponent(table)}`,
+    );
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return (await resp.json()) as TableDetail;
+  })();
+  tableDetailCache.set(key, request);
+  return request;
+};
+
+const TableRowsPreview: React.FC<{ detail: TableDetail }> = ({ detail }) => {
+  const shown = detail.rows.slice(0, 25);
+  if (!shown.length) return null;
+  const keys = new Set<string>();
+  shown.forEach((row) =>
+    Object.keys(row).forEach((key) => {
+      if (key !== "provenance") keys.add(key);
+    }),
+  );
+  const columns = [
+    ...ROW_COLUMN_ORDER.filter((key) => keys.has(key)),
+    ...[...keys].filter((key) => !ROW_COLUMN_ORDER.includes(key)).sort(),
+  ];
+  return (
+    <div className="eq-table-rows">
+      <table>
+        <thead>
+          <tr>
+            {columns.map((column) => (
+              <th key={column}>{column.replace(/_/g, " ")}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {shown.map((row, index) => (
+            <tr key={index}>
+              {columns.map((column) => (
+                <td key={column}>
+                  {row[column] === null || row[column] === undefined
+                    ? "—"
+                    : String(row[column])}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="muted">
+        Showing {shown.length} of {detail.rowCount} rows
+        {detail.truncated ? " — the full table is in the table payload." : "."}
+      </p>
+    </div>
+  );
+};
+
+const TableDetailView: React.FC<{
+  detail: TableDetail;
+  labelOf: (mechanic: string) => string;
+}> = ({ detail, labelOf }) => (
+  <div className="eq-table-detail">
+    {detail.sources.length ? (
+      <p>
+        <strong>Source:</strong>{" "}
+        {detail.sources.map((source, index) => (
+          <span key={index}>
+            {index > 0 ? "; " : ""}
+            {source.filename ?? "the filing"}
+            {source.page != null ? `, p. ${source.page}` : ""}
+            {source.tableHeading ? ` — “${source.tableHeading}”` : ""}
+          </span>
+        ))}
+      </p>
+    ) : null}
+    {detail.acceptedBy || detail.acceptedAt ? (
+      <p>
+        <strong>Accepted:</strong> {detail.acceptedBy ?? ""}
+        {detail.acceptedAt ? ` · ${String(detail.acceptedAt)}` : ""}
+      </p>
+    ) : null}
+    <p>
+      <strong>Used by:</strong>{" "}
+      {detail.usedBy.length
+        ? detail.usedBy.map(labelOf).join(", ")
+        : "no approved equation reads this table yet"}
+      {detail.usedByPending.length
+        ? ` · would be read by (waiting for approval): ${detail.usedByPending
+            .map(labelOf)
+            .join(", ")}`
+        : ""}
+    </p>
+    <TableRowsPreview detail={detail} />
+    {detail.history.length ? (
+      <div>
+        <strong>History, as recorded:</strong>
+        <ul className="eq-table-history">
+          {detail.history.map((entry, index) => (
+            <li key={index}>
+              {HISTORY_KIND_LABELS[entry.kind] ?? entry.kind}
+              {entry.who ? ` — ${entry.who}` : ""}
+              {entry.at ? ` · ${String(entry.at)}` : ""}
+              {entry.summary ? <div>{entry.summary}</div> : null}
+            </li>
+          ))}
+        </ul>
+      </div>
+    ) : (
+      <p className="muted">
+        No acceptance or change history is recorded for this table.
+      </p>
+    )}
+  </div>
+);
+
+const ExpandableTable: React.FC<{
+  workspaceId: string;
+  table: string;
+  chipText: string;
+  missing?: boolean;
+  labelOf: (mechanic: string) => string;
+}> = ({ workspaceId, table, chipText, missing, labelOf }) => {
+  const [open, setOpen] = React.useState(false);
+  const [detail, setDetail] = React.useState<TableDetail | null>(null);
+  const [failed, setFailed] = React.useState(false);
+
+  const toggle = () => {
+    const next = !open;
+    setOpen(next);
+    if (next && !detail && !failed) {
+      fetchTableDetail(workspaceId, table)
+        .then(setDetail)
+        .catch(() => setFailed(true));
+    }
+  };
+
+  return (
+    <span className="eq-table-chip-wrap">
+      <button
+        type="button"
+        className={`eq-table-chip${missing ? " eq-table-chip--missing" : ""}`}
+        onClick={toggle}
+        aria-expanded={open}
+      >
+        {chipText} {open ? "▾" : "▸"}
+      </button>
+      {open ? (
+        failed ? (
+          <span className="eq-table-note">The table detail couldn't be loaded.</span>
+        ) : detail ? (
+          <TableDetailView detail={detail} labelOf={labelOf} />
+        ) : (
+          <span className="eq-table-note">Loading the table…</span>
+        )
+      ) : null}
+    </span>
+  );
+};
+
+const RecordTableDependencies: React.FC<{
+  workspaceId: string;
+  record: EquationRecord;
+  labelOf: (mechanic: string) => string;
+}> = ({ workspaceId, record, labelOf }) => {
+  const dependencies = record.tableDependencies ?? [];
+  if (!dependencies.length) return null;
+  return (
+    <div className="eq-table-deps">
+      <span className="eq-table-deps-label">
+        {record.state === "pending" ? "Would read:" : "Reads:"}
+      </span>
+      {dependencies.map((dependency) => (
+        <span
+          key={`${dependency.table}-${dependency.via}`}
+          className="eq-table-dep"
+        >
+          <ExpandableTable
+            workspaceId={workspaceId}
+            table={dependency.table}
+            missing={dependency.status === "missing"}
+            labelOf={labelOf}
+            chipText={
+              dependency.status === "missing"
+                ? `${dependency.label} — not in this workspace yet`
+                : `${dependency.label} · ${dependency.rowCount} rows · filed`
+            }
+          />
+          {dependency.status === "missing" && dependency.note ? (
+            <span className="eq-table-note">{dependency.note}</span>
+          ) : null}
+          {dependency.status === "filed" &&
+          (dependency.sourceFilename || dependency.acceptedBy) ? (
+            <span className="eq-table-note">
+              {dependency.sourceFilename ?? ""}
+              {dependency.sourcePage != null
+                ? `, p. ${dependency.sourcePage}`
+                : ""}
+              {dependency.acceptedBy
+                ? ` · accepted by ${dependency.acceptedBy}`
+                : ""}
+              {dependency.acceptedAt ? ` · ${String(dependency.acceptedAt)}` : ""}
+            </span>
+          ) : null}
+        </span>
+      ))}
+    </div>
+  );
+};
+
+const TablesOverview: React.FC<{
+  workspaceId: string;
+  tables: TableSummary[];
+  labelOf: (mechanic: string) => string;
+}> = ({ workspaceId, tables, labelOf }) => {
+  if (!tables.length) return null;
+  return (
+    <div className="equation-group eq-tables-overview">
+      <h3>Data tables in this workspace</h3>
+      {tables.map((table) => (
+        <p key={table.table} className="eq-tables-row">
+          <ExpandableTable
+            workspaceId={workspaceId}
+            table={table.table}
+            missing={table.status === "missing"}
+            labelOf={labelOf}
+            chipText={
+              table.status === "missing"
+                ? `${table.label} — not extracted yet`
+                : `${table.label} · ${table.rowCount} rows · ${
+                    table.statusLabel ?? "filed"
+                  }`
+            }
+          />{" "}
+          <span className="muted">
+            {table.usedBy.length
+              ? `Used by ${table.usedBy.map(labelOf).join(", ")}`
+              : "Not used by any approved equation yet"}
+            {table.usedByPending.length
+              ? ` · waiting on approval: ${table.usedByPending
+                  .map(labelOf)
+                  .join(", ")}`
+              : ""}
+          </span>
+        </p>
+      ))}
+    </div>
+  );
+};
+
 export const EquationsPanel: React.FC<{ workspaceId: string }> = ({ workspaceId }) => {
   const [payload, setPayload] = React.useState<EquationsPayload | null>(null);
   const [loadState, setLoadState] = React.useState<"loading" | "ready" | "unavailable">("loading");
@@ -222,6 +554,7 @@ export const EquationsPanel: React.FC<{ workspaceId: string }> = ({ workspaceId 
       workspaceId: body?.workspaceId,
       mechanics: body?.mechanics && typeof body.mechanics === "object" ? body.mechanics : {},
       conflicts: Array.isArray(body?.conflicts) ? body.conflicts : [],
+      tables: Array.isArray(body?.tables) ? body.tables : [],
     });
     setLoadState("ready");
   }, []);
@@ -338,6 +671,14 @@ export const EquationsPanel: React.FC<{ workspaceId: string }> = ({ workspaceId 
 
   const labelOf = (mechanic: string): string =>
     mechanicViews.find((v) => v.mechanic === mechanic)?.label || humanizeMechanic(mechanic);
+
+  const tableDeps = (eq: EquationRecord) => (
+    <RecordTableDependencies
+      workspaceId={workspaceId}
+      record={eq}
+      labelOf={labelOf}
+    />
+  );
 
   const pendingRecords: EquationRecord[] = mechanicViews.flatMap((v) =>
     v.records.filter((r) => r.state === "pending")
@@ -579,6 +920,14 @@ export const EquationsPanel: React.FC<{ workspaceId: string }> = ({ workspaceId 
             </button>
           </div>
 
+          {payload.tables && payload.tables.length > 0 && (
+            <TablesOverview
+              workspaceId={workspaceId}
+              tables={payload.tables}
+              labelOf={labelOf}
+            />
+          )}
+
           {pendingRecords.length > 0 && (
             <div className="equation-group">
               <h3>Waiting for approval ({pendingRecords.length})</h3>
@@ -600,6 +949,7 @@ export const EquationsPanel: React.FC<{ workspaceId: string }> = ({ workspaceId 
                       </p>
                     )}
                     <p className="muted">{provenanceLine(eq)}</p>
+                    {tableDeps(eq)}
                     {editorMechanic === eq.mechanic ? (
                       editor(eq.mechanic)
                     ) : (
@@ -707,6 +1057,7 @@ export const EquationsPanel: React.FC<{ workspaceId: string }> = ({ workspaceId 
                     <p className="muted">
                       {provenanceLine(eq) || "Provenance recorded with the equation."}
                     </p>
+                    {tableDeps(eq)}
                     {editorMechanic === view.mechanic ? (
                       editor(view.mechanic)
                     ) : (

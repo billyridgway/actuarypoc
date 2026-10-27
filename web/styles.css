@@ -1682,6 +1682,107 @@ details > summary {
   padding: 0.5rem 0.75rem;
 }
 
+/* Equation <-> table linkage (docs/equation-table-linkage.md):
+   chips under an equation name the tables it reads; expanding one
+   shows the table itself — rows, source, acceptance, history. */
+
+.eq-table-deps {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 0.4rem 0.6rem;
+  margin: 0.4rem 0;
+}
+
+.eq-table-deps-label {
+  font-weight: 600;
+  font-size: 0.85rem;
+  padding-top: 0.2rem;
+}
+
+.eq-table-dep {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  max-width: 100%;
+}
+
+.eq-table-chip {
+  border: 1px solid #22c55e;
+  background: #dcfce7;
+  color: #166534;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  padding: 0.2rem 0.65rem;
+  cursor: pointer;
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.eq-table-chip--missing {
+  border-color: #f59e0b;
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.eq-table-note {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  max-width: 34rem;
+}
+
+.eq-table-chip-wrap {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  max-width: 100%;
+}
+
+.eq-table-detail {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+  font-size: 0.85rem;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.eq-table-detail p {
+  margin: 0.25rem 0;
+}
+
+.eq-table-rows {
+  overflow-x: auto;
+  margin: 0.4rem 0;
+}
+
+.eq-table-rows table {
+  border-collapse: collapse;
+  font-size: 0.78rem;
+}
+
+.eq-table-rows th,
+.eq-table-rows td {
+  border: 1px solid var(--border);
+  padding: 0.15rem 0.45rem;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.eq-table-history {
+  margin: 0.25rem 0 0.25rem 1.1rem;
+  padding: 0;
+}
+
+.eq-tables-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 0.3rem 0.6rem;
+}
+
 .equation-verbatim cite {
   display: block;
   margin-top: 0.35rem;

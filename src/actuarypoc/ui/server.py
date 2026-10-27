@@ -69,6 +69,7 @@ from actuarypoc.domain.projection_graph import compile_projection_graph
 from actuarypoc.domain.projection_ledger import build_projection_ledger, build_rate_tables_in_force
 from actuarypoc.domain import equations as _equations
 from actuarypoc.extract import workspace_equations as _workspace_equations
+from actuarypoc.extract import workspace_linkage as _workspace_linkage
 from actuarypoc.domain.requirements_classification import (
     Applicability as ReqApplicability,
     Evidence as ReqEvidence,
@@ -3843,12 +3844,22 @@ def _persist_equation_outcome(
 
 @app.get("/api/workspaces/{workspace_id}/equations")
 def api_list_equations(workspace_id: str) -> Dict[str, Any]:
-    """All equation artifacts with state, provenance, and conflicts."""
+    """All equation artifacts with state, provenance, and conflicts.
+
+    The payload carries the equation <-> table linkage (see
+    ``docs/equation-table-linkage.md``): every equation record with
+    a body — in-force and pending alike — carries its structural
+    ``tableDependencies`` resolved against the tables in force, and
+    the top-level ``tables`` list carries each table's reverse
+    linkage (``usedBy``).  Read-only; nothing here approves,
+    rejects, or writes.
+    """
 
     if get_workspace(workspace_id) is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
     artifact = load_workspace_executable_mechanics(workspace_id) or {}
     view = _workspace_equations.equations_view(artifact)
+    _workspace_linkage.enrich_equations_view(view, artifact)
     view["workspaceId"] = workspace_id
     return view
 
@@ -3860,7 +3871,37 @@ def api_get_equation(workspace_id: str, mechanic: str) -> Dict[str, Any]:
     mechanic = _equation_mechanic_or_404(mechanic)
     artifact = load_workspace_executable_mechanics(workspace_id) or {}
     view = _workspace_equations.equations_view(artifact)
+    _workspace_linkage.enrich_equations_view(view, artifact)
     return {"mechanic": mechanic, **view["mechanics"][mechanic], "workspaceId": workspace_id}
+
+
+@app.get("/api/workspaces/{workspace_id}/tables/{table}")
+def api_get_table_detail(
+    workspace_id: str, table: str, offset: int = 0,
+    limit: int = _workspace_linkage.DETAIL_DEFAULT_LIMIT,
+) -> Dict[str, Any]:
+    """One table in full: its accepted rows, provenance, history.
+
+    The rows are the workspace's table in force exactly as stored;
+    ``offset``/``limit`` page them (limit is capped server-side —
+    see ``workspace_linkage.DETAIL_MAX_LIMIT``).  ``history`` is the
+    table's acceptance / swap history as recorded in the change log
+    and the rows' own provenance; ``usedBy`` names the mechanics
+    whose in-force equations read this table.
+    """
+
+    if get_workspace(workspace_id) is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    table = str(table or "").strip().lower()
+    if table not in _equations.TABLES:
+        raise HTTPException(status_code=404, detail=f"Unknown table: {table}")
+    artifact = load_workspace_executable_mechanics(workspace_id) or {}
+    changes = load_workspace_mechanics_changes(workspace_id)
+    detail = _workspace_linkage.table_detail(
+        artifact, table, changes, offset=offset, limit=limit
+    )
+    detail["workspaceId"] = workspace_id
+    return detail
 
 
 @app.post("/api/workspaces/{workspace_id}/equations/{mechanic}/approve")
@@ -12292,9 +12333,12 @@ def _run_ul_projection(
         if year not in years:
             years[year] = reason
 
-    def _evaluate(mechanic: str, values: Dict[str, Any]) -> float:
+    def _evaluate(
+        mechanic: str, values: Dict[str, Any],
+        trace: Optional[List[Dict[str, Any]]] = None,
+    ) -> float:
         record = equations_in_force[mechanic]
-        return _equations.evaluate(record["body"], values, tables)
+        return _equations.evaluate(record["body"], values, tables, trace=trace)
 
     payment_interval = max(1, int(round(12.0 / freq)))
     rows: List[Dict[str, Any]] = []
@@ -12338,6 +12382,11 @@ def _run_ul_projection(
         guaranteed_interest = 0.0
         coi_nar_min: Optional[float] = None
         coi_nar_max: Optional[float] = None
+        # The COI table rows this year's charges actually read, in
+        # the order first used (evaluator citations, deduplicated at
+        # row build).  The ledger names the row beside the charge —
+        # the rate is auditable to a filed row, not just a number.
+        coi_lookup_trace: List[Dict[str, Any]] = []
 
         coi_timing = str(
             (equations_in_force.get("coi_charge") or {}).get("timing") or "beginning"
@@ -12345,13 +12394,20 @@ def _run_ul_projection(
         if coi_timing not in _equations.COI_TIMINGS:
             coi_timing = "beginning"
 
-        def _month_coi(value: float, month_values: Dict[str, Any]) -> Tuple[float, float]:
+        def _month_coi(
+            value: float, month_values: Dict[str, Any],
+            trace: Optional[List[Dict[str, Any]]] = None,
+        ) -> Tuple[float, float]:
             """(charge, NAR) at an in-month account value, by the equations.
 
             Raises Unevaluable when any link in the chain (death
             benefit -> NAR -> COI) has no approved equation or cannot
             be evaluated; the caller records the failure and the month
             contributes no COI.
+
+            ``trace``, when given, collects the COI equation's table
+            citations only — the row the charge read — so the year's
+            ledger can name it.
             """
 
             if "death_benefit" not in equations_in_force:
@@ -12378,6 +12434,7 @@ def _run_ul_projection(
                     "death_benefit": death_benefit,
                     "nar": nar,
                 },
+                trace=trace,
             )
             return charge, nar
 
@@ -12432,8 +12489,13 @@ def _run_ul_projection(
                 coi_nar_max = nar if coi_nar_max is None else max(coi_nar_max, nar)
 
             def _coi_or_zero(value: float) -> Tuple[float, Optional[float]]:
+                # Citations join the year's trace only when the
+                # month's charge actually lands — a failed month
+                # contributes no COI and must not cite a row.
+                month_trace: List[Dict[str, Any]] = []
                 try:
-                    charge, nar = _month_coi(value, month_values)
+                    charge, nar = _month_coi(value, month_values, trace=month_trace)
+                    coi_lookup_trace.extend(month_trace)
                     return charge, nar
                 except _equations.Unevaluable as exc:
                     _fail("coi_charge", year, str(exc))
@@ -12526,6 +12588,14 @@ def _run_ul_projection(
                 "failureReason": failures.get(mechanic, {}).get(year),
             }
 
+        coi_table_rows: List[Dict[str, Any]] = []
+        _seen_citations = set()
+        for _entry in coi_lookup_trace:
+            _key = json.dumps(_entry, sort_keys=True, default=str)
+            if _key not in _seen_citations:
+                _seen_citations.add(_key)
+                coi_table_rows.append(_entry)
+
         applied_mechanics: Dict[str, Any] = {
             "coi": {
                 **_mechanic_status("coi_charge"),
@@ -12538,6 +12608,10 @@ def _run_ul_projection(
                     else None
                 ),
                 "rateUnit": coi_row_report.get("rate_unit") if coi_row_report else None,
+                # The filed row(s) this year's COI charges read, as
+                # cited by the evaluator at lookup time — the ledger
+                # names them beside the charge.
+                "tableRows": coi_table_rows,
             },
             "fees": _mechanic_status("policy_fees"),
             "premiumLoad": _mechanic_status("premium_load"),

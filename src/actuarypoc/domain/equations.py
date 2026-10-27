@@ -546,15 +546,22 @@ def evaluate(
     body: Mapping[str, Any],
     values: Mapping[str, Any],
     tables: Mapping[str, Sequence[Mapping[str, Any]]],
+    trace: Optional[List[Dict[str, Any]]] = None,
 ) -> float:
     """Evaluate a validated equation body to a number.
 
     Raises :class:`Unevaluable` when the equation cannot produce a
     value in this context (lookup miss with no default, division by
     zero, an uncovered band, a non-finite result).
+
+    ``trace`` is an optional out-list: when given, every table lookup
+    appends a citation of the row it used (see
+    :func:`_lookup_citation`), so a caller can show WHICH row priced
+    a number, not just the rate.  It changes nothing about the value
+    produced; with ``trace=None`` evaluation is exactly as before.
     """
 
-    result = _eval_node(body, dict(values), tables)
+    result = _eval_node(body, dict(values), tables, trace)
     if isinstance(result, bool) or not isinstance(result, (int, float)):
         raise Unevaluable("the equation did not produce a number")
     if not math.isfinite(float(result)):
@@ -587,6 +594,7 @@ def _eval_node(
     node: Mapping[str, Any],
     values: Dict[str, Any],
     tables: Mapping[str, Sequence[Mapping[str, Any]]],
+    trace: Optional[List[Dict[str, Any]]] = None,
 ) -> Any:
     key = next(iter(node))
     value = node[key]
@@ -600,7 +608,7 @@ def _eval_node(
             raise Unevaluable(f"quantity {value!r} has no value in this context")
         return values[value]
     if key in _ARITHMETIC_NODES:
-        operands = [_eval_node(item, values, tables) for item in _operand_list(value)]
+        operands = [_eval_node(item, values, tables, trace) for item in _operand_list(value)]
         if key == "add":
             return sum(operands)
         if key == "mul":
@@ -626,12 +634,12 @@ def _eval_node(
             except (ValueError, OverflowError) as exc:
                 raise Unevaluable(f"power is not defined here ({exc})") from exc
     if key == "if":
-        branch = value["then"] if _eval_node(value["cond"], values, tables) else value["else"]
-        return _eval_node(branch, values, tables)
+        branch = value["then"] if _eval_node(value["cond"], values, tables, trace) else value["else"]
+        return _eval_node(branch, values, tables, trace)
     if key == "cmp":
         op, left_node, right_node = value
-        left = _eval_node(left_node, values, tables)
-        right = _eval_node(right_node, values, tables)
+        left = _eval_node(left_node, values, tables, trace)
+        right = _eval_node(right_node, values, tables, trace)
         if op == "<":
             return left < right
         if op == "<=":
@@ -644,22 +652,22 @@ def _eval_node(
             return left == right
         return left != right
     if key == "and":
-        return all(_eval_node(item, values, tables) for item in value)
+        return all(_eval_node(item, values, tables, trace) for item in value)
     if key == "or":
-        return any(_eval_node(item, values, tables) for item in value)
+        return any(_eval_node(item, values, tables, trace) for item in value)
     if key == "not":
-        return not _eval_node(value, values, tables)
+        return not _eval_node(value, values, tables, trace)
     if key == "bands":
         duration = values.get("duration")
         for band in value:
             start, end = band["from"], band["to"]
             if duration is not None and start <= duration and (end is None or duration <= end):
-                return _eval_node(band["value"], values, tables)
+                return _eval_node(band["value"], values, tables, trace)
         raise Unevaluable(f"no band covers duration {duration}")
     if key == "lookup":
-        return _eval_lookup(value, values, tables)
+        return _eval_lookup(value, values, tables, trace)
     if key == "rows_sum":
-        return _eval_rows_sum(value, values, tables)
+        return _eval_rows_sum(value, values, tables, trace)
     raise Unevaluable(f"unknown formula node {key!r}")
 
 
@@ -667,10 +675,57 @@ def _operand_list(value: Any) -> List[Any]:
     return value if isinstance(value, list) else [value]
 
 
+def _lookup_citation(
+    table: str, field: str, row: Optional[Mapping[str, Any]], defaulted: bool
+) -> Dict[str, Any]:
+    """The trace citation for one lookup: which row priced the value.
+
+    Carries the row's addressing key (duration / attained age and
+    the classification selectors), the value taken, and the row's
+    own provenance (document + page).  A lookup that fell back to
+    its stated default cites ``defaulted: True`` with no row — the
+    fallback is stated, never dressed up as a table read.
+    """
+
+    _key, _field, unit_field = TABLES[table]
+    citation: Dict[str, Any] = {
+        "table": table,
+        "field": field,
+        "defaulted": defaulted,
+        "value": None,
+        "unit": None,
+        "duration": None,
+        "attainedAge": None,
+        "sex": None,
+        "riskClass": None,
+        "tobaccoStatus": None,
+        "sourceFilename": None,
+        "sourcePage": None,
+        "tableHeading": None,
+    }
+    if row is None:
+        return citation
+    provenance = row.get("provenance") or {}
+    citation.update({
+        "value": row.get(field),
+        "unit": row.get(unit_field) if unit_field else None,
+        "duration": row.get("duration"),
+        "attainedAge": row.get("attained_age"),
+        "sex": row.get("sex"),
+        "riskClass": row.get("risk_class"),
+        "tobaccoStatus": row.get("tobacco_status"),
+        "sourceFilename": provenance.get("filename"),
+        "sourcePage": provenance.get("page"),
+        "tableHeading": provenance.get("tableHeading"),
+    })
+    return citation
+
+
 def _eval_lookup(
     spec: Mapping[str, Any],
     values: Dict[str, Any],
     tables: Mapping[str, Sequence[Mapping[str, Any]]],
+    trace: Optional[List[Dict[str, Any]]] = None,
 ) -> float:
     table = str(spec["table"])
     _key, field, _unit = TABLES[table]
@@ -681,11 +736,15 @@ def _eval_lookup(
     row = select_row(rows, values)
     if row is None or row.get(field) is None:
         if spec.get("default") is not None:
-            return float(_eval_node(spec["default"], values, tables))
+            if trace is not None:
+                trace.append(_lookup_citation(table, field, None, defaulted=True))
+            return float(_eval_node(spec["default"], values, tables, trace))
         raise Unevaluable(
             f"no {TABLE_LABELS[table]} row applies at duration "
             f"{values.get('duration')}, attained age {values.get('attained_age')}"
         )
+    if trace is not None:
+        trace.append(_lookup_citation(table, field, row, defaulted=False))
     return float(row[field])
 
 
@@ -693,6 +752,7 @@ def _eval_rows_sum(
     spec: Mapping[str, Any],
     values: Dict[str, Any],
     tables: Mapping[str, Sequence[Mapping[str, Any]]],
+    trace: Optional[List[Dict[str, Any]]] = None,
 ) -> float:
     table = str(spec["table"])
     _key, field, unit_field = TABLES[table]
@@ -707,7 +767,7 @@ def _eval_rows_sum(
         amount = row.get(field)
         row_values["row_amount"] = float(amount) if amount is not None else 0.0
         row_values["row_unit"] = str(row.get(unit_field) or "") if unit_field else ""
-        total += float(_eval_node(spec["expr"], row_values, tables))
+        total += float(_eval_node(spec["expr"], row_values, tables, trace))
     return total
 
 

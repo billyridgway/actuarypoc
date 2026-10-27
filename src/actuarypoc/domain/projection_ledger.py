@@ -227,12 +227,65 @@ def _mechanic_component(
 # ---------------------------------------------------------------------------
 
 
+def _row_citation_text(entry: Dict[str, Any]) -> str:
+    """One evaluator row citation as a plain-language ledger line."""
+
+    table_label = {
+        "coi": "COI table",
+        "surrender": "surrender schedule",
+        "fees": "fee schedule",
+        "nar_factors": "NAR factor table",
+        "corridor": "corridor table",
+    }.get(str(entry.get("table") or ""), str(entry.get("table") or "table"))
+    if entry.get("defaulted"):
+        return (
+            f"No {table_label} row applied — the equation's stated "
+            "fallback was used."
+        )
+    parts = [table_label]
+    key_bits: List[str] = []
+    if entry.get("duration") is not None:
+        key_bits.append(f"duration {entry['duration']}")
+    if entry.get("attainedAge") is not None:
+        key_bits.append(f"attained age {entry['attainedAge']}")
+    for label, field in (
+        ("sex", "sex"), ("risk class", "riskClass"), ("tobacco", "tobaccoStatus"),
+    ):
+        if entry.get(field):
+            key_bits.append(f"{label} {entry[field]}")
+    if key_bits:
+        parts.append("row at " + ", ".join(key_bits))
+    if entry.get("value") is not None:
+        value = f"{entry['field']} {entry['value']}"
+        if entry.get("unit"):
+            value += f" {entry['unit']}"
+        parts.append(value)
+    text = " — ".join(parts)
+    if entry.get("sourceFilename"):
+        origin = str(entry["sourceFilename"])
+        if entry.get("sourcePage") is not None:
+            origin += f", p. {entry['sourcePage']}"
+        text += f" ({origin})"
+    return text
+
+
 def _coi_component(row: Dict[str, Any], applied: Dict[str, Any]) -> Dict[str, Any]:
     coi = applied.get("coi") or {}
     nar = applied.get("nar") or {}
     inputs: List[Dict[str, Any]] = []
     if coi.get("rate") is not None:
         inputs.append(_input("COI rate applied", coi.get("rate"), coi.get("rateUnit") or None))
+    # The filed row the year's charges read, cited by the evaluator
+    # at lookup time (``appliedMechanics.coi.tableRows``): the rate
+    # above is auditable to a row of a named table in a named filing.
+    table_rows = coi.get("tableRows") or []
+    for entry in table_rows[:3]:
+        inputs.append(_input("COI table row applied", _row_citation_text(entry)))
+    if len(table_rows) > 3:
+        inputs.append(_input(
+            "COI table rows applied",
+            f"{len(table_rows)} distinct rows across the year",
+        ))
     if row.get("narFactor") is not None:
         inputs.append(_input("NAR factor", row.get("narFactor")))
     if nar.get("definition") == "unadjusted" and row.get("filedNarFactor") is not None:
