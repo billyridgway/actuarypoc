@@ -474,6 +474,22 @@ projection, stale-flag, or persistence semantics were touched:
   equations were all approved. What is counted did not change; only
   the label now says what it is.
 
+Folded into the same pass (Billy, Oct 27, 11:26 CT): the Ledger's
+"Rates in force" now flags the rows that match the run's
+classification. Selector-bearing tables get a count line — "121 of
+242 rows match this scenario (M · Standard · Non-Tobacco) — those
+rows are highlighted" — and the matching rows are tinted; the full
+union table still renders in full. Matching is by SELECTOR ONLY,
+never by value (both specimen slices carry identical rates here, so
+value-matching would flag everything and lie), with the evaluator's
+own semantics: a row-side null / "ANY" / "All" selector is a
+wildcard, otherwise the scenario's value must equal it. Duration-only
+tables (surrender, corridor) carry no class selectors and get no
+flagging. A run with no classification (the analysis-time
+illustration) flags nothing. In this section the payload carries
+the COI and surrender tables, so COI is where the flag lands; the
+matcher itself is generic over the selector fields.
+
 Verification (local): suite 332 passed / exactly the same 5 inherited
 failures; tsc error set identical to pristine HEAD (2 pre-existing
 in ProductWorkspacePage.tsx); vite build clean; the built bundle

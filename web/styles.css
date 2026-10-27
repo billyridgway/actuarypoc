@@ -1440,6 +1440,17 @@ details > summary {
   padding: 0.75rem;
 }
 
+/* Scenario flagging: rows whose selectors match the run's
+   classification are tinted; the count line above the table says
+   how many matched. */
+.rate-table tr.rate-row--scenario td {
+  background: var(--accent-soft);
+}
+
+.rate-table__match-count {
+  margin: 0.25rem 0 0.5rem;
+}
+
 /* Phase 2 (the chassis): product-input slots */
 .slot-card {
   border: 1px solid var(--border);

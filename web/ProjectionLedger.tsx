@@ -93,10 +93,58 @@ const DerivationList: React.FC<{ components: any[] }> = ({ components }) => (
   </div>
 );
 
-const RateTablesInForce: React.FC<{ rateTables?: any }> = ({ rateTables }) => {
+// Scenario flagging (Oct 27, 2026): in "Rates in force", the rows
+// that match the run's classification are highlighted, with a count
+// line per selector-bearing table. Matching is by SELECTOR ONLY —
+// never by value (in this filing both specimen slices carry identical
+// rates, so value-matching would flag everything and lie). The
+// semantics mirror the evaluator's own (server `_selector_match_issues`
+// / `select_rows`): a row-side null / "ANY" / "All" selector is a
+// wildcard; otherwise the scenario's value must equal it
+// (case-insensitive). Tables whose rows carry no class selectors
+// (surrender, corridor — duration-keyed only) get no flagging at all.
+const CLASS_SELECTOR_FIELDS: Array<{ row: string; scenario: string }> = [
+  { row: "sex", scenario: "sex" },
+  { row: "risk_class", scenario: "riskClass" },
+  { row: "tobacco_status", scenario: "tobaccoStatus" },
+];
+
+const isWildcardSelector = (value: any): boolean =>
+  value === null || value === undefined || value === "" || value === "ANY" || value === "All";
+
+const rowMatchesScenario = (row: any, classification: any): boolean =>
+  CLASS_SELECTOR_FIELDS.every(({ row: rowField, scenario: scenarioField }) => {
+    const expected = row?.[rowField];
+    if (isWildcardSelector(expected)) return true;
+    const actual = classification?.[scenarioField];
+    if (actual === null || actual === undefined || actual === "") return false;
+    return String(expected).trim().toLowerCase() === String(actual).trim().toLowerCase();
+  });
+
+const tableHasClassSelectors = (rows: any[]): boolean =>
+  (rows ?? []).some((row) =>
+    CLASS_SELECTOR_FIELDS.some(({ row: rowField }) => !isWildcardSelector(row?.[rowField])),
+  );
+
+const classificationLabel = (classification: any): string =>
+  CLASS_SELECTOR_FIELDS.map(({ scenario }) => classification?.[scenario])
+    .filter((value) => value !== null && value !== undefined && value !== "")
+    .join(" · ");
+
+const RateTablesInForce: React.FC<{ rateTables?: any; classification?: any }> = ({
+  rateTables,
+  classification,
+}) => {
   if (!rateTables) return null;
   const coi = rateTables.coi;
   const surrender = rateTables.surrender;
+  // Flagging applies only where the table's rows carry class
+  // selectors and the run actually classified its scenario.
+  const coiFlagged =
+    coi && !coi.missingTable && classification && tableHasClassSelectors(coi.rows ?? [])
+      ? (coi.rows ?? []).map((row: any) => rowMatchesScenario(row, classification))
+      : null;
+  const coiMatchCount = coiFlagged ? coiFlagged.filter(Boolean).length : 0;
   const formatSurrenderCharge = (row: any): string => {
     if (row.charge_unit === "percent_account_value" || row.charge_unit === "percent_face") {
       return formatRate(row.charge);
@@ -123,7 +171,17 @@ const RateTablesInForce: React.FC<{ rateTables?: any }> = ({ rateTables }) => {
           {coi.missingTable ? (
             <p className="rate-table__placeholder">{coi.missingTable.description}</p>
           ) : (
-            <div className="table-scroll rate-table__scroll">
+            <>
+              {coiFlagged && (
+                <p className="muted rate-table__match-count">
+                  {coiMatchCount} of {coi.rows.length} rows match this scenario
+                  {classificationLabel(classification)
+                    ? ` (${classificationLabel(classification)})`
+                    : ""}{" "}
+                  — those rows are highlighted.
+                </p>
+              )}
+              <div className="table-scroll rate-table__scroll">
               <table className="kv-table">
                 <thead>
                   <tr>
@@ -138,7 +196,10 @@ const RateTablesInForce: React.FC<{ rateTables?: any }> = ({ rateTables }) => {
                 </thead>
                 <tbody>
                   {coi.rows.map((row: any, index: number) => (
-                    <tr key={`coi-${index}`}>
+                    <tr
+                      key={`coi-${index}`}
+                      className={coiFlagged?.[index] ? "rate-row--scenario" : undefined}
+                    >
                       <td>{row.duration ?? "—"}</td>
                       <td>{row.attained_age ?? "—"}</td>
                       <td>{row.sex ?? "—"}</td>
@@ -150,7 +211,8 @@ const RateTablesInForce: React.FC<{ rateTables?: any }> = ({ rateTables }) => {
                   ))}
                 </tbody>
               </table>
-            </div>
+              </div>
+            </>
           )}
           {coi.equation ? (
             <p className="muted">
@@ -231,6 +293,20 @@ export const ProjectionLedger: React.FC<ProjectionLedgerProps> = ({ ledger, rate
         netAmountAtRisk: row.netAmountAtRisk,
         components: null,
       }));
+  // The run's own classification, carried on its projection rows,
+  // drives the Rates-in-force scenario flagging. A run whose scenario
+  // specified no classification (e.g. the analysis-time illustration)
+  // has nothing to flag against.
+  const rawClassification = (fallbackRows ?? []).find(
+    (row: any) => row?.appliedClassification,
+  )?.appliedClassification;
+  const classification =
+    rawClassification &&
+    [rawClassification.sex, rawClassification.riskClass, rawClassification.tobaccoStatus].some(
+      (value) => value !== null && value !== undefined && value !== "",
+    )
+      ? rawClassification
+      : null;
   if (rows.length === 0) return null;
 
   return (
@@ -310,7 +386,7 @@ export const ProjectionLedger: React.FC<ProjectionLedgerProps> = ({ ledger, rate
           available. Re-run the projection to generate them.
         </p>
       )}
-      <RateTablesInForce rateTables={rateTables} />
+      <RateTablesInForce rateTables={rateTables} classification={classification} />
     </div>
   );
 };
