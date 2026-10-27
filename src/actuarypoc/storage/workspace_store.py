@@ -85,6 +85,68 @@ def _write_json(key: str, value: Dict[str, Any]) -> None:
     )
 
 
+# --- Bounded retry for transient object-store errors ---------------------
+# The S3 gateway occasionally answers a read of an *existing* object with
+# a transient NoSuchKey (or a throttling / 5xx code). One such blip on the
+# analyze commit path discarded a completed 215-second analysis on
+# Oct 26, 2026, so analyze-pipeline writes and the analysis-job state
+# writes go through the retry helpers here. Scope is deliberately
+# narrow: only callers that opt in get retries.
+
+_TRANSIENT_STORE_CODES = {
+    "NoSuchKey",
+    "NoSuchObject",
+    "NoSuchBucket",
+    "SlowDown",
+    "InternalError",
+    "ServiceUnavailable",
+    "RequestTimeout",
+    "RequestTimeoutExceeded",
+}
+
+
+class _TransientWorkspaceMissing(Exception):
+    """A workspace read came back empty; it may be a transient blip."""
+
+
+def is_transient_store_error(exc: BaseException) -> bool:
+    """True when `exc` looks like a transient object-store failure."""
+
+    if isinstance(exc, _TransientWorkspaceMissing):
+        return True
+    code = getattr(exc, "code", None)
+    if isinstance(code, str) and code in _TRANSIENT_STORE_CODES:
+        return True
+    return isinstance(exc, (ConnectionError, TimeoutError))
+
+
+def with_store_retry(
+    operation,
+    *,
+    attempts: int = 4,
+    base_delay_seconds: float = 0.25,
+    sleep=time.sleep,
+):
+    """Run `operation`, retrying transient store errors with backoff.
+
+    Non-transient errors propagate immediately; when the attempts are
+    exhausted the last transient error is re-raised.
+    """
+
+    last_exc: Optional[BaseException] = None
+    for attempt in range(attempts):
+        try:
+            return operation()
+        except Exception as exc:  # noqa: BLE001 - re-raised when not transient
+            if not is_transient_store_error(exc):
+                raise
+            last_exc = exc
+            if attempt + 1 < attempts:
+                sleep(base_delay_seconds * (2**attempt))
+    assert last_exc is not None  # attempts >= 1 guarantees a failure was seen
+    raise last_exc
+
+
 def _list_json(prefix: str) -> List[Dict[str, Any]]:
     client, bucket = _client_and_bucket()
     values: List[Dict[str, Any]] = []
@@ -385,6 +447,43 @@ def update_workspace_analysis(
     )
     _write_json(_workspace_key(workspace_id), workspace)
     return workspace
+
+
+def update_workspace_analysis_job(
+    workspace_id: str,
+    patch: Dict[str, Any],
+    *,
+    status: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Merge `patch` into the workspace record's ``analysis_job`` state.
+
+    The job record is the durable home of background-analysis state
+    (docs/analyze-jobs.md): it lives on workspace.json in the object
+    store, so any reader — a polling browser, a later page load, an API
+    client — sees the same truth, and a job's failure is recorded here
+    instead of vanishing with a dead HTTP request. `status`, when given,
+    also moves the workspace's own status in the same write. Writes are
+    retried on transient store errors; returns the updated workspace,
+    or None when the workspace cannot be read after retries.
+    """
+
+    def _op() -> Dict[str, Any]:
+        workspace = get_workspace(workspace_id)
+        if workspace is None:
+            raise _TransientWorkspaceMissing(workspace_id)
+        job = dict(workspace.get("analysis_job") or {})
+        job.update(patch)
+        workspace["analysis_job"] = job
+        if status is not None:
+            workspace["status"] = status
+        workspace["updated_at"] = _now()
+        _write_json(_workspace_key(workspace_id), workspace)
+        return workspace
+
+    try:
+        return with_store_retry(_op)
+    except _TransientWorkspaceMissing:
+        return None
 
 
 def delete_workspace_and_documents(

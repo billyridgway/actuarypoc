@@ -11,6 +11,8 @@ import zipfile
 from hashlib import sha256
 import math
 from pathlib import Path
+import threading
+import time
 import uuid
 from copy import deepcopy
 from contextvars import ContextVar
@@ -158,6 +160,8 @@ from actuarypoc.storage.workspace_store import (
     list_workspace_documents,
     update_workspace_document,
     update_workspace_analysis,
+    update_workspace_analysis_job,
+    is_transient_store_error,
     delete_workspace_and_documents,
     create_feature_request,
     list_feature_requests,
@@ -337,6 +341,7 @@ def _workspace_to_api(ws: Dict[str, Any]) -> Dict[str, Any]:
         "compliancePartial": ws.get("compliance_partial_count"),
         "complianceMissing": ws.get("compliance_missing_count"),
         "projectionTrustLevel": ws.get("projection_trust_level"),
+        "analysisJob": ws.get("analysis_job"),
         "projectionStale": bool(ws.get("projection_stale")),
         "projectionStaleSince": ws.get("projection_stale_since"),
         "projectionStaleSlots": list(ws.get("projection_stale_slots") or []),
@@ -2425,9 +2430,275 @@ def _refresh_source_documents(
     return refreshed
 
 
-@app.post("/api/workspaces/{workspace_id}/analyze")
-def api_workspace_analyze(workspace_id: str) -> Dict[str, Any]:
-    """Run an understanding analysis for a workspace (MVP).
+# --- Background analysis jobs --------------------------------------------
+# POST /api/workspaces/{id}/analyze starts a job and returns promptly;
+# the analysis itself runs on a daemon thread in this process, detached
+# from the HTTP request, and records its state on the workspace record
+# (analysis_job, persisted in the object store — see
+# docs/analyze-jobs.md). A browser disconnect, timeout, or refresh can
+# neither kill a running analysis nor hide its outcome: the workspace
+# record always says running / succeeded / failed, with the error.
+
+_ANALYSIS_JOB_STALE_AFTER_SECONDS = 45 * 60
+_ANALYSIS_COMMIT_ATTEMPTS = 4
+_ANALYSIS_COMMIT_BASE_DELAY_SECONDS = 0.25
+_analysis_job_threads: Dict[str, threading.Thread] = {}
+_analysis_job_lock = threading.Lock()
+
+
+class _WorkspaceTemporarilyMissing(Exception):
+    """update_workspace_analysis read the workspace as missing; the
+    analyze commit retry treats it as a transient store blip."""
+
+
+def _is_retryable_analyze_commit_error(exc: BaseException) -> bool:
+    if isinstance(exc, _WorkspaceTemporarilyMissing):
+        return True
+    if is_transient_store_error(exc):
+        return True
+    # store_workspace_executable_mechanics raises this when its
+    # existence read of workspace.json transiently answers NoSuchKey
+    # for a workspace that exists — the Oct 26, 2026 wart that discarded
+    # a completed 215-second analysis.
+    return isinstance(exc, ValueError) and "does not exist" in str(exc)
+
+
+def _run_analyze_commit(operation: Callable[[], Any]) -> Any:
+    """Run one analyze-pipeline commit with bounded retries.
+
+    A finished analysis must never be thrown away by one transient
+    object-store blip; non-transient errors propagate immediately and
+    exhausted retries re-raise the last error.
+    """
+
+    last_exc: Optional[BaseException] = None
+    for attempt in range(_ANALYSIS_COMMIT_ATTEMPTS):
+        try:
+            return operation()
+        except Exception as exc:  # noqa: BLE001 - re-raised when not retryable
+            if not _is_retryable_analyze_commit_error(exc):
+                raise
+            last_exc = exc
+            if attempt + 1 < _ANALYSIS_COMMIT_ATTEMPTS:
+                time.sleep(_ANALYSIS_COMMIT_BASE_DELAY_SECONDS * (2**attempt))
+    assert last_exc is not None
+    raise last_exc
+
+
+def _commit_mechanics_artifact(workspace_id: str, artifact: Dict[str, Any]) -> str:
+    return _run_analyze_commit(
+        lambda: store_workspace_executable_mechanics(workspace_id, artifact)
+    )
+
+
+def _commit_workspace_analysis(
+    workspace_id: str, **kwargs: Any
+) -> Optional[Dict[str, Any]]:
+    """update_workspace_analysis with the analyze commit retry.
+
+    Returns the updated workspace, or None only when the workspace is
+    still unreadable after the retries are exhausted (the caller keeps
+    its existing 503 semantics for that case).
+    """
+
+    def _op() -> Dict[str, Any]:
+        updated = update_workspace_analysis(workspace_id, **kwargs)
+        if updated is None:
+            raise _WorkspaceTemporarilyMissing(workspace_id)
+        return updated
+
+    try:
+        return _run_analyze_commit(_op)
+    except _WorkspaceTemporarilyMissing:
+        return None
+
+
+def _record_analysis_job(
+    workspace_id: str,
+    patch: Dict[str, Any],
+    *,
+    status: Optional[str] = None,
+) -> None:
+    """Persist analysis-job state. Best-effort: a state write must never
+    kill the job it describes — the next write usually lands, and the
+    terminal write is the one that matters most."""
+
+    try:
+        update_workspace_analysis_job(workspace_id, patch, status=status)
+    except Exception as exc:  # noqa: BLE001
+        logging.warning(
+            "[workspace-analysis] could not record job state for %s: %s",
+            workspace_id,
+            exc,
+        )
+
+
+def _record_analysis_failure(workspace_id: str, error: str) -> None:
+    ws_now = get_workspace(workspace_id) or {}
+    # A failed re-run of an analyzed workspace keeps its analyzed
+    # state; the failure lives on the job record. A workspace that has
+    # never completed an analysis is marked analysis_failed so it can
+    # never again sit in silent ready_for_analysis limbo.
+    status = None if ws_now.get("status") == "analyzed" else "analysis_failed"
+    _record_analysis_job(
+        workspace_id,
+        {
+            "state": "failed",
+            "phase": None,
+            "finishedAt": _correction_now(),
+            "error": error,
+        },
+        status=status,
+    )
+
+
+def _analysis_job_main(workspace_id: str, run_id: str) -> None:
+    def report_phase(phase: str) -> None:
+        current = get_workspace(workspace_id) or {}
+        job = current.get("analysis_job") or {}
+        if job.get("runId") == run_id and job.get("state") == "running":
+            _record_analysis_job(workspace_id, {"phase": phase})
+
+    try:
+        api_workspace_analyze(workspace_id, report_phase=report_phase)
+    except HTTPException as exc:
+        error = str(exc.detail)
+        logging.warning(
+            "[workspace-analysis] background analysis failed for %s: %s",
+            workspace_id,
+            error,
+        )
+        _record_analysis_failure(workspace_id, error)
+    except Exception as exc:  # noqa: BLE001 - the record is the report
+        error = f"{type(exc).__name__}: {exc}"
+        logging.warning(
+            "[workspace-analysis] background analysis failed for %s: %s",
+            workspace_id,
+            error,
+        )
+        _record_analysis_failure(workspace_id, error)
+    else:
+        _record_analysis_job(
+            workspace_id,
+            {
+                "state": "succeeded",
+                "phase": None,
+                "finishedAt": _correction_now(),
+                "error": None,
+            },
+        )
+    finally:
+        with _analysis_job_lock:
+            _analysis_job_threads.pop(workspace_id, None)
+
+
+def _parse_job_timestamp(value: Any) -> Optional[datetime]:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _start_analysis_job(workspace_id: str) -> Dict[str, Any]:
+    """Start the workspace's background analysis, or report the one
+    already running. Returns {"started": bool, "job": <record>}."""
+
+    with _analysis_job_lock:
+        thread = _analysis_job_threads.get(workspace_id)
+        if thread is not None and thread.is_alive():
+            ws = get_workspace(workspace_id) or {}
+            return {"started": False, "job": ws.get("analysis_job")}
+
+        ws = get_workspace(workspace_id) or {}
+        job = dict(ws.get("analysis_job") or {})
+        if job.get("state") == "running":
+            started_at = _parse_job_timestamp(job.get("startedAt"))
+            age = (
+                (datetime.now(timezone.utc) - started_at).total_seconds()
+                if started_at is not None
+                else None
+            )
+            if age is not None and age < _ANALYSIS_JOB_STALE_AFTER_SECONDS:
+                return {"started": False, "job": job}
+            # Orphaned record: a previous process died mid-analysis.
+            # Close it out so the new run starts from an honest record.
+            _record_analysis_job(
+                workspace_id,
+                {
+                    "state": "failed",
+                    "phase": None,
+                    "finishedAt": _correction_now(),
+                    "error": (
+                        "The previous analysis was interrupted before it "
+                        "could finish (the server restarted). Nothing was "
+                        "committed; run the analysis again."
+                    ),
+                },
+            )
+
+        run_id = uuid.uuid4().hex[:12]
+        job = {
+            "state": "running",
+            "phase": "starting",
+            "startedAt": _correction_now(),
+            "finishedAt": None,
+            "error": None,
+            "runId": run_id,
+        }
+        status = None if ws.get("status") == "analyzed" else "analyzing"
+        _record_analysis_job(workspace_id, job, status=status)
+        thread = threading.Thread(
+            target=_analysis_job_main,
+            args=(workspace_id, run_id),
+            name=f"analysis-{workspace_id}",
+            daemon=True,
+        )
+        _analysis_job_threads[workspace_id] = thread
+        thread.start()
+        return {"started": True, "job": job}
+
+
+@app.post("/api/workspaces/{workspace_id}/analyze", status_code=202)
+def api_workspace_analyze_start(workspace_id: str) -> Dict[str, Any]:
+    """Start a background analysis job for the workspace.
+
+    Returns promptly with the job state (202); the analysis runs
+    detached from this request, and its progress and outcome are read
+    from the workspace record (GET /api/workspaces/{id} -> analysisJob).
+    Starting a job while one is already running reports the running
+    job instead of starting a second one.
+    """
+
+    ws = get_workspace(workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+
+    if int(ws.get("document_count") or 0) <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one document is required before analysis",
+        )
+
+    outcome = _start_analysis_job(workspace_id)
+    refreshed = get_workspace(workspace_id) or ws
+    return {
+        "workspace": _workspace_to_api(refreshed),
+        "analysisJob": outcome["job"],
+        "started": outcome["started"],
+    }
+
+
+def api_workspace_analyze(
+    workspace_id: str,
+    report_phase: Optional[Callable[[str], None]] = None,
+) -> Dict[str, Any]:
+    """Run an understanding analysis for a workspace, synchronously (MVP).
+
+    This is the analysis core: the HTTP route runs it as a background
+    job (see _start_analysis_job); direct callers may run it inline.
+    `report_phase`, when given, is called as each pipeline phase begins.
 
     For the initial slice this is Promise‑UL‑compatible: we reuse the
     existing Promise UL product workspace snapshot builder and treat the
@@ -2442,11 +2713,21 @@ def api_workspace_analyze(workspace_id: str) -> Dict[str, Any]:
     if int(ws.get("document_count") or 0) <= 0:
         raise HTTPException(status_code=400, detail="At least one document is required before analysis")
 
+    def _report(phase: str) -> None:
+        if report_phase is None:
+            return
+        try:
+            report_phase(phase)
+        except Exception:  # noqa: BLE001 - progress must never fail the run
+            pass
+
+    _report("reading_documents")
     try:
         docs_for_inventory = list_workspace_documents(workspace_id)
     except Exception:
         docs_for_inventory = []
     docs_for_inventory = _refresh_source_documents(workspace_id, docs_for_inventory)
+    _report("extracting_mechanics")
     mechanics_artifact = _extract_workspace_executable_mechanics(docs_for_inventory)
     # Phase 2: workspace slot edits are durable product inputs, not
     # analysis by-products — re-apply them onto the fresh artifact so a
@@ -2485,12 +2766,13 @@ def api_workspace_analyze(workspace_id: str) -> Dict[str, Any]:
         mechanics_artifact, at=_correction_now(), specimen=True
     )["artifact"]
     mechanics_artifact["workspaceId"] = workspace_id
-    mechanics_artifact["objectKey"] = store_workspace_executable_mechanics(
+    mechanics_artifact["objectKey"] = _commit_mechanics_artifact(
         workspace_id, mechanics_artifact
     )
 
     # Build the product-line baseline, then replace its evidence and identity
     # facts with findings from this workspace's durable uploaded documents.
+    _report("building_snapshot")
     try:
         snapshot = build_product_workspace_snapshot("ICC18 P18PR UL")
     except HTTPException:
@@ -2518,6 +2800,7 @@ def api_workspace_analyze(workspace_id: str) -> Dict[str, Any]:
     # document maps + slice-fed extractors + the deterministic table
     # channel run over the workspace's own documents. The stage records
     # its own failures in the snapshot and must never fail this route.
+    _report("extracting_slices")
     slice_run: Optional[Dict[str, Any]] = None
     try:
         from actuarypoc.extract.slice_pipeline import run_workspace_slice_extraction
@@ -2583,6 +2866,7 @@ def api_workspace_analyze(workspace_id: str) -> Dict[str, Any]:
         facts.extend(slice_run["appended_facts"])
         snapshot["extractedFacts"] = facts
 
+    _report("finalizing")
     executable_request = {
         "_workspaceExecutableMechanics": _executable_mechanics_view(mechanics_artifact)
     }
@@ -2592,7 +2876,7 @@ def api_workspace_analyze(workspace_id: str) -> Dict[str, Any]:
     # Phase 7: execution incompleteness lives on the projection itself
     # (incomplete + missingMechanics) and on the snapshot below; the
     # artifact's equation records are the durable state.
-    store_workspace_executable_mechanics(workspace_id, mechanics_artifact)
+    _commit_mechanics_artifact(workspace_id, mechanics_artifact)
     snapshot["illustration"] = projection
     snapshot["mechanicsExplanation"] = mechanics
     snapshot["gaps"] = {"items": gaps, "warnings": warnings, "notes": notes}
@@ -2623,7 +2907,7 @@ def api_workspace_analyze(workspace_id: str) -> Dict[str, Any]:
     compliance = (snapshot.get("complianceMatrix") or {}).get("summary") or {}
     readiness = snapshot.get("readinessDashboard") or {}
 
-    updated = update_workspace_analysis(
+    updated = _commit_workspace_analysis(
         workspace_id,
         status="analyzed",
         snapshot=snapshot,

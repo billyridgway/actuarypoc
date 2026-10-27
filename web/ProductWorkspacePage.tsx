@@ -2,6 +2,7 @@ import React from "react";
 import { ProjectionLedger } from "./ProjectionLedger";
 import { MechanicsPanel } from "./MechanicsPanel";
 import { ValidationPanel } from "./ValidationPanel";
+import { startWorkspaceAnalysis, waitForWorkspaceAnalysis } from "./analyzeJob";
 
 interface WorkspaceAssumption {
   name?: string;
@@ -1204,13 +1205,10 @@ export const ProductWorkspacePage: React.FC<{
     setDashboardUploadMessage("Rerunning analysis with all workspace documents…");
     try {
       if (!workspaceId) throw new Error("Workspace context is required.");
-      const response = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/analyze`, {
-        method: "POST",
-      });
-      if (!response.ok) {
-        throw new Error((await response.text()) || `Analysis failed (HTTP ${response.status})`);
-      }
-      const body = await response.json();
+      // Analysis runs as a server-side job now: start it, then follow
+      // the recorded job state until it lands (docs/analyze-jobs.md).
+      await startWorkspaceAnalysis(workspaceId);
+      const body = await waitForWorkspaceAnalysis(workspaceId);
       setData(body.snapshot as WorkspacePayload);
       setDashboardUploadMessage("Product understanding updated from all workspace documents.");
     } catch (err: any) {
@@ -2048,15 +2046,8 @@ export const ProductWorkspacePage: React.FC<{
                       try {
                         setUploadMessage("Rerunning understanding for this workspace…");
                         if (workspaceId) {
-                          const resp = await fetch(
-                            `/api/workspaces/${encodeURIComponent(workspaceId)}/analyze`,
-                            { method: "POST" },
-                          );
-                          if (!resp.ok) {
-                            const text = await resp.text();
-                            throw new Error(text || `Analyze failed with status ${resp.status}`);
-                          }
-                          const body = await resp.json();
+                          await startWorkspaceAnalysis(workspaceId);
+                          const body = await waitForWorkspaceAnalysis(workspaceId);
                           const snap = body.snapshot as WorkspacePayload;
                           setData(snap);
                           setUploadMessage("Workspace understanding updated from latest evidence.");

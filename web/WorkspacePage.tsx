@@ -1,6 +1,11 @@
 import React from "react";
 import { ProductWorkspacePage } from "./ProductWorkspacePage";
 import { WorkbenchPage } from "./WorkbenchPage";
+import {
+  analysisPhaseLabel,
+  startWorkspaceAnalysis,
+  type AnalysisJobState,
+} from "./analyzeJob";
 
 interface WorkspaceMeta {
   id: string;
@@ -8,6 +13,7 @@ interface WorkspaceMeta {
   documentCount: number;
   createdAt?: string;
   updatedAt?: string;
+  analysisJob?: AnalysisJobState | null;
 }
 
 interface WorkspaceDocument {
@@ -56,23 +62,30 @@ export const WorkspacePage: React.FC<{ workspaceId: string; view?: string }> = (
   const [analyzing, setAnalyzing] = React.useState<boolean>(false);
   const [deleting, setDeleting] = React.useState<boolean>(false);
 
-  const loadWorkspace = React.useCallback(async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      const resp = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}`);
-      if (!resp.ok) {
-        const text = await resp.text();
-        throw new Error(text || `HTTP ${resp.status}`);
+  // `quiet` polls refresh the workspace without flashing the page's
+  // loading state or clearing a displayed error.
+  const loadWorkspace = React.useCallback(
+    async (quiet = false) => {
+      try {
+        if (!quiet) {
+          setLoading(true);
+          setError(null);
+        }
+        const resp = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}`);
+        if (!resp.ok) {
+          const text = await resp.text();
+          throw new Error(text || `HTTP ${resp.status}`);
+        }
+        const body: WorkspaceResponse = await resp.json();
+        setData(body);
+      } catch (err: any) {
+        if (!quiet) setError(err?.message || "Failed to load workspace.");
+      } finally {
+        if (!quiet) setLoading(false);
       }
-      const body: WorkspaceResponse = await resp.json();
-      setData(body);
-    } catch (err: any) {
-      setError(err?.message || "Failed to load workspace.");
-    } finally {
-      setLoading(false);
-    }
-  }, [workspaceId]);
+    },
+    [workspaceId],
+  );
 
   React.useEffect(() => {
     void loadWorkspace();
@@ -82,6 +95,38 @@ export const WorkspacePage: React.FC<{ workspaceId: string; view?: string }> = (
   const documents = data?.documents ?? [];
   const snapshot = data?.snapshot;
   const hasSnapshot = !!snapshot && workspace?.status === "analyzed";
+
+  // Background analysis job state (recorded on the workspace itself):
+  // while it runs, this page polls quietly — a refresh mid-run lands
+  // right back on the live state, because the state is the server's,
+  // not the page's.
+  const job = workspace?.analysisJob ?? null;
+  const jobRunning = job?.state === "running";
+  const [nowMs, setNowMs] = React.useState(() => Date.now());
+
+  React.useEffect(() => {
+    if (!jobRunning) return;
+    const timer = window.setInterval(() => {
+      void loadWorkspace(true);
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [jobRunning, loadWorkspace]);
+
+  React.useEffect(() => {
+    if (!jobRunning) return;
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [jobRunning]);
+
+  const elapsedLabel = React.useMemo(() => {
+    if (!job?.startedAt) return null;
+    const started = Date.parse(job.startedAt);
+    if (Number.isNaN(started)) return null;
+    const secs = Math.max(0, Math.floor((nowMs - started) / 1000));
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return m > 0 ? `${m}:${String(s).padStart(2, "0")}` : `${s}s`;
+  }, [job?.startedAt, nowMs]);
 
   if (hasSnapshot && snapshot) {
     // Once analysis has populated the snapshot and the workspace has
@@ -106,7 +151,7 @@ export const WorkspacePage: React.FC<{ workspaceId: string; view?: string }> = (
 
   const statusLabel = formatWorkspaceStatus(workspace?.status);
   const docCount = workspace?.documentCount ?? 0;
-  const analyzeDisabled = docCount <= 0 || !!loading || !!analyzing;
+  const analyzeDisabled = docCount <= 0 || !!loading || !!analyzing || jobRunning;
 
   const handleFileChange: React.ChangeEventHandler<HTMLInputElement> = async (event) => {
     const files = event.target.files;
@@ -140,20 +185,12 @@ export const WorkspacePage: React.FC<{ workspaceId: string; view?: string }> = (
     setAnalyzing(true);
     setError(null);
     try {
-      const resp = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/analyze`, {
-        method: "POST",
-      });
-      if (!resp.ok) {
-        const text = await resp.text();
-        throw new Error(text || `Analyze failed with status ${resp.status}`);
-      }
-      const body = await resp.json();
-      // Refresh workspace so that the snapshot and inferred fields are up to date.
-      setData({
-        workspace: body.workspace,
-        documents,
-        snapshot: body.snapshot,
-      });
+      // Starts the server-side job and returns promptly; the recorded
+      // job state (picked up here, then by the poller) drives the card
+      // until the analysis lands.
+      const body = await startWorkspaceAnalysis(workspaceId);
+      setData((prev) => (prev ? { ...prev, workspace: body.workspace } : prev));
+      await loadWorkspace(true);
     } catch (e: any) {
       setError(e?.message || "Analysis failed.");
     } finally {
@@ -270,8 +307,20 @@ export const WorkspacePage: React.FC<{ workspaceId: string; view?: string }> = (
           When you are ready, analyze the product using the uploaded documents. For this MVP, analysis uses the existing
           Promise UL understanding pipeline as a stand-in.
         </p>
+        {jobRunning && (
+          <p className="muted">
+            Analysis is running on the server — you can leave or refresh this page; it finishes on its own.{" "}
+            {analysisPhaseLabel(job?.phase)}
+            {elapsedLabel ? ` · ${elapsedLabel} elapsed` : ""}
+          </p>
+        )}
+        {job?.state === "failed" && (
+          <p className="error">
+            The last analysis failed — {job.error || "no detail was recorded."} You can run it again.
+          </p>
+        )}
         <button type="button" className="button" disabled={analyzeDisabled} onClick={handleAnalyzeClick}>
-          {analyzing ? "Analyzing…" : "Analyze Product"}
+          {analyzing || jobRunning ? "Analyzing…" : "Analyze Product"}
         </button>
       </section>
 

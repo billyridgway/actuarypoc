@@ -15,6 +15,7 @@ must be impossible for a source-built workspace.
 
 import hashlib
 import io
+import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -400,6 +401,21 @@ def analyze_client(
     return client
 
 
+def _await_analysis(client: TestClient, workspace_id: str, timeout: float = 30.0) -> dict:
+    """Poll the workspace record until the background analysis lands."""
+
+    deadline = time.monotonic() + timeout
+    while True:
+        body = client.get(f"/api/workspaces/{workspace_id}").json()
+        job = (body.get("workspace") or {}).get("analysisJob") or {}
+        if job.get("state") == "failed":
+            raise AssertionError(f"analysis job failed: {job.get('error')}")
+        if body["workspace"]["status"] == "analyzed" and job.get("state") == "succeeded":
+            return body["snapshot"]
+        assert time.monotonic() < deadline, f"analysis did not finish; last job state: {job}"
+        time.sleep(0.05)
+
+
 def test_analyze_over_source_documents_produces_document_maps(
     analyze_client: TestClient, fake: BucketFakeMinio, long_pdf_bytes: bytes
 ) -> None:
@@ -410,8 +426,12 @@ def test_analyze_over_source_documents_produces_document_maps(
     workspace_id = created["workspace"]["id"]
 
     resp = analyze_client.post(f"/api/workspaces/{workspace_id}/analyze")
-    assert resp.status_code == 200, resp.text
-    snapshot = resp.json()["snapshot"]
+    # The route starts a background job and returns promptly (202); the
+    # analysis commits on the workspace record, which the test polls
+    # exactly as the browser now does (docs/analyze-jobs.md).
+    assert resp.status_code == 202, resp.text
+    assert resp.json()["started"] is True
+    snapshot = _await_analysis(analyze_client, workspace_id)
 
     maps = snapshot.get("documentMaps") or []
     assert len(maps) == 1
