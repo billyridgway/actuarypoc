@@ -101,8 +101,11 @@ def test_filed_table_proposals_carry_candidate_evidence():
     found = proposals.generate_proposals(artifact, [])
     assert len(found) == 1
     proposal = found[0]
-    assert proposal["kind"] == "filed_table"
+    # Unification revamp: a filed table is proposed as a CHOICE —
+    # one proposal carrying the candidate(s) as options.
+    assert proposal["kind"] == "filed_table_choice"
     assert proposal["candidateId"] == "cand-coi-b"
+    assert [o["candidateId"] for o in proposal["options"]] == ["cand-coi-b"]
     assert proposal["evidence"]["filename"] == "meridian-ul.pdf"
     assert proposal["evidence"]["page"] == 9
     assert "meridian-ul.pdf" in proposal["confirmBack"]
@@ -327,6 +330,7 @@ def test_proposals_over_http_confirm_gated(store, monkeypatch):
     found = listed.json()["proposals"]
     assert {p["candidateId"] for p in found} == {"cand-coi-b", "cand-sur-b"}
     coi_proposal = next(p for p in found if p["candidateId"] == "cand-coi-b")
+    assert coi_proposal["kind"] == "filed_table_choice"
 
     # The panel payload carries the proposals and the equation state
     # (Phase 7: no rule bank is served anymore).
@@ -474,10 +478,10 @@ def test_acceptance_second_product_onboarded_via_proposals():
     # Round 1: the four filed tables + the COI timing the prose states.
     pending = proposals.generate_proposals(artifact, slices)
     kinds = {(p["kind"], p["mechanic"]) for p in pending}
-    assert ("filed_table", "coi") in kinds
-    assert ("filed_table", "surrender") in kinds
-    assert ("filed_table", "nar_factors") in kinds
-    assert ("filed_table", "fees") in kinds
+    assert ("filed_table_choice", "coi") in kinds
+    assert ("filed_table_choice", "surrender") in kinds
+    assert ("filed_table_choice", "nar_factors") in kinds
+    assert ("filed_table_choice", "fees") in kinds
     assert any(
         p["kind"] == "equation" and p["equationMechanic"] == "coi_charge"
         for p in pending

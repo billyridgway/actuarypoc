@@ -25,6 +25,190 @@ SURRENDER_UNITS = {"percent_face", "percent_account_value", "per_1000_face", "fi
 FEE_UNITS = {"annual_fixed", "monthly_fixed", "modal_fixed", "per_1000_face_annual", "percent_premium"}
 MECHANIC_KEYS = ("coi", "surrender", "fees", "nar_factors", "corridor")
 PDF_REVIEW_REQUIRED = "review_required"
+PDF_REVIEW_SUPERSEDED = "superseded"
+
+#: The fields that identify one row of a table (its lookup key), and
+#: the fields that carry the row's value, per mechanic.  Two rows with
+#: the same selector AND the same value are the same row filed twice;
+#: the same selector with a different value is a genuine conflict.
+ROW_SELECTOR_FIELDS = (
+    "component", "duration", "attained_age", "sex", "risk_class",
+    "tobacco_status", "issue_age", "premium_mode",
+)
+ROW_VALUE_FIELDS: Dict[str, Tuple[str, ...]] = {
+    "coi": ("rate", "rate_unit"),
+    "surrender": ("charge", "charge_unit"),
+    "fees": ("amount", "fee_unit"),
+    "nar_factors": ("factor",),
+    "corridor": ("percentage",),
+}
+
+
+def row_selector_key(row: Dict[str, Any]) -> Tuple[Any, ...]:
+    return tuple(row.get(field) for field in ROW_SELECTOR_FIELDS)
+
+
+def row_value_key(mechanic: str, row: Dict[str, Any]) -> Tuple[Any, ...]:
+    return tuple(row.get(field) for field in ROW_VALUE_FIELDS.get(mechanic, ()))
+
+
+def _provenance_identity(provenance: Dict[str, Any]) -> Tuple[Any, ...]:
+    return (
+        provenance.get("filename"), provenance.get("page"),
+        provenance.get("tableHeading"), provenance.get("candidateId"),
+        provenance.get("sourceType"),
+    )
+
+
+def dedupe_rows(rows: List[Dict[str, Any]], mechanic: str) -> List[Dict[str, Any]]:
+    """Collapse identical rows (same selector, same value) into one.
+
+    The surviving row keeps the first provenance and gains an
+    ``alsoFiledAs`` list naming every other provenance the identical
+    row was filed under — the row is counted once, and no source is
+    lost.  Rows that share a selector but carry different values are
+    NOT merged (that is a conflict, decided by the caller).
+    """
+
+    merged: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+    order: List[Tuple[Any, ...]] = []
+    for row in rows or []:
+        key = (row_selector_key(row), row_value_key(mechanic, row))
+        existing = merged.get(key)
+        if existing is None:
+            merged[key] = deepcopy(row)
+            order.append(key)
+            continue
+        provenance = row.get("provenance") or {}
+        kept = merged[key].setdefault("provenance", {})
+        if _provenance_identity(provenance) != _provenance_identity(kept):
+            also = kept.setdefault("alsoFiledAs", [])
+            if _provenance_identity(provenance) not in {
+                _provenance_identity(item) for item in also
+            }:
+                also.append(deepcopy(provenance))
+    return [merged[key] for key in order]
+
+
+def candidate_group_key(mechanic: str, candidate: Dict[str, Any]) -> Tuple[str, frozenset]:
+    """The alternative-group a filed candidate belongs to.
+
+    Candidates in one group file THE SAME table — specimen variants
+    of one product — so they are alternatives in a single choice,
+    never a sequence of acceptances.  For fees, candidates covering
+    different components are different tables (additive); candidates
+    covering the same component set are alternatives.  Every other
+    mechanic's candidates are one group per mechanic.
+    """
+
+    if mechanic == "fees":
+        components = frozenset(
+            str(row.get("component") or "policy_fee")
+            for row in (candidate or {}).get("rows") or []
+        )
+        return (mechanic, components)
+    return (mechanic, frozenset())
+
+
+def candidate_selector_summary(rows: List[Dict[str, Any]]) -> Dict[str, List[Any]]:
+    """Distinct selector values a candidate's rows carry, per field.
+
+    This is what makes two specimen variants visibly different on a
+    choice card ("Tobacco" vs "Non-Tobacco") without opening either
+    table.
+    """
+
+    summary: Dict[str, List[Any]] = {}
+    for field in ("sex", "risk_class", "tobacco_status", "issue_age", "premium_mode", "component"):
+        values = sorted(
+            {row.get(field) for row in rows or [] if row.get(field) not in (None, "")},
+            key=str,
+        )
+        if values:
+            summary[field] = values
+    return summary
+
+
+def candidate_diff(
+    rows_a: List[Dict[str, Any]], rows_b: List[Dict[str, Any]], mechanic: str,
+) -> Dict[str, Any]:
+    """Compare two candidates' rows selector-by-selector.
+
+    Counts identical rows (same selector, same value), differing
+    rows (same selector, different value) and rows present on only
+    one side, with a few differing examples — the difference a user
+    is actually choosing between when two documents file the same
+    table.
+    """
+
+    def keyed(rows: List[Dict[str, Any]]) -> Dict[Tuple[Any, ...], Dict[str, Any]]:
+        result: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+        for row in rows or []:
+            result.setdefault(row_selector_key(row), row)
+        return result
+
+    a, b = keyed(rows_a), keyed(rows_b)
+    identical = 0
+    differing = 0
+    examples: List[Dict[str, Any]] = []
+    for selector in sorted(set(a) & set(b), key=str):
+        value_a = row_value_key(mechanic, a[selector])
+        value_b = row_value_key(mechanic, b[selector])
+        if value_a == value_b:
+            identical += 1
+        else:
+            differing += 1
+            if len(examples) < 4:
+                examples.append({
+                    "selector": {
+                        field: a[selector].get(field)
+                        for field in ROW_SELECTOR_FIELDS
+                        if a[selector].get(field) is not None
+                    },
+                    "values": {
+                        "a": {field: a[selector].get(field) for field in ROW_VALUE_FIELDS.get(mechanic, ())},
+                        "b": {field: b[selector].get(field) for field in ROW_VALUE_FIELDS.get(mechanic, ())},
+                    },
+                })
+    return {
+        "identicalRows": identical,
+        "differingRows": differing,
+        "onlyInA": len(set(a) - set(b)),
+        "onlyInB": len(set(b) - set(a)),
+        "examples": examples,
+    }
+
+
+def rows_coverage_text(rows: List[Dict[str, Any]]) -> str:
+    """Say what a row count counts: rows, plus their duration span.
+
+    Replaces the old phrasing that summed rows as years ("values in
+    force over 242 years" for a 242-row table filed by two
+    documents).
+    """
+
+    rows = list(rows or [])
+    count = len(rows)
+    word = "row" if count == 1 else "rows"
+    durations = sorted({row.get("duration") for row in rows if row.get("duration") is not None})
+    if durations:
+        if count == 1:
+            return f"1 row at duration {durations[0]}"
+        span = (
+            f"duration {durations[0]}"
+            if durations[0] == durations[-1]
+            else f"durations {durations[0]}–{durations[-1]}"
+        )
+        contiguous = durations == list(range(durations[0], durations[-1] + 1))
+        if len(durations) == count and contiguous:
+            return f"{count} {word} covering {span}"
+        return f"{count} {word} across {span}"
+    ages = sorted({row.get("attained_age") for row in rows if row.get("attained_age") is not None})
+    if ages:
+        if count == 1:
+            return f"1 row at attained age {ages[0]}"
+        return f"{count} {word} covering attained ages {ages[0]}–{ages[-1]}"
+    return f"{count} {word}"
 
 
 def _name(value: Any) -> str:
@@ -460,11 +644,11 @@ def usable_mechanics(extracted: Dict[str, Any]) -> Dict[str, Any]:
     usable: Dict[str, Any] = {}
     coi = [row for row in (raw.get("coi") or []) if (row.get("provenance") or {}).get("reviewStatus") != PDF_REVIEW_REQUIRED]
     if coi:
-        usable["coi"] = coi
+        usable["coi"] = dedupe_rows(coi, "coi")
     surrender = [row for row in (raw.get("surrender") or []) if (row.get("provenance") or {}).get("reviewStatus") != PDF_REVIEW_REQUIRED]
     surrender_durations = sorted({row.get("duration") for row in surrender})
     if surrender and surrender_durations == list(range(1, max(surrender_durations) + 1)):
-        usable["surrender"] = surrender
+        usable["surrender"] = dedupe_rows(surrender, "surrender")
     fees = [row for row in (raw.get("fees") or []) if (row.get("provenance") or {}).get("reviewStatus") != PDF_REVIEW_REQUIRED]
     components: Dict[str, List[Dict[str, Any]]] = {}
     for row in fees:
@@ -477,14 +661,14 @@ def usable_mechanics(extracted: Dict[str, Any]) -> Dict[str, Any]:
         ):
             complete_components = False
     if fees and complete_components:
-        usable["fees"] = fees
+        usable["fees"] = dedupe_rows(fees, "fees")
     nar_factors = [row for row in (raw.get("nar_factors") or []) if (row.get("provenance") or {}).get("reviewStatus") != PDF_REVIEW_REQUIRED]
     if nar_factors:
-        usable["nar_factors"] = nar_factors
+        usable["nar_factors"] = dedupe_rows(nar_factors, "nar_factors")
     corridor = [row for row in (raw.get("corridor") or []) if (row.get("provenance") or {}).get("reviewStatus") != PDF_REVIEW_REQUIRED]
     corridor_durations = sorted({row.get("duration") for row in corridor})
     if corridor and corridor_durations == list(range(1, max(corridor_durations) + 1)):
-        usable["corridor"] = corridor
+        usable["corridor"] = dedupe_rows(corridor, "corridor")
     return usable
 
 
@@ -513,7 +697,14 @@ def accept_filed_mechanic(
         raise ValueError(f"No filed {mechanic} candidate is available")
     if any((row.get("provenance") or {}).get("sourceType") != "filed_pdf" for row in rows):
         raise ValueError("Only filed-PDF candidates can be accepted by this workflow")
-    if any((row.get("provenance") or {}).get("reviewStatus") != PDF_REVIEW_REQUIRED for row in rows):
+    # A superseded candidate may be chosen again (switching back is
+    # the same choice made again); an accepted one re-accepts
+    # idempotently.  Anything else is not in a reviewable state.
+    if any(
+        (row.get("provenance") or {}).get("reviewStatus")
+        not in {PDF_REVIEW_REQUIRED, PDF_REVIEW_SUPERSEDED, "accepted"}
+        for row in rows
+    ):
         raise ValueError(f"Filed {mechanic} candidate is not awaiting review")
     durations = sorted({row.get("duration") for row in rows if row.get("duration") is not None})
     if mechanic in {"coi", "surrender", "corridor"} and durations:
@@ -523,15 +714,45 @@ def accept_filed_mechanic(
 
     accepted_at = datetime.now(timezone.utc).isoformat()
     for row in rows:
-        row["provenance"] = {
+        provenance = {
             **(row.get("provenance") or {}),
             "reviewStatus": "accepted",
             "reviewedBy": reviewed_by,
             "reviewedAt": accepted_at,
         }
+        provenance.pop("supersededBy", None)
+        provenance.pop("supersededAt", None)
+        row["provenance"] = provenance
+    superseded_ids: List[str] = []
     if candidate is not None:
         candidate["rows"] = rows
         candidate["reviewStatus"] = "accepted"
+        # Candidates in the same alternative group file the same
+        # table (specimen variants): accepting this one supersedes
+        # the previously accepted alternative instead of stacking
+        # its rows on top.  The superseded candidate's records stay
+        # on the artifact, marked — the change history is untouched.
+        group = candidate_group_key(mechanic, candidate)
+        reviews = result.setdefault("reviews", {})
+        for other in candidates:
+            if other is candidate or other.get("reviewStatus") != "accepted":
+                continue
+            if candidate_group_key(mechanic, other) != group:
+                continue
+            other["reviewStatus"] = PDF_REVIEW_SUPERSEDED
+            for other_row in other.get("rows") or []:
+                other_row["provenance"] = {
+                    **(other_row.get("provenance") or {}),
+                    "reviewStatus": PDF_REVIEW_SUPERSEDED,
+                    "supersededBy": candidate.get("id"),
+                    "supersededAt": accepted_at,
+                }
+            superseded_ids.append(str(other.get("id")))
+            prior_review = reviews.get(str(other.get("id")))
+            if isinstance(prior_review, dict):
+                prior_review["status"] = PDF_REVIEW_SUPERSEDED
+                prior_review["supersededBy"] = candidate.get("id")
+                prior_review["supersededAt"] = accepted_at
     active_rows = rows
     if candidate is not None:
         active_rows = [
@@ -540,31 +761,16 @@ def accept_filed_mechanic(
             if item.get("reviewStatus") == "accepted"
             for row in (item.get("rows") or [])
         ]
-    selector_fields = (
-        "component", "duration", "attained_age", "sex", "risk_class", "tobacco_status",
-        "issue_age", "premium_mode",
-    )
-    value_fields = {
-        "coi": ("rate", "rate_unit"),
-        "surrender": ("charge", "charge_unit"),
-        "fees": ("amount", "fee_unit"),
-        "nar_factors": ("factor",),
-        "corridor": ("percentage",),
-    }[mechanic]
-    deduplicated: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+    seen_values: Dict[Tuple[Any, ...], Tuple[Any, ...]] = {}
     for active_row in active_rows:
-        selector = tuple(active_row.get(field) for field in selector_fields)
-        existing = deduplicated.get(selector)
-        if existing is not None:
-            existing_value = tuple(existing.get(field) for field in value_fields)
-            incoming_value = tuple(active_row.get(field) for field in value_fields)
-            if existing_value != incoming_value:
-                raise ValueError(
-                    f"Filed {mechanic} candidates conflict for selector {selector}"
-                )
-            continue
-        deduplicated[selector] = active_row
-    active_rows = list(deduplicated.values())
+        selector = row_selector_key(active_row)
+        value = row_value_key(mechanic, active_row)
+        if selector in seen_values and seen_values[selector] != value:
+            raise ValueError(
+                f"Filed {mechanic} candidates conflict for selector {selector}"
+            )
+        seen_values[selector] = value
+    active_rows = dedupe_rows(active_rows, mechanic)
     validation_artifact = {"mechanics": {mechanic: active_rows}}
     validated = usable_mechanics(validation_artifact)
     if mechanic not in validated:
@@ -583,5 +789,6 @@ def accept_filed_mechanic(
         "rowCount": len(rows),
         "activeRowCount": len(active_rows),
         "sourceType": "filed_pdf",
+        "supersededCandidateIds": superseded_ids,
     }
     return result

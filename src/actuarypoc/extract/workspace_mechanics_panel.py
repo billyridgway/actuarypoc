@@ -39,6 +39,10 @@ from actuarypoc.extract.workspace_ul_mechanics import (
     _name,
     _parse_row,
     _read_tables,
+    candidate_diff,
+    candidate_group_key,
+    candidate_selector_summary,
+    rows_coverage_text,
     usable_mechanics,
 )
 
@@ -174,6 +178,55 @@ def _pending_candidate_views(artifact: Dict[str, Any], mechanic: str) -> List[Di
     return views
 
 
+def _candidate_views(artifact: Dict[str, Any], mechanic: str) -> List[Dict[str, Any]]:
+    """Every filed candidate for a slot, as ONE choice (revamp).
+
+    Candidates that file the same table (same alternative group) are
+    presented together with their state — in force, awaiting review,
+    or superseded by the candidate that replaced them — and, for
+    each alternative, how its rows differ from the candidate in
+    force (or from the first alternative when none is in force).
+    """
+
+    candidates = [
+        candidate
+        for candidate in (artifact.get("candidates") or {}).get(mechanic) or []
+        if isinstance(candidate, dict)
+    ]
+    if not candidates:
+        return []
+    reference = next(
+        (c for c in candidates if c.get("reviewStatus") == "accepted"),
+        candidates[0],
+    )
+    views: List[Dict[str, Any]] = []
+    for candidate in candidates:
+        rows = list(candidate.get("rows") or [])
+        group = candidate_group_key(mechanic, candidate)
+        view: Dict[str, Any] = {
+            "id": candidate.get("id"),
+            "filename": candidate.get("filename"),
+            "page": candidate.get("page"),
+            "tableHeading": candidate.get("tableHeading"),
+            "rowCount": candidate.get("rowCount") or len(rows),
+            "valueBasis": candidate.get("valueBasis"),
+            "reviewStatus": candidate.get("reviewStatus"),
+            "inForce": candidate.get("reviewStatus") == "accepted",
+            "group": sorted(group[1]),
+            "coverageText": rows_coverage_text(rows),
+            "selectors": candidate_selector_summary(rows),
+            "diffVsReference": None,
+        }
+        if candidate is not reference and candidate_group_key(mechanic, candidate) == candidate_group_key(mechanic, reference):
+            view["diffVsReference"] = candidate_diff(
+                list(reference.get("rows") or []), rows, mechanic
+            )
+            view["referenceCandidateId"] = reference.get("id")
+            view["referenceInForce"] = reference.get("reviewStatus") == "accepted"
+        views.append(view)
+    return views
+
+
 def _crediting_view(snapshot: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Display-only crediting slot, derived from the latest snapshot."""
 
@@ -203,6 +256,15 @@ def _crediting_view(snapshot: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "status": status,
         "statusLabel": STATUS_LABELS[status],
         "editable": False,
+        # Provenance honesty (revamp): this value is an assumption
+        # from the product's runtime configuration, NOT a value read
+        # from the filing — the payload says so in terms, and the UI
+        # styles it distinctly from filing-derived values.
+        "sourceKind": "assumption",
+        "sourceLabel": (
+            "Assumption — set in the product's runtime configuration; "
+            "not read from the filing"
+        ),
         "value": rate,
         "provenance": (
             [{"filename": None, "page": None, "tableHeading": None,
@@ -264,10 +326,12 @@ def build_slot_view(
         "statusLabel": STATUS_LABELS[status],
         "editable": True,
         "rowCount": len(usable_rows),
+        "coverageText": rows_coverage_text(usable_rows),
         "rows": usable_rows,
         "provenance": _provenance_views(usable_rows),
         "pendingCandidateCount": _pending_candidate_count(artifact, mechanic),
         "pendingCandidates": _pending_candidate_views(artifact, mechanic),
+        "candidates": _candidate_views(artifact, mechanic),
         "editedInWorkspace": mechanic in edits,
         "lastEdit": (
             {"at": edit.get("updatedAt"), "who": edit.get("updatedBy")}

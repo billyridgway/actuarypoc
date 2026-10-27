@@ -49,10 +49,19 @@ from actuarypoc.extract.workspace_mechanics_panel import (
     _slot_status,
     _summarize_rows,
 )
-from actuarypoc.extract.workspace_ul_mechanics import accept_filed_mechanic
+from actuarypoc.extract.workspace_ul_mechanics import (
+    accept_filed_mechanic,
+    candidate_diff,
+    candidate_group_key,
+    candidate_selector_summary,
+    rows_coverage_text,
+)
 
 
 PROPOSAL_KIND_FILED_TABLE = "filed_table"
+#: Unification revamp: filed-table proposals are one CHOICE per
+#: alternative group (see _filed_table_proposals).
+PROPOSAL_KIND_FILED_TABLE_CHOICE = "filed_table_choice"
 PROPOSAL_KIND_EQUATION = "equation"
 # Retired by Phase 7 (kept as a name so old payloads stay readable):
 PROPOSAL_KIND_SWITCH = "switch_setting"
@@ -111,6 +120,19 @@ def _proposal_id(kind: str, payload: Dict[str, Any]) -> str:
 
 
 def _filed_table_proposals(artifact: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """One CHOICE proposal per group of alternative filed tables.
+
+    Unification revamp: two documents filing the same table (the
+    base specimen and its Nicotine variant) used to generate one
+    proposal EACH, so the user confirmed a sequence of alternatives
+    and accepting both stacked their rows.  Now candidates in one
+    alternative group (same mechanic; for fees, the same component
+    set) form a single proposal whose options are the candidates,
+    with a computed diff between them.  Once any candidate in the
+    group is in force, the group leaves the queue — choosing or
+    switching is then a slot-card action, not a recurring proposal.
+    """
+
     proposals: List[Dict[str, Any]] = []
     candidates_by_mechanic = artifact.get("candidates") or {}
     for mechanic, candidates in candidates_by_mechanic.items():
@@ -126,52 +148,103 @@ def _filed_table_proposals(artifact: Dict[str, Any]) -> List[Dict[str, Any]]:
             str((row.get("provenance") or {}).get("candidateId"))
             for row in (artifact.get("usable") or {}).get(mechanic) or []
         }
+        groups: Dict[Any, List[Dict[str, Any]]] = {}
         for candidate in candidates or []:
             if not isinstance(candidate, dict):
                 continue
-            if candidate.get("reviewStatus") != "review_required":
+            groups.setdefault(candidate_group_key(str(mechanic), candidate), []).append(candidate)
+        for group_key, members in groups.items():
+            if any(member.get("reviewStatus") == "accepted" for member in members):
+                continue  # a choice was made; switching lives on the slot card
+            pending = [
+                member for member in members
+                if member.get("reviewStatus") == "review_required"
+                and str(member.get("id") or "")
+                and str(member.get("id")) not in usable_ids
+            ]
+            if not pending:
                 continue
-            candidate_id = str(candidate.get("id") or "")
-            if not candidate_id or candidate_id in usable_ids:
-                continue
-            provenance = candidate.get("provenance") or {}
-            evidence = {
-                "filename": candidate.get("filename") or provenance.get("filename"),
-                "page": candidate.get("page") or provenance.get("page"),
-                "heading": candidate.get("tableHeading"),
-                "snippet": (
-                    f"{candidate.get('rowCount')} rows extracted"
-                    + (f" under “{candidate.get('tableHeading')}”" if candidate.get("tableHeading") else "")
-                    + (f" ({candidate.get('valueBasis')})" if candidate.get("valueBasis") else "")
-                ),
-            }
             was = _corrections.describe_current(artifact, slot)
-            label = (
-                f"Accept the filed {slot['label'].lower()} table"
-                f" from {evidence['filename'] or 'the filing'}"
-                + (f" (p. {evidence['page']})" if evidence.get("page") else "")
-            )
-            confirm_back = (
-                f"{slot['label']}: was {was['description']}; now the filed table"
-                f" of {candidate.get('rowCount')} rows"
-                + (f" from {evidence['filename']}" if evidence.get("filename") else "")
-                + (f", p. {evidence['page']}" if evidence.get("page") else "")
-                + ", accepted on your confirmation."
-            )
+            options: List[Dict[str, Any]] = []
+            for candidate in pending:
+                candidate_id = str(candidate.get("id") or "")
+                provenance = candidate.get("provenance") or {}
+                rows = list(candidate.get("rows") or [])
+                evidence = {
+                    "filename": candidate.get("filename") or provenance.get("filename"),
+                    "page": candidate.get("page") or provenance.get("page"),
+                    "heading": candidate.get("tableHeading"),
+                    "snippet": (
+                        f"{candidate.get('rowCount')} rows extracted"
+                        + (f" under “{candidate.get('tableHeading')}”" if candidate.get("tableHeading") else "")
+                        + (f" ({candidate.get('valueBasis')})" if candidate.get("valueBasis") else "")
+                    ),
+                }
+                options.append({
+                    "candidateId": candidate_id,
+                    "filename": evidence["filename"],
+                    "page": evidence["page"],
+                    "tableHeading": candidate.get("tableHeading"),
+                    "rowCount": candidate.get("rowCount") or len(rows),
+                    "valueBasis": candidate.get("valueBasis"),
+                    "coverageText": rows_coverage_text(rows),
+                    "selectors": candidate_selector_summary(rows),
+                    "evidence": evidence,
+                    "confirmBack": (
+                        f"{slot['label']}: was {was['description']}; now the filed table"
+                        f" of {candidate.get('rowCount')} rows"
+                        + (f" from {evidence['filename']}" if evidence.get("filename") else "")
+                        + (f", p. {evidence['page']}" if evidence.get("page") else "")
+                        + ", accepted on your confirmation."
+                    ),
+                })
+            first_rows = list(pending[0].get("rows") or [])
+            option_diffs: List[Dict[str, Any]] = []
+            for candidate in pending[1:]:
+                diff = candidate_diff(first_rows, list(candidate.get("rows") or []), str(mechanic))
+                option_diffs.append({
+                    "candidateId": str(candidate.get("id") or ""),
+                    "comparedTo": str(pending[0].get("id") or ""),
+                    "identicalRows": diff["identicalRows"],
+                    "differingRows": diff["differingRows"],
+                    "onlyInFirst": diff["onlyInA"],
+                    "onlyInOption": diff["onlyInB"],
+                    "examples": diff["examples"],
+                })
+            if len(options) == 1:
+                label = (
+                    f"Accept the filed {slot['label'].lower()} table"
+                    f" from {options[0]['filename'] or 'the filing'}"
+                    + (f" (p. {options[0]['page']})" if options[0].get("page") else "")
+                )
+                confirm_back = options[0]["confirmBack"]
+            else:
+                label = (
+                    f"Choose the filed {slot['label'].lower()} table — "
+                    f"{len(options)} filed versions"
+                )
+                confirm_back = (
+                    f"{slot['label']}: was {was['description']}; now the filed table "
+                    "you choose below, accepted on your confirmation."
+                )
             proposals.append({
-                "id": _proposal_id(PROPOSAL_KIND_FILED_TABLE, {
-                    "slot": slot["id"], "candidateId": candidate_id,
+                "id": _proposal_id(PROPOSAL_KIND_FILED_TABLE_CHOICE, {
+                    "slot": slot["id"],
+                    "group": [str(part) for part in group_key[1]] or ["-"],
+                    "candidateIds": sorted(option["candidateId"] for option in options),
                 }),
-                "kind": PROPOSAL_KIND_FILED_TABLE,
+                "kind": PROPOSAL_KIND_FILED_TABLE_CHOICE,
                 "slot": slot["id"],
                 "mechanic": mechanic,
-                "candidateId": candidate_id,
+                "candidateId": options[0]["candidateId"] if len(options) == 1 else None,
+                "options": options,
+                "optionDiffs": option_diffs,
                 "switch": None,
                 "variant": None,
                 "params": None,
                 "label": label,
                 "confirmBack": confirm_back,
-                "evidence": evidence,
+                "evidence": options[0]["evidence"],
                 "status": "pending",
             })
     return proposals
@@ -379,6 +452,7 @@ def apply_proposal(
     workspace_id: Optional[str],
     who: str,
     at: str,
+    option_candidate_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Apply a CONFIRMED proposal; returns {"artifact", "change", ...}.
 
@@ -389,16 +463,41 @@ def apply_proposal(
     the candidate is materialised and approved — with the proposal's
     origin and evidence stamped onto the equation record.  The caller
     (the API) enforces the confirmation gate before calling this.
+
+    A filed-table CHOICE proposal additionally requires the chosen
+    option (``option_candidate_id``) unless it carries exactly one
+    option — the choice is the user's, never a default.
     """
 
     slot = SLOT_BY_ID[str(proposal["slot"])]
     mechanic = str(proposal["mechanic"])
 
-    if proposal["kind"] == PROPOSAL_KIND_FILED_TABLE:
+    if proposal["kind"] in {PROPOSAL_KIND_FILED_TABLE, PROPOSAL_KIND_FILED_TABLE_CHOICE}:
+        if proposal["kind"] == PROPOSAL_KIND_FILED_TABLE_CHOICE:
+            options = list(proposal.get("options") or [])
+            chosen = option_candidate_id or (
+                options[0]["candidateId"] if len(options) == 1 else None
+            )
+            if not chosen:
+                raise ValueError(
+                    "Choose which filed table to put in force before confirming"
+                )
+            option = next(
+                (item for item in options if item.get("candidateId") == chosen), None
+            )
+            if option is None:
+                raise ValueError("The chosen filed table is not one of the proposal's options")
+            candidate_id = str(chosen)
+            confirm_back = option.get("confirmBack") or proposal["confirmBack"]
+            evidence = option.get("evidence") or proposal["evidence"]
+        else:
+            candidate_id = str(proposal["candidateId"])
+            confirm_back = proposal["confirmBack"]
+            evidence = proposal["evidence"]
         accepted = accept_filed_mechanic(
             deepcopy(artifact or {}),
             mechanic,
-            candidate_id=str(proposal["candidateId"]),
+            candidate_id=candidate_id,
             reviewed_by=who,
         )
         result = _ws_equations.transcribe_tables_as_approved(
@@ -411,9 +510,9 @@ def apply_proposal(
             who=who,
             at=at,
             summary=(
-                f"Confirmed extraction proposal: {proposal['confirmBack']} "
-                f"(evidence: {proposal['evidence'].get('filename')}"
-                + (f", p. {proposal['evidence'].get('page')}" if proposal["evidence"].get("page") else "")
+                f"Confirmed extraction proposal: {confirm_back} "
+                f"(evidence: {evidence.get('filename')}"
+                + (f", p. {evidence.get('page')}" if evidence.get("page") else "")
                 + ")"
             ),
             prior=_summarize_rows(
@@ -422,7 +521,7 @@ def apply_proposal(
             new={
                 "status": (result.get("status") or {}).get(mechanic),
                 "proposalId": proposal["id"],
-                "candidateId": proposal["candidateId"],
+                "candidateId": candidate_id,
             },
         )
         change["proposalId"] = proposal["id"]

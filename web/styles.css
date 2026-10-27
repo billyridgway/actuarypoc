@@ -1889,3 +1889,69 @@ details > summary {
 .workbench__map .logic-graph {
   overflow-x: auto;
 }
+
+/* Unification revamp: assumption provenance, candidate choices,
+   collapsed slot details, and a print surface that prints one tab. */
+
+.assumption-tag {
+  border: 1px dashed #b45309;
+  border-radius: 999px;
+  background: #fffbeb;
+  color: #92400e;
+  font-size: 0.75rem;
+  padding: 0.1rem 0.55rem;
+  white-space: nowrap;
+}
+
+.choice-options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin: 0.5rem 0;
+}
+
+.choice-option {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-start;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.45rem 0.6rem;
+  cursor: pointer;
+}
+
+.choice-option:has(input:checked) {
+  border-color: var(--text-main);
+  background: #f8fafc;
+}
+
+.slot-details {
+  margin-top: 0.75rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.5rem;
+}
+
+.slot-details > summary {
+  cursor: pointer;
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+}
+
+@media print {
+  /* A printed run page shows the header and the ACTIVE tab only —
+     never all five tab surfaces interleaved (which also collided
+     the scenario form fields in the printout). */
+  .workbench__tabs,
+  .workbench__scenario,
+  .workbench__stale .button {
+    display: none !important;
+  }
+
+  .workbench__tabpanel[hidden] {
+    display: none !important;
+  }
+
+  .slot-details:not([open]) > *:not(summary) {
+    display: none !important;
+  }
+}

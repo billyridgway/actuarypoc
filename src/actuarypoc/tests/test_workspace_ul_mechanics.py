@@ -220,25 +220,43 @@ def test_accepts_only_selected_filed_candidate() -> None:
     assert accepted["candidates"]["coi"][0]["reviewStatus"] == "review_required"
     assert accepted["candidates"]["coi"][1]["reviewStatus"] == "accepted"
 
-    combined = accept_filed_mechanic(accepted, "coi", candidate_id="a")
-    assert len(combined["usable"]["coi"]) == 2
-    assert {row["tobacco_status"] for row in combined["usable"]["coi"]} == {"Tobacco", "Non-Tobacco"}
+    # Unification revamp: the two candidates file the SAME table
+    # (alternative specimens), so accepting the other one is a
+    # switch, not a union — it supersedes the first instead of
+    # stacking both into the in-force table.
+    switched = accept_filed_mechanic(accepted, "coi", candidate_id="a")
+    assert len(switched["usable"]["coi"]) == 1
+    assert switched["usable"]["coi"][0]["rate"] == 0.1
+    assert switched["usable"]["coi"][0]["tobacco_status"] == "Non-Tobacco"
+    assert switched["candidates"]["coi"][0]["reviewStatus"] == "accepted"
+    assert switched["candidates"]["coi"][1]["reviewStatus"] == "superseded"
 
 
 def test_rejects_conflicting_filed_candidates_for_same_selector() -> None:
-    def candidate(candidate_id: str, rate: float) -> dict:
+    # Candidates in DIFFERENT alternative groups (here: different
+    # fee component sets) are additive, so a genuine selector
+    # conflict between them still refuses rather than guessing.
+    def candidate(candidate_id: str, rows: list) -> dict:
         return {
-            "id": candidate_id, "mechanic": "coi", "reviewStatus": "review_required", "rows": [{
-                "duration": 1, "sex": "M", "risk_class": "Standard", "tobacco_status": "Tobacco",
-                "rate": rate, "rate_unit": "per_1000_monthly",
-                "provenance": {"sourceType": "filed_pdf", "reviewStatus": "review_required"},
-            }],
+            "id": candidate_id, "mechanic": "fees", "reviewStatus": "review_required",
+            "rows": rows,
         }
-    artifact = {"candidates": {"coi": [candidate("a", 0.1), candidate("b", 0.2)]}}
-    accepted = accept_filed_mechanic(artifact, "coi", candidate_id="a")
+
+    def fee_row(component: str, amount: float) -> dict:
+        return {
+            "component": component, "duration": 1, "premium_mode": None,
+            "amount": amount, "fee_unit": "monthly_fixed",
+            "provenance": {"sourceType": "filed_pdf", "reviewStatus": "review_required"},
+        }
+
+    artifact = {"candidates": {"fees": [
+        candidate("a", [fee_row("policy_fee", 5.0), fee_row("monthly_expense", 9.0)]),
+        candidate("b", [fee_row("monthly_expense", 12.0)]),
+    ]}}
+    accepted = accept_filed_mechanic(artifact, "fees", candidate_id="a")
 
     with pytest.raises(ValueError, match="conflict"):
-        accept_filed_mechanic(accepted, "coi", candidate_id="b")
+        accept_filed_mechanic(accepted, "fees", candidate_id="b")
 
 
 def test_pdf_extraction_does_not_promote_specimen_policyholder_inputs() -> None:
@@ -555,7 +573,13 @@ def test_projection_charges_nothing_for_unmatched_coi_selector() -> None:
     assert "COI table" in execution["failureReasons"]["1"]
     assert projection["incomplete"] is True
     missing = {m["mechanic"]: m for m in projection["missingMechanics"]}
-    assert missing["coi_charge"]["reason"] == "evaluation_failed"
+    # Unification revamp: the failure is named ONCE as a table
+    # coverage failure (the in-force table carries only sex "M"
+    # rows; the scenario is F), not a bare evaluation failure.
+    assert missing["coi_charge"]["reason"] == "table_coverage"
+    assert "sex" in missing["coi_charge"]["detail"]
+    assert projection["coverageIssues"]
+    assert projection["coverageIssues"][0]["mechanic"] == "coi"
 
 
 def test_engine_capabilities_do_not_depend_on_workspace_schedule_availability() -> None:

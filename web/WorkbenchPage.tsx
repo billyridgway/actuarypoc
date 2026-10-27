@@ -72,6 +72,14 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
   const [documents, setDocuments] = React.useState<any[]>([]);
   const [sources, setSources] = React.useState<any[]>([]);
   const [activeTab, setActiveTab] = React.useState<BenchTab>(initialTab ?? "ledger");
+  const [rerunning, setRerunning] = React.useState<boolean>(false);
+  // Unification revamp: one invalidation signal for every panel on
+  // the bench. Any mutation — from the mechanics panel, the
+  // equations panel, or a snapshot reload — bumps the epoch, and
+  // both panels refetch the same artifact store. No section can
+  // hold a stale generation of the approval truth again.
+  const [inputsEpoch, setInputsEpoch] = React.useState(0);
+  const bumpInputsEpoch = React.useCallback(() => setInputsEpoch((n) => n + 1), []);
   const ws = useProjectionWorkspace(data, workspaceId);
 
   const reload = React.useCallback(async () => {
@@ -83,10 +91,25 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
       setMeta(body?.workspace ?? null);
       setDocuments(Array.isArray(body?.documents) ? body.documents : []);
       setSources(Array.isArray(body?.sources) ? body.sources : []);
+      bumpInputsEpoch();
     } catch {
       /* keep the current bench state if a refresh fails */
     }
-  }, [workspaceId]);
+  }, [workspaceId, bumpInputsEpoch]);
+
+  const rerunAnalysis = async () => {
+    setRerunning(true);
+    try {
+      await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/analyze`, {
+        method: "POST",
+      });
+      await reload();
+    } catch {
+      /* the banner stays until a reload shows the new state */
+    } finally {
+      setRerunning(false);
+    }
+  };
 
   React.useEffect(() => {
     void reload();
@@ -114,6 +137,8 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
   const trust = trustLevelLabel(readiness.projectionTrustLevel ?? data?.projectionTrustLevel);
   const gapItems: any[] = Array.isArray(data?.gaps?.items) ? data.gaps.items : [];
   const inputsStale = Boolean(meta?.projectionStale);
+  const analysisTime =
+    meta?.analysisJob?.finishedAt || meta?.updatedAt || null;
 
   const scenarioOptions = (inputId: string): Array<{ value: string; label: string }> | null => {
     const node = (ws.projectionGraph?.nodes ?? []).find((n: any) => n.inputId === inputId);
@@ -173,16 +198,32 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
           <p className="workbench__state">
             <span className="basis-tag">{trust}</span>{" "}
             <span className="muted">
-              Filing review: {compliance.implemented ?? 0} implemented · {compliance.partial ?? 0} partial ·{" "}
+              {/* These counts are the ANALYSIS snapshot's coverage of
+                  the filing's requirements — frozen at the analysis
+                  run, not the current approval state (which lives on
+                  the Inputs & Equations tab). The label says so. */}
+              Filing review (from the analysis
+              {analysisTime ? ` finished ${analysisTime}` : ""}):{" "}
+              {compliance.implemented ?? 0} implemented · {compliance.partial ?? 0} partial ·{" "}
               {compliance.missing ?? 0} missing
               {gapItems.length > 0 ? ` · ${gapItems.length} open gap${gapItems.length === 1 ? "" : "s"}` : ""}
             </span>
           </p>
-          {(inputsStale || ws.dirty) && (
+          {inputsStale && (
+            <div className="workbench__stale" role="status">
+              <span>
+                Inputs changed since the last analysis — the saved projection may be
+                stale.{" "}
+              </span>
+              <button type="button" className="button" disabled={rerunning} onClick={() => void rerunAnalysis()}>
+                {rerunning ? "Re-running…" : "Re-run analysis"}
+              </button>{" "}
+              <span>or re-run the projection with the scenario below.</span>
+            </div>
+          )}
+          {!inputsStale && ws.dirty && (
             <p className="workbench__stale" role="status">
-              {inputsStale
-                ? "Inputs changed since the last analysis — the saved projection may be stale. Re-run analysis from the Inputs & Equations tab, or re-run the projection with the scenario below."
-                : "Scenario inputs changed — re-run the projection to update the ledger."}
+              Scenario inputs changed — re-run the projection to update the ledger.
             </p>
           )}
         </div>
@@ -270,10 +311,19 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
       {tabPanel("inputs", (
         <div className="workbench__grid">
           <div className="workbench__main">
-            <MechanicsPanel workspaceId={workspaceId} onSnapshotReload={reload} />
+            <MechanicsPanel
+              workspaceId={workspaceId}
+              onSnapshotReload={reload}
+              refreshKey={inputsEpoch}
+              hideStaleBanner
+            />
           </div>
           <aside className="workbench__side">
-            <EquationsPanel workspaceId={workspaceId} />
+            <EquationsPanel
+              workspaceId={workspaceId}
+              refreshKey={inputsEpoch}
+              onMutated={bumpInputsEpoch}
+            />
           </aside>
         </div>
       ))}

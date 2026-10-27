@@ -256,9 +256,9 @@ def test_suggest_variant_is_conservative() -> None:
 
 
 EXPECTED_CONFIRM_BACK = (
-    "Surrender charge: was $12.50 per $1,000 of face amount in year 1 over "
-    "20 years, as filed in filing.pdf (p. 3) (accepted); now 8% of account "
-    "value, grading to 0 over 10 years."
+    "Surrender charge: was $12.50 per $1,000 of face amount in year 1 — "
+    "20 rows covering durations 1–20 in force, as filed in filing.pdf "
+    "(p. 3) (accepted); now 8% of account value, grading to 0 over 10 years."
 )
 
 

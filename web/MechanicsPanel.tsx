@@ -37,10 +37,42 @@ interface SlotView {
     rowCount?: number | null;
     valueBasis?: string | null;
   }>;
+  /** Unification revamp: every filed candidate, as one choice. */
+  candidates?: CandidateView[];
+  coverageText?: string;
+  usedByLabels?: string[];
+  unusedByEquations?: boolean;
+  /** Crediting only: the value is a runtime-config assumption. */
+  sourceKind?: string;
+  sourceLabel?: string;
   editedInWorkspace?: boolean;
   lastEdit?: { at?: string | null; who?: string | null } | null;
   correction?: CorrectionView | null;
   correctionVariants?: CorrectionVariant[];
+}
+
+interface CandidateDiff {
+  identicalRows: number;
+  differingRows: number;
+  onlyInA: number;
+  onlyInB: number;
+  examples?: Array<Record<string, any>>;
+}
+
+interface CandidateView {
+  id?: string;
+  filename?: string | null;
+  page?: number | null;
+  tableHeading?: string | null;
+  rowCount?: number | null;
+  valueBasis?: string | null;
+  reviewStatus?: string | null;
+  inForce?: boolean;
+  coverageText?: string;
+  selectors?: Record<string, any[]>;
+  diffVsReference?: CandidateDiff | null;
+  referenceCandidateId?: string;
+  referenceInForce?: boolean;
 }
 
 interface ChangeRecord {
@@ -76,12 +108,41 @@ interface CorrectionVariant {
   equationMechanic?: string;
 }
 
+interface ProposalOption {
+  candidateId: string;
+  filename?: string | null;
+  page?: number | null;
+  tableHeading?: string | null;
+  rowCount?: number | null;
+  valueBasis?: string | null;
+  coverageText?: string;
+  selectors?: Record<string, any[]>;
+  confirmBack: string;
+  evidence?: {
+    filename?: string | null;
+    page?: number | null;
+    heading?: string | null;
+    snippet?: string | null;
+  } | null;
+}
+
 interface ProposalView {
   id: string;
-  kind: "filed_table" | "equation";
+  kind: "filed_table" | "filed_table_choice" | "equation";
   slot: string;
   label: string;
   confirmBack: string;
+  candidateId?: string | null;
+  options?: ProposalOption[];
+  optionDiffs?: Array<{
+    candidateId: string;
+    comparedTo: string;
+    identicalRows: number;
+    differingRows: number;
+    onlyInFirst: number;
+    onlyInOption: number;
+    examples?: Array<Record<string, any>>;
+  }>;
   equationMechanic?: string | null;
   rendering?: string | null;
   evidence?: {
@@ -212,6 +273,36 @@ const provenanceText = (slot: SlotView): string => {
   return parts.length > 0 ? parts.join("; ") : "—";
 };
 
+const SELECTOR_LABELS: Record<string, string> = {
+  sex: "sex",
+  risk_class: "risk class",
+  tobacco_status: "tobacco",
+  issue_age: "issue age",
+  premium_mode: "premium mode",
+  component: "component",
+};
+
+/** "tobacco Tobacco · risk class Standard" — what distinguishes a
+ *  filed candidate on a choice card without opening the table. */
+const selectorSummaryText = (selectors?: Record<string, any[]>): string => {
+  if (!selectors) return "";
+  const parts: string[] = [];
+  for (const [field, values] of Object.entries(selectors)) {
+    if (Array.isArray(values) && values.length > 0) {
+      parts.push(`${SELECTOR_LABELS[field] ?? field} ${values.join("/")}`);
+    }
+  }
+  return parts.join(" · ");
+};
+
+const candidateDiffText = (diff?: CandidateDiff | null): string => {
+  if (!diff) return "";
+  return (
+    `${diff.identicalRows} rows identical, ${diff.differingRows} rows differ in value, ` +
+    `${diff.onlyInA} rows only in the table in force, ${diff.onlyInB} rows only in this one`
+  );
+};
+
 const SlotRowsTable: React.FC<{ rows: Array<Record<string, any>> }> = ({ rows }) => {
   const present = new Set<string>();
   for (const row of rows) {
@@ -251,7 +342,16 @@ const SlotRowsTable: React.FC<{ rows: Array<Record<string, any>> }> = ({ rows })
 export const MechanicsPanel: React.FC<{
   workspaceId: string;
   onSnapshotReload?: () => void;
-}> = ({ workspaceId, onSnapshotReload }) => {
+  /** Unification revamp: bumped by the workbench whenever ANY panel
+   *  mutates workspace state, so every panel refetches the same
+   *  store and no two sections can hold different generations of
+   *  the truth. */
+  refreshKey?: number;
+  /** The workbench header carries the one stale-inputs banner; the
+   *  panel's own copy is suppressed there (it remains for the
+   *  standalone product page). */
+  hideStaleBanner?: boolean;
+}> = ({ workspaceId, onSnapshotReload, refreshKey, hideStaleBanner }) => {
   const [panel, setPanel] = React.useState<PanelPayload | null>(null);
   const [loading, setLoading] = React.useState<boolean>(true);
   const [error, setError] = React.useState<string | null>(null);
@@ -272,6 +372,10 @@ export const MechanicsPanel: React.FC<{
   // for proposal confirm/dismiss actions.
   const [corrBands, setCorrBands] = React.useState<Record<string, BandRow[]>>({});
   const [busyProposal, setBusyProposal] = React.useState<string | null>(null);
+  // Unification revamp: the chosen option of a filed-table choice
+  // proposal, and the chosen candidate on a slot card.
+  const [choiceSelection, setChoiceSelection] = React.useState<Record<string, string>>({});
+  const [candidateSelection, setCandidateSelection] = React.useState<Record<string, string>>({});
 
   const bandsFor = (slot: SlotView): BandRow[] => {
     const existing = corrBands[slot.id];
@@ -310,6 +414,16 @@ export const MechanicsPanel: React.FC<{
   React.useEffect(() => {
     void loadPanel();
   }, [loadPanel]);
+
+  // Refetch when the workbench signals that another panel changed
+  // the workspace (the mount-time load above is not skipped: the
+  // first refreshKey value is the one we mounted with).
+  const mountedRefreshKey = React.useRef(refreshKey);
+  React.useEffect(() => {
+    if (mountedRefreshKey.current === refreshKey) return;
+    mountedRefreshKey.current = refreshKey;
+    void loadPanel();
+  }, [refreshKey, loadPanel]);
 
   const runEdit = async (slotId: string, payload: Record<string, any>) => {
     setBusySlot(slotId);
@@ -546,7 +660,11 @@ export const MechanicsPanel: React.FC<{
   // Phase 4: extraction proposals. Confirming sends confirmed: true —
   // the server refuses anything less and returns the restated change;
   // dismissing persists so the proposal does not come back.
-  const postProposal = async (proposalId: string, action: "confirm" | "dismiss") => {
+  const postProposal = async (
+    proposalId: string,
+    action: "confirm" | "dismiss",
+    candidateId?: string,
+  ) => {
     setBusyProposal(proposalId);
     setMessage(null);
     setError(null);
@@ -556,7 +674,11 @@ export const MechanicsPanel: React.FC<{
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(action === "confirm" ? { confirmed: true } : {}),
+          body: JSON.stringify(
+            action === "confirm"
+              ? { confirmed: true, ...(candidateId ? { candidateId } : {}) }
+              : {},
+          ),
         },
       );
       const text = await resp.text();
@@ -621,7 +743,7 @@ export const MechanicsPanel: React.FC<{
       {loading && <p className="muted">Loading product inputs…</p>}
       {error && <p className="error">{error}</p>}
       {message && <p className="muted">{message}</p>}
-      {panel?.projectionStale && (
+      {panel?.projectionStale && !hideStaleBanner && (
         <div className="slot-stale-banner">
           <strong>Inputs changed since the last analysis.</strong>{" "}
           The saved projection may be stale (changed: {panel.projectionStaleSlots.map(slotLabel).join(", ")}).{" "}
@@ -638,7 +760,17 @@ export const MechanicsPanel: React.FC<{
             Nothing is applied until you confirm it — confirming restates the change below
             exactly as it will take effect.
           </p>
-          {(panel.proposals ?? []).map((proposal) => (
+          {(panel.proposals ?? []).map((proposal) => {
+            const isChoice = proposal.kind === "filed_table_choice";
+            const options = proposal.options ?? [];
+            const selectedId =
+              choiceSelection[proposal.id] ??
+              (options.length === 1 ? options[0].candidateId : undefined);
+            const selected = options.find((o) => o.candidateId === selectedId);
+            const selectedDiff = (proposal.optionDiffs ?? []).find(
+              (d) => d.candidateId === selectedId,
+            );
+            return (
             <div key={proposal.id} className="slot-candidate">
               <p>
                 <strong>{proposal.label}</strong>
@@ -649,19 +781,54 @@ export const MechanicsPanel: React.FC<{
               {proposal.kind === "equation" && proposal.rendering ? (
                 <p className="muted">Equation: {proposal.rendering}</p>
               ) : null}
-              {proposal.evidence && (
+              {!isChoice && proposal.evidence && (
                 <p className="muted">
                   Evidence: {proposal.evidence.filename || "the filing"}
                   {proposal.evidence.page != null ? `, p. ${proposal.evidence.page}` : ""}
                   {proposal.evidence.snippet ? <> — “{proposal.evidence.snippet}”</> : null}
                 </p>
               )}
-              <p className="muted">{proposal.confirmBack}</p>
+              {isChoice && (
+                <div className="choice-options" role="radiogroup" aria-label={proposal.label}>
+                  {options.map((option) => (
+                    <label key={option.candidateId} className="choice-option">
+                      <input
+                        type="radio"
+                        name={`choice-${proposal.id}`}
+                        checked={selectedId === option.candidateId}
+                        onChange={() =>
+                          setChoiceSelection((prev) => ({
+                            ...prev,
+                            [proposal.id]: option.candidateId,
+                          }))
+                        }
+                      />
+                      <span>
+                        <strong>{option.filename || "the filing"}</strong>
+                        {option.page != null ? ` (p. ${option.page})` : ""}
+                        {option.coverageText ? ` — ${option.coverageText}` : ""}
+                        {selectorSummaryText(option.selectors)
+                          ? ` · ${selectorSummaryText(option.selectors)}`
+                          : ""}
+                      </span>
+                    </label>
+                  ))}
+                  {selectedDiff && (
+                    <p className="muted">
+                      Compared with the first version: {selectedDiff.identicalRows} rows
+                      identical, {selectedDiff.differingRows} rows differ in value,{" "}
+                      {selectedDiff.onlyInFirst} rows only in the first,{" "}
+                      {selectedDiff.onlyInOption} rows only in this one.
+                    </p>
+                  )}
+                </div>
+              )}
+              <p className="muted">{selected ? selected.confirmBack : proposal.confirmBack}</p>
               <button
                 type="button"
                 className="button"
-                disabled={busyProposal === proposal.id}
-                onClick={() => void postProposal(proposal.id, "confirm")}
+                disabled={busyProposal === proposal.id || (isChoice && !selectedId)}
+                onClick={() => void postProposal(proposal.id, "confirm", selectedId)}
               >
                 Confirm and apply
               </button>{" "}
@@ -674,7 +841,8 @@ export const MechanicsPanel: React.FC<{
                 Dismiss
               </button>
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
       {panel?.equations && (
@@ -735,6 +903,11 @@ export const MechanicsPanel: React.FC<{
           </h3>
           <p className="muted">
             <strong>Source:</strong> {provenanceText(slot)}
+            {slot.kind === "table" && slot.coverageText && (
+              <>
+                {" "}· <strong>In force:</strong> {slot.coverageText}
+              </>
+            )}
             {slot.lastEdit?.at && (
               <>
                 {" "}· <strong>Last edit:</strong> {slot.lastEdit.at}
@@ -742,11 +915,16 @@ export const MechanicsPanel: React.FC<{
               </>
             )}
           </p>
-          {slot.kind === "table" && slot.rows && slot.rows.length > 0 && (
-            <SlotRowsTable rows={slot.rows} />
-          )}
-          {slot.kind === "table" && (!slot.rows || slot.rows.length === 0) && (
-            <p className="muted">No table in force for this slot.</p>
+          {slot.kind !== "display" && (slot.rows?.length ?? 0) > 0 && (
+            <p className="muted">
+              {slot.unusedByEquations ? (
+                <span className="basis-tag">Not used by any approved equation</span>
+              ) : (slot.usedByLabels ?? []).length > 0 ? (
+                <>Read by: {(slot.usedByLabels ?? []).join(", ")}</>
+              ) : (
+                <>No approved equation reads this table yet.</>
+              )}
+            </p>
           )}
           {slot.kind === "scalar" && (
             <p className="muted">
@@ -757,28 +935,100 @@ export const MechanicsPanel: React.FC<{
             <p className="muted">
               <strong>Guaranteed credited rate:</strong>{" "}
               {slot.value != null ? `${(Number(slot.value) * 100).toFixed(2)}%` : "not configured"}
-              {" "}— set by the product's assumptions, shown here for completeness.
+              {slot.sourceKind === "assumption" ? (
+                <>
+                  {" "}<span className="assumption-tag">Assumption</span>{" "}
+                  {slot.sourceLabel ??
+                    "Set in the product's runtime configuration; not read from the filing."}
+                </>
+              ) : (
+                <> — set by the product's assumptions, shown here for completeness.</>
+              )}
             </p>
           )}
-          {(slot.pendingCandidates ?? []).map((candidate) => (
-            <div key={candidate.id || `${candidate.filename}-${candidate.page}`} className="slot-candidate">
+          {(slot.candidates ?? []).length > 0 && (
+            <div className="slot-candidate">
               <p className="muted">
-                Filed table awaiting review: {candidate.tableHeading || "table"}
-                {candidate.filename ? ` — ${candidate.filename}` : ""}
-                {candidate.page != null ? ` (p. ${candidate.page})` : ""}
-                {candidate.rowCount != null ? `, ${candidate.rowCount} rows` : ""}. Accepting puts the
-                filed values in force.
+                <strong>Filed versions of this table</strong> — one choice: the version
+                in force is the one the projection reads. Choosing another replaces it
+                (the replaced version stays on record as superseded).
               </p>
-              <button
-                type="button"
-                className="button button-secondary"
-                disabled={busySlot === slot.id}
-                onClick={() => void handleAcceptCandidate(slot, candidate.id)}
-              >
-                Accept filed table
-              </button>
+              <div className="choice-options" role="radiogroup" aria-label={`Filed versions — ${slot.label}`}>
+                {(slot.candidates ?? []).map((candidate) => {
+                  const selectedId =
+                    candidateSelection[slot.id] ??
+                    (slot.candidates ?? []).find((c) => c.inForce)?.id;
+                  return (
+                    <label
+                      key={candidate.id || `${candidate.filename}-${candidate.page}`}
+                      className="choice-option"
+                    >
+                      <input
+                        type="radio"
+                        name={`candidates-${slot.id}`}
+                        checked={selectedId === candidate.id}
+                        onChange={() =>
+                          setCandidateSelection((prev) => ({
+                            ...prev,
+                            [slot.id]: candidate.id ?? "",
+                          }))
+                        }
+                      />
+                      <span>
+                        <strong>{candidate.filename || "the filing"}</strong>
+                        {candidate.page != null ? ` (p. ${candidate.page})` : ""}
+                        {candidate.coverageText ? ` — ${candidate.coverageText}` : ""}
+                        {selectorSummaryText(candidate.selectors)
+                          ? ` · ${selectorSummaryText(candidate.selectors)}`
+                          : ""}{" "}
+                        {candidate.inForce ? (
+                          <span className="basis-tag">In force</span>
+                        ) : candidate.reviewStatus === "superseded" ? (
+                          <span className="basis-tag">Superseded</span>
+                        ) : (
+                          <span className="basis-tag">Awaiting review</span>
+                        )}
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+              {(() => {
+                const selectedId =
+                  candidateSelection[slot.id] ??
+                  (slot.candidates ?? []).find((c) => c.inForce)?.id;
+                const selected = (slot.candidates ?? []).find((c) => c.id === selectedId);
+                return (
+                  <>
+                    {selected?.diffVsReference && (
+                      <p className="muted">
+                        Compared with the version in force:{" "}
+                        {candidateDiffText(selected.diffVsReference)}.
+                      </p>
+                    )}
+                    <button
+                      type="button"
+                      className="button button-secondary"
+                      disabled={busySlot === slot.id || !selected || selected.inForce}
+                      onClick={() => void handleAcceptCandidate(slot, selected?.id)}
+                    >
+                      {selected?.reviewStatus === "superseded"
+                        ? "Put this version back in force"
+                        : "Put the selected version in force"}
+                    </button>
+                  </>
+                );
+              })()}
             </div>
-          ))}
+          )}
+          <details className="slot-details">
+            <summary>Details — rows, replace, correct</summary>
+          {slot.kind === "table" && slot.rows && slot.rows.length > 0 && (
+            <SlotRowsTable rows={slot.rows} />
+          )}
+          {slot.kind === "table" && (!slot.rows || slot.rows.length === 0) && (
+            <p className="muted">No table in force for this slot.</p>
+          )}
           {slot.editable && slot.kind === "table" && (
             <div className="slot-edit">
               <label className="button button-secondary">
@@ -1188,6 +1438,7 @@ export const MechanicsPanel: React.FC<{
               </div>
             )}
           </div>
+          </details>
         </div>
       ))}
       {panel && panel.correctionRequests.length > 0 && (

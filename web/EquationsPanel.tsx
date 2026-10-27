@@ -530,7 +530,20 @@ const TablesOverview: React.FC<{
   );
 };
 
-export const EquationsPanel: React.FC<{ workspaceId: string }> = ({ workspaceId }) => {
+export const EquationsPanel: React.FC<{
+  workspaceId: string;
+  /** Unification revamp: bumped by the workbench whenever ANY panel
+   *  mutates workspace state.  This panel used to fetch exactly once
+   *  on mount — which is how a printed run page came to claim all
+   *  seven equations missing hours after they were approved in the
+   *  panel beside it.  Now it refetches on the same signal as
+   *  every other panel, so the page holds one generation of the
+   *  truth. */
+  refreshKey?: number;
+  /** Called after this panel's own actions change workspace state,
+   *  so sibling panels refetch too. */
+  onMutated?: () => void;
+}> = ({ workspaceId, refreshKey, onMutated }) => {
   const [payload, setPayload] = React.useState<EquationsPayload | null>(null);
   const [loadState, setLoadState] = React.useState<"loading" | "ready" | "unavailable">("loading");
   const [error, setError] = React.useState<string | null>(null);
@@ -579,6 +592,13 @@ export const EquationsPanel: React.FC<{ workspaceId: string }> = ({ workspaceId 
     void load();
   }, [load]);
 
+  const mountedRefreshKey = React.useRef(refreshKey);
+  React.useEffect(() => {
+    if (mountedRefreshKey.current === refreshKey) return;
+    mountedRefreshKey.current = refreshKey;
+    void load();
+  }, [refreshKey, load]);
+
   const requestJson = async (url: string, init?: RequestInit): Promise<any> => {
     const resp = await fetch(url, init);
     const data = await resp.json().catch(() => null);
@@ -595,6 +615,7 @@ export const EquationsPanel: React.FC<{ workspaceId: string }> = ({ workspaceId 
       setConfirmingId(null);
       closeEditor();
       await load();
+      onMutated?.();
     } catch (err: any) {
       setError(err?.message || "The equation action failed.");
     } finally {
@@ -649,6 +670,7 @@ export const EquationsPanel: React.FC<{ workspaceId: string }> = ({ workspaceId 
         const created = Number(data?.harvest?.createdCount ?? 0);
         if (data?.mechanics) applyPayload(data);
         else await load();
+        onMutated?.();
         setMessage(
           created > 0
             ? `Harvesting proposed ${created} new equation${created === 1 ? "" : "s"} from the documents — each is waiting below for approval. Nothing runs until it is approved.`

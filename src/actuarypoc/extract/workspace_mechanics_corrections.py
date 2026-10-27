@@ -62,6 +62,10 @@ from actuarypoc.extract.workspace_mechanics_panel import (
     _slot_status,
     _summarize_rows,
 )
+from actuarypoc.extract.workspace_ul_mechanics import (
+    dedupe_rows as _dedupe_rows,
+    rows_coverage_text,
+)
 
 
 CORRECTION_SOURCE_TYPE = "correction"
@@ -182,30 +186,35 @@ def _source_phrase(provenance: Dict[str, Any]) -> str:
 
 
 def _describe_rows(mechanic: str, rows: List[Dict[str, Any]]) -> str:
-    """Plain-language description of the rows currently in force."""
+    """Plain-language description of the rows currently in force.
+
+    Counts say what they count (unification revamp): the row count
+    and the duration coverage are stated as rows and durations —
+    never summed as "years", which once described a 242-row table
+    (one 121-row table filed by two documents) as "242 years".
+    """
 
     if not rows:
         return ""
     first = rows[0]
     provenance = first.get("provenance") or {}
     phrase = _source_phrase(provenance)
-    count = len(rows)
-    span = f" over {count} year" + ("s" if count != 1 else "")
+    coverage = rows_coverage_text(rows)
     if mechanic == "surrender":
         unit = str(first.get("charge_unit") or "")
         charge = float(first.get("charge") or 0.0)
         if unit == "per_1000_face":
-            return f"{_money(charge)} per $1,000 of face amount in year 1{span}, {phrase}"
+            return f"{_money(charge)} per $1,000 of face amount in year 1 — {coverage} in force, {phrase}"
         if unit == "percent_account_value":
-            return f"{_pct(charge)} of account value in year 1{span}, {phrase}"
+            return f"{_pct(charge)} of account value in year 1 — {coverage} in force, {phrase}"
         if unit == "percent_face":
-            return f"{_pct(charge)} of face amount in year 1{span}, {phrase}"
+            return f"{_pct(charge)} of face amount in year 1 — {coverage} in force, {phrase}"
         if unit == "fixed":
-            return f"a flat {_money(charge)} in year 1{span}, {phrase}"
-        return f"a schedule in force{span}, {phrase}"
+            return f"a flat {_money(charge)} in year 1 — {coverage} in force, {phrase}"
+        return f"a schedule in force ({coverage}), {phrase}"
     if mechanic == "nar_factors":
         return f"a NAR factor of {first.get('factor')}, {phrase}"
-    return f"values in force{span}, {phrase}"
+    return f"values in force ({coverage}), {phrase}"
 
 
 def describe_current(artifact: Dict[str, Any], slot: Dict[str, Any]) -> Dict[str, Any]:
@@ -704,10 +713,17 @@ def executable_mechanics_view(artifact: Dict[str, Any]) -> Dict[str, Any]:
 
     The artifact's ``usable`` tables plus the approved equations in
     force under ``_equations``, so the projection loop calculates
-    exactly what the panel shows approved.
+    exactly what the panel shows approved.  Identical rows (same
+    selector, same value — the same table filed by two documents)
+    are collapsed here, at the single read path every projection
+    consumes, so a stored union can never double-count a row; the
+    stored artifact itself is not rewritten.
     """
 
     usable = deepcopy((artifact or {}).get("usable") or {})
+    for mechanic in ("coi", "surrender", "fees", "nar_factors", "corridor"):
+        if isinstance(usable.get(mechanic), list):
+            usable[mechanic] = _dedupe_rows(usable[mechanic], mechanic)
     settings = executable_settings(artifact or {})
     if settings:
         usable["_settings"] = settings

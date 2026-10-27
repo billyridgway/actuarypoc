@@ -1087,6 +1087,7 @@ def _build_ul_projection_view(
             "sampleRows": sample_rows,
             "modelStatus": "diagnostic",
             "mechanicsExecution": projection.get("mechanicsExecution") or {},
+            "coverageIssues": projection.get("coverageIssues") or [],
             "appliedEquations": projection.get("appliedEquations") or [],
             "incomplete": bool(projection.get("incomplete")),
             "missingMechanics": projection.get("missingMechanics") or [],
@@ -1134,6 +1135,13 @@ def _build_ul_projection_view(
                 why = (
                     f"The approved {label} equation could not be evaluated "
                     f"({missing.get('detail') or 'evaluation failed'}), so the mechanic "
+                    "contributed nothing to this projection."
+                )
+            elif missing.get("reason") == "table_coverage":
+                why = (
+                    f"The approved {label} equation is in force, but the table "
+                    f"it reads cannot serve this scenario "
+                    f"({missing.get('detail') or 'table coverage'}), so the mechanic "
                     "contributed nothing to this projection."
                 )
             else:
@@ -2947,10 +2955,75 @@ class WorkspaceProjectionRequest(BaseModel):  # type: ignore[misc]
     allowSelectorFallback: bool = False
 
 
+def _year_range_text(years: List[int]) -> str:
+    """Compact year list: contiguous runs collapse to "a–b"."""
+
+    if not years:
+        return ""
+    ordered = sorted(set(years))
+    parts: List[str] = []
+    start = prev = ordered[0]
+    for year in ordered[1:]:
+        if year == prev + 1:
+            prev = year
+            continue
+        parts.append(str(start) if start == prev else f"{start}–{prev}")
+        start = prev = year
+    parts.append(str(start) if start == prev else f"{start}–{prev}")
+    return ", ".join(parts)
+
+
+def _collapse_failure_reasons(
+    year_reasons: Dict[int, str]
+) -> List[Dict[str, Any]]:
+    """Collapse per-year failure reasons into one entry per failure.
+
+    A run whose COI lookup fails in all 30 years states the failure
+    ONCE, with its year range, instead of repeating the same sentence
+    per year (unification revamp).  Reasons are grouped by their
+    template — the evaluator's messages embed the year-specific
+    duration / attained age ("no COI table row applies at duration
+    7, attained age 51"), so digits are masked for grouping; the
+    entry keeps the first year's concrete wording.
+    """
+
+    groups: Dict[str, Dict[str, Any]] = {}
+    for year in sorted(year_reasons):
+        reason = year_reasons[year]
+        template = re.sub(r"\d+(?:\.\d+)?", "#", reason)
+        group = groups.setdefault(
+            template, {"reason": reason, "years": []}
+        )
+        group["years"].append(year)
+    return [
+        {
+            "reason": group["reason"],
+            "years": group["years"],
+            "yearRange": _year_range_text(group["years"]),
+        }
+        for group in groups.values()
+    ]
+
+
 def _selector_match_issues(
     executable: Dict[str, Any], request: Dict[str, Any], horizon_years: int = 30,
 ) -> List[Dict[str, Any]]:
-    """Find accepted selector-specific schedules that cannot serve the scenario."""
+    """Find in-force filed schedules that cannot serve the scenario.
+
+    Generalized by the unification revamp from {COI, monthly-expense
+    fees} to every filed table an approved equation can read — COI,
+    surrender, corridor, and each fee component separately.  The
+    semantics are the evaluator's own: a row-side null selector is a
+    wildcard ("applies to all"), but a scenario-side null is NOT —
+    a table carrying only Tobacco rows cannot price an unspecified
+    scenario, and this check names that up front, with the missing
+    selectors and the table's own values, instead of letting the run
+    fail year by year.  The check is about the scenario's KEYS (its
+    underwriting class): a schedule that merely ends early (a
+    surrender charge grading to zero, a short COI table) is not a
+    coverage blocker — those years are the run's own per-year
+    business, collapsed in its failure summary.
+    """
 
     scenario = {
         "sex": request.get("sex"),
@@ -2965,43 +3038,85 @@ def _selector_match_issues(
             actual is not None and str(expected).strip().lower() == str(actual).strip().lower()
         )
 
-    schedules = {
-        "coi": list(executable.get("coi") or []),
-        "monthly_expense": [
-            row for row in (executable.get("fees") or [])
-            if row.get("component") == "monthly_expense"
-        ],
+    schedules: List[Tuple[str, str, List[Dict[str, Any]]]] = [
+        ("coi", "coi", list(executable.get("coi") or [])),
+        ("surrender", "surrender", list(executable.get("surrender") or [])),
+        ("corridor", "corridor", list(executable.get("corridor") or [])),
+    ]
+    fees_by_component: Dict[str, List[Dict[str, Any]]] = {}
+    for row in executable.get("fees") or []:
+        fees_by_component.setdefault(str(row.get("component") or "policy_fee"), []).append(row)
+    for component, rows in fees_by_component.items():
+        schedules.append((component, "fees", rows))
+
+    labels = {
+        "coi": "COI",
+        "surrender": "surrender",
+        "corridor": "corridor / minimum death benefit",
+    }
+    field_labels = {
+        "sex": "sex", "risk_class": "risk class", "tobacco_status": "tobacco status",
     }
     issues: List[Dict[str, Any]] = []
-    for mechanic, rows in schedules.items():
+    for mechanic, table, rows in schedules:
+        if not rows:
+            continue
         selector_specific = any(
             row.get(field) not in {None, "", "ANY", "All"}
             for row in rows for field in scenario
         )
-        if not rows or not selector_specific:
+        if not selector_specific:
             continue
-        unavailable_years = []
-        for year in range(1, horizon_years + 1):
-            attained_age = int(request.get("age") or 45) + year - 1
-            matching = [
-                row for row in rows
-                if row.get("duration") in {None, year}
-                and row.get("attained_age") in {None, attained_age}
-                and all(matches(row, field) for field in scenario)
-            ]
-            if not matching:
-                unavailable_years.append(year)
-        if unavailable_years:
-            issues.append({
-                "mechanic": mechanic,
-                "years": unavailable_years,
-                "scenario": scenario,
-                "message": (
-                    f"No accepted {mechanic.replace('_', ' ')} rows match "
-                    f"sex={scenario['sex']}, risk class={scenario['risk_class']}, "
-                    f"tobacco status={scenario['tobacco_status']}."
-                ),
-            })
+        matching = [
+            row for row in rows
+            if all(matches(row, field) for field in scenario)
+        ]
+        if matching:
+            continue
+        # No row serves this scenario's underwriting class at all:
+        # the class is unserved in every year of the horizon.
+        unavailable_years = list(range(1, horizon_years + 1))
+        table_selectors = {
+            field: sorted(
+                {str(row.get(field)) for row in rows if row.get(field) not in {None, "", "ANY", "All"}},
+                key=str.lower,
+            )
+            for field in scenario
+        }
+        table_selectors = {field: values for field, values in table_selectors.items() if values}
+        missing_selectors = [
+            field for field in scenario
+            if scenario[field] is None and field in table_selectors
+        ]
+        label = labels.get(mechanic) or f"fees ({mechanic.replace('_', ' ')})"
+        if missing_selectors:
+            carried = ", ".join(
+                f"{field_labels[field]} "
+                + "/".join(f"“{value}”" for value in table_selectors[field])
+                for field in table_selectors
+            )
+            message = (
+                f"The in-force {label} table only carries rows for {carried}, "
+                f"but this scenario does not specify "
+                + ", ".join(field_labels[field] for field in missing_selectors)
+                + " — no row can be selected."
+            )
+        else:
+            message = (
+                f"No accepted {label} rows match "
+                f"sex={scenario['sex']}, risk class={scenario['risk_class']}, "
+                f"tobacco status={scenario['tobacco_status']}."
+            )
+        issues.append({
+            "mechanic": mechanic,
+            "table": table,
+            "years": unavailable_years,
+            "yearRange": _year_range_text(unavailable_years),
+            "scenario": scenario,
+            "tableSelectors": table_selectors,
+            "missingSelectors": missing_selectors,
+            "message": message,
+        })
     return issues
 
 
@@ -3316,6 +3431,26 @@ def api_get_mechanics_panel(workspace_id: str) -> Dict[str, Any]:
     # per mechanic and anything pending, conflicting, or missing.
     panel["proposals"] = _workspace_proposals(workspace_id, artifact)
     panel["equations"] = _workspace_equations.equations_view(artifact)
+    # Unification revamp: each table slot also states who reads it —
+    # the used-by half of the equation<->table linkage — so an
+    # orphaned table (e.g. the NAR factor table after its equation
+    # was replaced by the plain definition) says so on its own card.
+    linkage_by_table = {
+        str(table.get("table")): table
+        for table in _workspace_linkage.tables_linkage(artifact)
+    }
+    for slot_view in panel.get("slots") or []:
+        table_key = slot_view.get("mechanic")
+        if not table_key:
+            continue
+        link = linkage_by_table.get(str(table_key))
+        if link is None:
+            continue
+        slot_view["usedByEquations"] = list(link.get("usedBy") or [])
+        slot_view["usedByLabels"] = [
+            _equations.MECHANIC_LABELS.get(m, m) for m in link.get("usedBy") or []
+        ]
+        slot_view["unusedByEquations"] = bool(link.get("unused"))
     panel["workspaceId"] = workspace_id
     return panel
 
@@ -3441,6 +3576,8 @@ class MechanicsCorrectionRequest(BaseModel):  # type: ignore[misc]
 class ProposalActionRequest(BaseModel):  # type: ignore[misc]
     confirmed: bool = False
     who: Optional[str] = None
+    # For a filed-table CHOICE proposal: the candidate the user picked.
+    candidateId: Optional[str] = None
 
 
 def _correction_spec(payload: MechanicsCorrectionRequest) -> Dict[str, Any]:
@@ -3707,7 +3844,8 @@ def api_confirm_mechanics_proposal(
     at = _correction_now()
     try:
         outcome = _apply_proposal(
-            artifact, proposal, workspace_id=workspace_id, who=who, at=at
+            artifact, proposal, workspace_id=workspace_id, who=who, at=at,
+            option_candidate_id=payload.candidateId,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -12739,6 +12877,26 @@ def _run_ul_projection(
         final_surrender = last.get("surrenderValue") if isinstance(last.get("surrenderValue"), (int, float)) else None
         final_nar = last.get("netAmountAtRisk") if isinstance(last.get("netAmountAtRisk"), (int, float)) else None
 
+    # Pre-run coverage (unification revamp): before the summary is
+    # stated, check the in-force tables against this scenario's keys
+    # on EVERY path (the HTTP projection endpoint gates on the same
+    # helper; the analyze / rebuild paths previously had no gate and
+    # no naming, so a selector-less scenario failed one year at a
+    # time, 30 times, with no cause named).
+    coverage_issues = _selector_match_issues(executable, request, horizon_years)
+    coverage_by_mechanic: Dict[str, List[Dict[str, Any]]] = {}
+    _coverage_tables = {
+        "coi_charge": {"coi"},
+        "surrender_charge": {"surrender"},
+        "death_benefit": {"corridor"},
+        "policy_fees": {"fees"},
+        "premium_load": {"fees"},
+    }
+    for issue in coverage_issues:
+        for mechanic_name, tables_read in _coverage_tables.items():
+            if issue.get("table") in tables_read:
+                coverage_by_mechanic.setdefault(mechanic_name, []).append(issue)
+
     # Incompleteness (the doctrine's absence statement): a mechanic
     # with no approved equation, or one whose equation failed in any
     # year, did not calculate — the run says so, naming each one.
@@ -12747,6 +12905,7 @@ def _run_ul_projection(
     for mechanic in _equations.MECHANICS:
         failed_years = sorted(failures.get(mechanic, {}))
         in_force = mechanic in equations_in_force
+        failure_summary = _collapse_failure_reasons(failures.get(mechanic, {}))
         mechanics_execution[mechanic] = {
             "applied": in_force,
             "equationId": (
@@ -12757,6 +12916,7 @@ def _run_ul_projection(
             "failureReasons": {
                 str(y): failures[mechanic][y] for y in failed_years
             },
+            "failureSummary": failure_summary,
         }
         if not in_force:
             missing_mechanics.append({
@@ -12768,15 +12928,27 @@ def _run_ul_projection(
                     "equation is in force, so it is not calculated."
                 ),
             })
+        elif failed_years and coverage_by_mechanic.get(mechanic):
+            issue = coverage_by_mechanic[mechanic][0]
+            missing_mechanics.append({
+                "mechanic": mechanic,
+                "label": _equations.MECHANIC_LABELS[mechanic],
+                "reason": "table_coverage",
+                "detail": (
+                    f"{issue['message']} "
+                    f"(Policy years {issue['yearRange']}.)"
+                ),
+            })
         elif failed_years:
             missing_mechanics.append({
                 "mechanic": mechanic,
                 "label": _equations.MECHANIC_LABELS[mechanic],
                 "reason": "evaluation_failed",
-                "detail": (
+                "detail": "; ".join(
                     f"The approved {_equations.MECHANIC_LABELS[mechanic].lower()} "
-                    f"equation could not be evaluated in year "
-                    f"{failed_years[0]}: {failures[mechanic][failed_years[0]]}"
+                    f"equation could not be evaluated in years "
+                    f"{group['yearRange']}: {group['reason']}"
+                    for group in failure_summary
                 ),
             })
 
@@ -12793,6 +12965,7 @@ def _run_ul_projection(
             "finalNetAmountAtRisk": final_nar,
         },
         "mechanicsExecution": mechanics_execution,
+        "coverageIssues": coverage_issues,
         "incomplete": bool(missing_mechanics),
         "missingMechanics": missing_mechanics,
         "appliedEquations": [
