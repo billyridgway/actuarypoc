@@ -1,0 +1,382 @@
+{
+ "coi_charge": {
+  "math": {
+   "t": "mul",
+   "items": [
+    {
+     "t": "div",
+     "num": {
+      "t": "qty",
+      "v": "nar",
+      "label": "net amount at risk"
+     },
+     "den": {
+      "t": "num",
+      "v": "1000"
+     }
+    },
+    {
+     "t": "lookup",
+     "name": "COI rate",
+     "args": [
+      "duration",
+      "attained age"
+     ],
+     "where": []
+    }
+   ]
+  },
+  "rendering": "the net amount at risk / 1000 \u00d7 the COI table rate for this duration and attained age The COI charge is deducted at the beginning of each month, before interest is credited.",
+  "timingNote": "The COI charge is deducted at the beginning of each month, before interest is credited."
+ },
+ "surrender_charge": {
+  "math": {
+   "t": "mul",
+   "items": [
+    {
+     "t": "div",
+     "num": {
+      "t": "qty",
+      "v": "face_amount",
+      "label": "face amount"
+     },
+     "den": {
+      "t": "num",
+      "v": "1000"
+     }
+    },
+    {
+     "t": "lookup",
+     "name": "surrender charge",
+     "args": [
+      "duration",
+      "attained age"
+     ],
+     "where": [],
+     "default": {
+      "t": "num",
+      "v": "0"
+     }
+    }
+   ]
+  },
+  "rendering": "the face amount / 1000 \u00d7 the surrender schedule charge for this duration and attained age (or 0 if no row applies)",
+  "timingNote": null
+ },
+ "premium_load": {
+  "math": {
+   "t": "mul",
+   "items": [
+    {
+     "t": "qty",
+     "v": "premium_due",
+     "label": "premium due this month"
+    },
+    {
+     "t": "lookup",
+     "name": "fee amount",
+     "args": [
+      "duration",
+      "attained age"
+     ],
+     "where": [
+      {
+       "field": "fee unit",
+       "value": "percent_premium"
+      }
+     ],
+     "default": {
+      "t": "num",
+      "v": "0"
+     }
+    }
+   ]
+  },
+  "rendering": "the premium due this month \u00d7 the fee schedule amount for this duration and attained age (fee unit: percent_premium) (or 0 if no row applies)",
+  "timingNote": null
+ },
+ "policy_fees": {
+  "math": {
+   "t": "rows_sum",
+   "tableLabel": "fee schedule",
+   "expr": {
+    "t": "cases",
+    "rows": [
+     {
+      "value": {
+       "t": "div",
+       "num": {
+        "t": "qty",
+        "v": "row_amount",
+        "label": "row amount"
+       },
+       "den": {
+        "t": "num",
+        "v": "12"
+       }
+      },
+      "when": {
+       "t": "cmp",
+       "op": "=",
+       "a": {
+        "t": "qty",
+        "v": "row_unit",
+        "label": "row unit"
+       },
+       "b": {
+        "t": "str",
+        "v": "annual_fixed"
+       }
+      }
+     },
+     {
+      "value": {
+       "t": "cases",
+       "rows": [
+        {
+         "value": {
+          "t": "div",
+          "num": {
+           "t": "mul",
+           "items": [
+            {
+             "t": "div",
+             "num": {
+              "t": "qty",
+              "v": "face_amount",
+              "label": "face amount"
+             },
+             "den": {
+              "t": "num",
+              "v": "1000"
+             }
+            },
+            {
+             "t": "qty",
+             "v": "row_amount",
+             "label": "row amount"
+            }
+           ]
+          },
+          "den": {
+           "t": "num",
+           "v": "12"
+          }
+         },
+         "when": {
+          "t": "cmp",
+          "op": "=",
+          "a": {
+           "t": "qty",
+           "v": "row_unit",
+           "label": "row unit"
+          },
+          "b": {
+           "t": "str",
+           "v": "per_1000_face_annual"
+          }
+         }
+        },
+        {
+         "value": {
+          "t": "cases",
+          "rows": [
+           {
+            "value": {
+             "t": "mul",
+             "items": [
+              {
+               "t": "qty",
+               "v": "row_amount",
+               "label": "row amount"
+              },
+              {
+               "t": "qty",
+               "v": "payment_due",
+               "label": "premium due this month (0 or 1)"
+              }
+             ]
+            },
+            "when": {
+             "t": "cmp",
+             "op": "=",
+             "a": {
+              "t": "qty",
+              "v": "row_unit",
+              "label": "row unit"
+             },
+             "b": {
+              "t": "str",
+              "v": "modal_fixed"
+             }
+            }
+           },
+           {
+            "value": {
+             "t": "qty",
+             "v": "row_amount",
+             "label": "row amount"
+            },
+            "when": {
+             "t": "text",
+             "v": "otherwise"
+            }
+           }
+          ]
+         },
+         "when": {
+          "t": "text",
+          "v": "otherwise"
+         }
+        }
+       ]
+      },
+      "when": {
+       "t": "text",
+       "v": "otherwise"
+      }
+     }
+    ]
+   },
+   "notes": [
+    "excluding rows with fee unit = percent_premium"
+   ]
+  },
+  "rendering": "the sum over the fee schedule rows in force of (if the row unit = \"annual_fixed\", then the row amount / 12; otherwise if the row unit = \"per_1000_face_annual\", then the face amount / 1000 \u00d7 the row amount / 12; otherwise if the row unit = \"modal_fixed\", then the row amount \u00d7 whether a premium is due this month; otherwise the row amount) excluding rows matching (fee unit: percent_premium)",
+  "timingNote": null
+ },
+ "crediting": {
+  "math": {
+   "t": "mul",
+   "items": [
+    {
+     "t": "qty",
+     "v": "account_value",
+     "label": "account value"
+    },
+    {
+     "t": "paren",
+     "x": {
+      "t": "sub",
+      "a": {
+       "t": "pow",
+       "base": {
+        "t": "paren",
+        "x": {
+         "t": "add",
+         "items": [
+          {
+           "t": "num",
+           "v": "1"
+          },
+          {
+           "t": "qty",
+           "v": "guaranteed_rate",
+           "label": "guaranteed annual rate"
+          }
+         ]
+        }
+       },
+       "exp": {
+        "t": "div",
+        "num": {
+         "t": "num",
+         "v": "1"
+        },
+        "den": {
+         "t": "num",
+         "v": "12"
+        }
+       }
+      },
+      "b": {
+       "t": "num",
+       "v": "1"
+      }
+     }
+    }
+   ]
+  },
+  "rendering": "the account value \u00d7 ((1 + the guaranteed annual rate) ^ (1 / 12) \u2212 1)",
+  "timingNote": null
+ },
+ "nar_definition": {
+  "math": {
+   "t": "max",
+   "items": [
+    {
+     "t": "sub",
+     "a": {
+      "t": "div",
+      "num": {
+       "t": "qty",
+       "v": "death_benefit",
+       "label": "death benefit"
+      },
+      "den": {
+       "t": "lookup",
+       "name": "NAR factor",
+       "args": [
+        "duration",
+        "attained age"
+       ],
+       "where": [],
+       "default": {
+        "t": "num",
+        "v": "1"
+       }
+      }
+     },
+     "b": {
+      "t": "qty",
+      "v": "account_value",
+      "label": "account value"
+     }
+    },
+    {
+     "t": "num",
+     "v": "0"
+    }
+   ]
+  },
+  "rendering": "the greater of (the death benefit / the NAR factor table factor for this duration and attained age (or 1 if no row applies) \u2212 the account value, 0)",
+  "timingNote": null
+ },
+ "death_benefit": {
+  "math": {
+   "t": "max",
+   "items": [
+    {
+     "t": "qty",
+     "v": "face_amount",
+     "label": "face amount"
+    },
+    {
+     "t": "mul",
+     "items": [
+      {
+       "t": "lookup",
+       "name": "corridor percentage",
+       "args": [
+        "duration",
+        "attained age"
+       ],
+       "where": [],
+       "default": {
+        "t": "num",
+        "v": "1"
+       }
+      },
+      {
+       "t": "qty",
+       "v": "account_value",
+       "label": "account value"
+      }
+     ]
+    }
+   ]
+  },
+  "rendering": "the greater of (the face amount, the corridor table percentage for this duration and attained age (or 1 if no row applies) \u00d7 the account value)",
+  "timingNote": null
+ }
+}

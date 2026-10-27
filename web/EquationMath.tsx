@@ -14,6 +14,35 @@
 // requirement, not a fallback to delete.  When the server could not
 // structure a body (math is null), the prose stands alone, exactly
 // as before; nothing is ever rendered blank or guessed.
+//
+// FIELD CONTRACT (aligned Oct 27, 2026 against render_math_tree —
+// the previous revision had drifted from the server's vocabulary:
+// it read cmp operands from left/right (server ships a/b), unary
+// children from `of` (server ships x), treated the binary `sub`
+// {a, b} as an items list (rendered empty), and had no cases for
+// `text` or `min` at all; a cmp or paren node threw and, with no
+// error boundary, white-screened the whole app):
+//
+//   num     {v}                       str   {v}
+//   qty     {v, label}                text  {v}
+//   add     {items[]}                 mul   {items[]}
+//   sub     {a, b}                    div   {num, den}
+//   neg     {x}                       pow   {base, exp}
+//   paren   {x}                       min   {items[]}
+//   max     {items[]}                 cmp   {op, a, b}  (op already a
+//   and     {items[]}                         display symbol)
+//   or      {items[]}                 not   {x}
+//   cases   {rows: [{value, when}]}  — when is a node: a cmp tree
+//           for an if-branch, or a text node ("otherwise", or a
+//           bands label like "duration in years 1–5")
+//   lookup  {name, args[], where: [{field, value}], default?}
+//   rows_sum {tableLabel, expr, notes[]}
+//
+// The renderer tolerates the legacy spellings (left/right, of,
+// cond/condText, items-form sub) where they cost nothing, and — the
+// standing rule — a node it cannot understand renders NOTHING, and
+// any throw inside the math block degrades EquationDisplay to the
+// prose caption.  A bad tree must never take the app down again.
 
 import React from "react";
 
@@ -22,6 +51,9 @@ export interface MathNode {
   [key: string]: any;
 }
 
+// The server ships cmp ops already translated to display symbols
+// ("=", "≠", "≤", …); the name and raw-operator forms are accepted
+// too so an older or hand-built tree still renders.
 const CMP_SYMBOLS: Record<string, string> = {
   eq: "=",
   ne: "≠",
@@ -29,14 +61,34 @@ const CMP_SYMBOLS: Record<string, string> = {
   le: "≤",
   gt: ">",
   ge: "≥",
+  "==": "=",
+  "!=": "≠",
+  "<=": "≤",
+  ">=": "≥",
 };
 
+const cmpSymbol = (op: unknown): string =>
+  CMP_SYMBOLS[String(op)] ?? String(op ?? "");
+
+const itemsOf = (node: MathNode): MathNode[] =>
+  Array.isArray(node.items) ? node.items : [];
+
+const childOf = (node: MathNode): MathNode | undefined =>
+  node.x ?? node.of ?? undefined;
+
 const MathNodeView: React.FC<{ node: MathNode }> = ({ node }) => {
+  // Never throw on a malformed node: a missing or shapeless child
+  // renders nothing, and the prose caption still carries the meaning.
+  if (!node || typeof node !== "object" || typeof node.t !== "string") {
+    return null;
+  }
   switch (node.t) {
     case "num":
       return <span className="m-num">{node.v}</span>;
     case "str":
       return <span className="m-str">“{node.v}”</span>;
+    case "text":
+      return <span className="m-text">{node.v}</span>;
     case "qty":
     case "const_ref":
     case "field":
@@ -75,7 +127,7 @@ const MathNodeView: React.FC<{ node: MathNode }> = ({ node }) => {
     case "mul":
       return (
         <span className="m-mul">
-          {(node.items ?? []).map((item: MathNode, i: number) => (
+          {itemsOf(node).map((item: MathNode, i: number) => (
             <React.Fragment key={i}>
               {i > 0 && <span className="m-op"> × </span>}
               <MathNodeView node={item} />
@@ -84,21 +136,32 @@ const MathNodeView: React.FC<{ node: MathNode }> = ({ node }) => {
         </span>
       );
     case "add":
-    case "sub":
       return (
         <span>
-          {(node.items ?? []).map((item: MathNode, i: number) => (
+          {itemsOf(node).map((item: MathNode, i: number) => (
             <React.Fragment key={i}>
-              {i > 0 && <span className="m-op"> {node.t === "add" ? "+" : "−"} </span>}
+              {i > 0 && <span className="m-op"> + </span>}
               <MathNodeView node={item} />
             </React.Fragment>
           ))}
         </span>
       );
+    case "sub": {
+      // Binary on the wire: {a, b}.  An items pair is tolerated.
+      const a = node.a ?? itemsOf(node)[0];
+      const b = node.b ?? itemsOf(node)[1];
+      if (a == null && b == null) return null;
+      return (
+        <span>
+          <MathNodeView node={a} /> <span className="m-op">−</span>{" "}
+          <MathNodeView node={b} />
+        </span>
+      );
+    }
     case "neg":
       return (
         <span>
-          −<MathNodeView node={node.of} />
+          −<MathNodeView node={childOf(node)} />
         </span>
       );
     case "pow":
@@ -113,14 +176,15 @@ const MathNodeView: React.FC<{ node: MathNode }> = ({ node }) => {
     case "paren":
       return (
         <span className="m-paren">
-          (<MathNodeView node={node.of} />)
+          (<MathNodeView node={childOf(node)} />)
         </span>
       );
+    case "min":
     case "max":
       return (
         <span>
-          max(
-          {(node.items ?? []).map((item: MathNode, i: number) => (
+          {node.t}(
+          {itemsOf(node).map((item: MathNode, i: number) => (
             <React.Fragment key={i}>
               {i > 0 && ", "}
               <MathNodeView node={item} />
@@ -129,19 +193,22 @@ const MathNodeView: React.FC<{ node: MathNode }> = ({ node }) => {
           )
         </span>
       );
-    case "cmp":
+    case "cmp": {
+      const a = node.a ?? node.left;
+      const b = node.b ?? node.right;
       return (
         <span>
-          <MathNodeView node={node.left} />{" "}
-          <span className="m-op">{CMP_SYMBOLS[node.op] ?? node.op}</span>{" "}
-          <MathNodeView node={node.right} />
+          <MathNodeView node={a} />{" "}
+          <span className="m-op">{cmpSymbol(node.op)}</span>{" "}
+          <MathNodeView node={b} />
         </span>
       );
+    }
     case "and":
     case "or":
       return (
         <span>
-          {(node.items ?? []).map((item: MathNode, i: number) => (
+          {itemsOf(node).map((item: MathNode, i: number) => (
             <React.Fragment key={i}>
               {i > 0 && <span className="m-op"> {node.t} </span>}
               <MathNodeView node={item} />
@@ -152,17 +219,19 @@ const MathNodeView: React.FC<{ node: MathNode }> = ({ node }) => {
     case "not":
       return (
         <span>
-          not (<MathNodeView node={node.of} />)
+          not (<MathNodeView node={childOf(node)} />)
         </span>
       );
     case "if":
+      // The server lowers `if` to cases before shipping; tolerate a
+      // raw if-node by lowering it the same way.
       return (
         <MathNodeView
           node={{
             t: "cases",
             rows: [
-              { value: node.then, cond: node.cond, condText: node.condText ?? null },
-              { value: node.else, cond: null, condText: null },
+              { value: node.then, when: node.cond },
+              { value: node.else, when: { t: "text", v: "otherwise" } },
             ],
           }}
         />
@@ -174,20 +243,20 @@ const MathNodeView: React.FC<{ node: MathNode }> = ({ node }) => {
             {"{"}
           </span>
           <span className="m-case-rows">
-            {(node.rows ?? []).map(
-              (row: { value: MathNode; cond?: MathNode | null; condText?: string | null }, i: number) => (
+            {(Array.isArray(node.rows) ? node.rows : []).map(
+              (
+                row: {
+                  value: MathNode;
+                  when?: MathNode | null;
+                  cond?: MathNode | null;
+                  condText?: string | null;
+                },
+                i: number,
+              ) => (
                 <span key={i} className="m-case">
                   <MathNodeView node={row.value} />
                   <span className="m-case-cond">
-                    {row.cond ? (
-                      <>
-                        {" "}
-                        if <MathNodeView node={row.cond} />
-                        {row.condText ? <> — {row.condText}</> : null}
-                      </>
-                    ) : (
-                      <> otherwise</>
-                    )}
+                    <CaseCondition row={row} />
                   </span>
                 </span>
               ),
@@ -208,11 +277,57 @@ const MathNodeView: React.FC<{ node: MathNode }> = ({ node }) => {
         </span>
       );
     default:
-      // The server only ships shapes it knows; anything else renders
-      // nothing here and the prose caption below still carries it.
+      // A shape this renderer does not know renders nothing here;
+      // the prose caption below still carries the equation.
       return null;
   }
 };
+
+// The condition half of one cases row.  On the wire `when` is a
+// node: a text node carries the label verbatim ("otherwise", or a
+// bands span like "duration in years 1–5"); any other node is the
+// branch condition itself.  The legacy {cond, condText} spelling is
+// tolerated.
+const CaseCondition: React.FC<{
+  row: { when?: MathNode | null; cond?: MathNode | null; condText?: string | null };
+}> = ({ row }) => {
+  const when = row.when ?? row.cond ?? null;
+  if (!when) return <> otherwise</>;
+  if (when.t === "text") {
+    const v = String(when.v ?? "");
+    return v === "otherwise" ? <> otherwise</> : <> when {v}</>;
+  }
+  return (
+    <>
+      {" "}
+      if <MathNodeView node={when} />
+      {row.condText ? <> — {row.condText}</> : null}
+    </>
+  );
+};
+
+// Defense in depth: if anything inside the math block still manages
+// to throw (a future vocabulary drift, a malformed stored tree), the
+// display degrades to the prose caption — never a white screen.
+class MathErrorBoundary extends React.Component<
+  { fallback: React.ReactNode; children: React.ReactNode },
+  { failed: boolean }
+> {
+  state = { failed: false };
+
+  static getDerivedStateFromError(): { failed: boolean } {
+    return { failed: true };
+  }
+
+  componentDidCatch(): void {
+    // Deliberately silent: the prose fallback is the user-facing
+    // behavior; there is no telemetry sink in this app.
+  }
+
+  render(): React.ReactNode {
+    return this.state.failed ? this.props.fallback : this.props.children;
+  }
+}
 
 export const EquationDisplay: React.FC<{
   math?: MathNode | null;
@@ -220,27 +335,27 @@ export const EquationDisplay: React.FC<{
   timingNote?: string | null;
   approvalBy?: string | null;
 }> = ({ math, rendering, timingNote, approvalBy }) => {
-  if (!math) {
-    if (!rendering) return null;
-    return (
-      <p className="muted">
-        {rendering}
-        {approvalBy ? <> — approved by {approvalBy}</> : null}
-      </p>
-    );
-  }
+  const prose = rendering ? (
+    <p className="muted">
+      {rendering}
+      {approvalBy ? <> — approved by {approvalBy}</> : null}
+    </p>
+  ) : null;
+  if (!math) return prose;
   return (
-    <div className="equation-display">
-      <div className="equation-math">
-        <MathNodeView node={math} />
+    <MathErrorBoundary fallback={prose}>
+      <div className="equation-display">
+        <div className="equation-math">
+          <MathNodeView node={math} />
+        </div>
+        {timingNote ? <p className="equation-timing">Timing: {timingNote}</p> : null}
+        {rendering ? (
+          <p className="muted equation-words">
+            In words: {rendering}
+            {approvalBy ? <> — approved by {approvalBy}</> : null}
+          </p>
+        ) : null}
       </div>
-      {timingNote ? <p className="equation-timing">Timing: {timingNote}</p> : null}
-      {rendering ? (
-        <p className="muted equation-words">
-          In words: {rendering}
-          {approvalBy ? <> — approved by {approvalBy}</> : null}
-        </p>
-      ) : null}
-    </div>
+    </MathErrorBoundary>
   );
 };
