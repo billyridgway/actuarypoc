@@ -495,4 +495,33 @@ failures; tsc error set identical to pristine HEAD (2 pre-existing
 in ProductWorkspacePage.tsx); vite build clean; the built bundle
 carries the new copy and zero occurrences of "Re-run analysis".
 
-Live acceptance: recorded in the follow-up note after deploy.
+### Live acceptance (Oct 27, 2026, after the clarity pass + flag)
+
+Two serialized commits: `dac6c84f` (clarity) then `841d9726`
+(scenario flag) — the second was pushed only after the first's CI
+completed (Jobs API: runs 40540184737 and 40542670579, both
+success, every step). Convergence for the final head: GHCR `:main`
+two agreeing reads, leaf `c55eaba7…`, image config
+`GIT_SHA=841d9726…`; the rolled pod's `/health` reports
+`git_sha 841d9726…` (pod started 16:47:40Z); the served JS bundle is
+byte-identical in hash (`c6fa245b…`) to a local build of the pushed
+tree, carries all the new copy, and contains zero occurrences of
+"Re-run analysis".
+
+On the running app, a throwaway workspace (`ws-37680d7e`, base
+specs + Nicotine specimen, deleted afterwards): analysis finished
+with `projectionStale` false; confirming the first COI slice set
+the stale flag (the banner state — whose only remedy in the served
+bundle is now the projection run); both COI slices and the
+surrender candidate were confirmed and stood in force together. A
+Non-Tobacco projection computed COI (year-1 charge 130.91) and
+cleared the stale flag. The scenario-flag data path was verified
+against the run payloads with the component's own matching
+semantics: for the Non-Tobacco run, exactly 121 of 242 COI rows
+match — every flagged row Non-Tobacco, zero Tobacco rows flagged;
+for the Tobacco run the mirror flipped exactly (121 flagged, all
+Tobacco). The flag's visual rendering (tinted rows + count line)
+is proven at the payload + served-bundle + code-path level; the
+side-by-side visual is Billy's glance, as before. ws-5e05081f
+(Billy's current workspace) was read-only throughout: its
+`updatedAt` (`2026-10-27T16:30:12.321890Z`) is unchanged.
