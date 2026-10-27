@@ -72,7 +72,6 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
   const [documents, setDocuments] = React.useState<any[]>([]);
   const [sources, setSources] = React.useState<any[]>([]);
   const [activeTab, setActiveTab] = React.useState<BenchTab>(initialTab ?? "ledger");
-  const [rerunning, setRerunning] = React.useState<boolean>(false);
   // Unification revamp: one invalidation signal for every panel on
   // the bench. Any mutation — from the mechanics panel, the
   // equations panel, or a snapshot reload — bumps the epoch, and
@@ -96,20 +95,6 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
       /* keep the current bench state if a refresh fails */
     }
   }, [workspaceId, bumpInputsEpoch]);
-
-  const rerunAnalysis = async () => {
-    setRerunning(true);
-    try {
-      await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/analyze`, {
-        method: "POST",
-      });
-      await reload();
-    } catch {
-      /* the banner stays until a reload shows the new state */
-    } finally {
-      setRerunning(false);
-    }
-  };
 
   React.useEffect(() => {
     void reload();
@@ -214,17 +199,20 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
           <p className="workbench__state">
             <span className="basis-tag">{trust}</span>{" "}
             <span className="muted">
-              {/* These counts are the ANALYSIS snapshot's coverage of
-                  the filing's requirements — frozen at the analysis
-                  run, not the current approval state (which lives on
-                  the Inputs & Equations tab). The label says so. */}
+              {/* These counts are the last analysis's assessment of
+                  the filing's requirements (the snapshot's compliance
+                  matrix: implemented / partial / missing), frozen at
+                  that analysis run. Approvals made since do NOT move
+                  them — approval state lives on the Inputs & Equations
+                  tab and takes effect on the next projection run. The
+                  label says what the counts measure. */}
               {analysisRunning
-                ? `Filing review (from the last completed analysis${
-                    analysisTime ? ` finished ${analysisTime}` : ""
-                  } — a new analysis is running and this page will refresh when it finishes): `
-                : `Filing review (from the analysis${
-                    analysisTime ? ` finished ${analysisTime}` : ""
-                  }): `}
+                ? `Filing review — what the last completed analysis extracted from the documents${
+                    analysisTime ? ` (finished ${analysisTime})` : ""
+                  }; a new analysis is running and this page will refresh when it finishes: `
+                : `Filing review — what the last analysis extracted from the documents${
+                    analysisTime ? ` (finished ${analysisTime})` : ""
+                  }: `}
               {compliance.implemented ?? 0} implemented · {compliance.partial ?? 0} partial ·{" "}
               {compliance.missing ?? 0} missing
               {gapItems.length > 0 ? ` · ${gapItems.length} open gap${gapItems.length === 1 ? "" : "s"}` : ""}
@@ -233,21 +221,13 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
           {inputsStale && (
             <div className="workbench__stale" role="status">
               <span>
-                Inputs changed since the saved projection was computed — the saved
-                projection may be stale.{" "}
+                Inputs changed since the saved projection was computed. Run the
+                projection below to update it — approvals take effect on the next
+                projection run; no new analysis is needed.{" "}
                 {analysisRunning
-                  ? "An analysis is running; this page refreshes when it finishes. "
+                  ? "An analysis is running; this page refreshes when it finishes."
                   : ""}
               </span>
-              <button
-                type="button"
-                className="button"
-                disabled={rerunning || analysisRunning}
-                onClick={() => void rerunAnalysis()}
-              >
-                {analysisRunning ? "Analysis running…" : rerunning ? "Re-running…" : "Re-run analysis"}
-              </button>{" "}
-              <span>or re-run the projection with the scenario below.</span>
             </div>
           )}
           {!inputsStale && ws.dirty && (
@@ -291,6 +271,10 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
               Full filing analysis
             </a>
           </div>
+          <p className="muted workbench__scenario-help">
+            Run projection recomputes the ledger from the approved equations and
+            tables, for the scenario above.
+          </p>
         </form>
 
         {ws.error && <p className="error">{ws.error}</p>}
@@ -455,6 +439,11 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
                 </ul>
               </>
             )}
+            <p className="muted">
+              Re-running the analysis re-reads the filing documents and re-extracts
+              tables and equations. It is only needed when the documents change —
+              your approvals are kept.
+            </p>
             <p>
               <a href={`/web?workspace=${encodeURIComponent(workspaceId)}&view=analysis`}>
                 Open the full filing analysis →

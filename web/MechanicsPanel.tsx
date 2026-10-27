@@ -367,7 +367,6 @@ export const MechanicsPanel: React.FC<{
   const [error, setError] = React.useState<string | null>(null);
   const [message, setMessage] = React.useState<string | null>(null);
   const [busySlot, setBusySlot] = React.useState<string | null>(null);
-  const [rerunning, setRerunning] = React.useState<boolean>(false);
   const [pasteText, setPasteText] = React.useState<Record<string, string>>({});
   const [feeForm, setFeeForm] = React.useState({ component: "policy_fee", amount: "", feeUnit: "annual_fixed" });
   const [narFactor, setNarFactor] = React.useState<string>("");
@@ -567,28 +566,6 @@ export const MechanicsPanel: React.FC<{
     }
   };
 
-  const handleRerun = async () => {
-    setRerunning(true);
-    setMessage(null);
-    setError(null);
-    try {
-      const resp = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/analyze`, {
-        method: "POST",
-      });
-      if (!resp.ok) {
-        const text = await resp.text();
-        throw new Error(text || `Re-run failed (HTTP ${resp.status})`);
-      }
-      setMessage("Analysis started — it runs on the server; this page refreshes when it finishes.");
-      await loadPanel();
-      if (onSnapshotReload) onSnapshotReload();
-    } catch (err: any) {
-      setError(err?.message || "Re-run failed.");
-    } finally {
-      setRerunning(false);
-    }
-  };
-
   const slotLabel = (slotId: string): string =>
     panel?.slots.find((s) => s.id === slotId)?.label || slotId;
 
@@ -784,7 +761,7 @@ export const MechanicsPanel: React.FC<{
       <h2>Product inputs</h2>
       <p className="muted">
         The chassis asks for each input below. Fill a slot from a filing, accept a filed table, or edit it
-        here — changes are validated, recorded in the change history, and take effect on the next re-run.
+        here — changes are validated, recorded in the change history, and take effect on the next projection run.
         No document re-upload and no code required.
       </p>
       {loading && <p className="muted">Loading product inputs…</p>}
@@ -794,9 +771,8 @@ export const MechanicsPanel: React.FC<{
         <div className="slot-stale-banner">
           <strong>Inputs changed since the saved projection was computed.</strong>{" "}
           The saved projection may be stale (changed: {panel.projectionStaleSlots.map(slotLabel).join(", ")}).{" "}
-          <button type="button" className="button" disabled={rerunning} onClick={handleRerun}>
-            {rerunning ? "Re-running…" : "Re-run analysis"}
-          </button>
+          Re-run the projection to update it — approvals take effect on the next
+          projection run; no new analysis is needed.
         </div>
       )}
       {panel && (panel.proposals ?? []).length > 0 && (

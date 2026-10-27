@@ -414,3 +414,69 @@ tests). ws-b5ea66f5 was read-only throughout: its `updatedAt`
 (`2026-10-27T09:20:10.502959Z`, from Billy's own activity that
 morning) is unchanged by this work — its tables remain for Billy
 to re-confirm under the new model, its equations untouched.
+
+## Addendum — Oct 27, 2026 (later): analysis vs projection, made self-evident
+
+Billy, on a fresh workspace after approving everything (Oct 27,
+11:11 CT): "After approving all of the data and equations do I need
+to click reanalysis first and then run projection? I'm confused at
+what each is doing. This should be more clear."
+
+The confusion was the UI's fault. The projection-stale banner read
+"Inputs changed since the saved projection was computed — the saved
+projection may be stale. [Re-run analysis] or re-run the projection
+with the scenario below." — presenting two very different operations
+as interchangeable remedies. They are not:
+
+- **Analysis** re-reads the filing DOCUMENTS and re-extracts tables
+  and equation candidates. It is needed only when documents or
+  sources change. Approvals never require it; approvals take effect
+  on the next projection run.
+- **Projection** recomputes the ledger from the currently approved
+  equations and tables for the scenario on screen. It is the correct
+  and only remedy for approval-driven staleness.
+
+(That banner wording is also what led Billy to re-run analysis on
+Oct 27 morning — the run that then wiped his acceptances. The wipe
+is fixed by the addendum above; this change removes the misleading
+affordance that invited it.)
+
+What changed — presentation and affordances only; no analysis,
+projection, stale-flag, or persistence semantics were touched:
+
+- The workbench stale banner no longer offers "Re-run analysis".
+  Its copy names the cause and the one remedy: "Inputs changed
+  since the saved projection was computed. Run the projection below
+  to update it — approvals take effect on the next projection run;
+  no new analysis is needed." The MechanicsPanel copy of the banner
+  (shown on the full-filing-analysis page) got the same fix, and the
+  panel intro now says changes "take effect on the next projection
+  run" instead of the ambiguous "next re-run".
+- One-line explanations at the point of action, in the existing
+  muted help-text style: under the scenario's Run projection button
+  ("Run projection recomputes the ledger from the approved equations
+  and tables, for the scenario above"), and in the Filing tab beside
+  the full-filing-analysis link ("Re-running the analysis re-reads
+  the filing documents and re-extracts tables and equations. It is
+  only needed when the documents change — your approvals are kept.").
+- Source staleness stays a distinct state with its own remedy: a
+  source whose etag drifted still carries "Changed since analyzed —
+  re-run analysis to use the current version" on the Filing tab.
+  Only that state points at analysis.
+- The filing-review line is relabeled to state what it measures:
+  "Filing review — what the last analysis extracted from the
+  documents (finished …)". Verified in code: the counts are the
+  statuses over the snapshot's compliance-matrix requirements
+  (`_reconcile_workspace_readiness` in `ui/server.py`, counting
+  implemented / partial / missing per requirement), assessed when
+  the analysis built the snapshot. Approvals do not write them —
+  which is why the line still read "3 missing" on a workspace whose
+  equations were all approved. What is counted did not change; only
+  the label now says what it is.
+
+Verification (local): suite 332 passed / exactly the same 5 inherited
+failures; tsc error set identical to pristine HEAD (2 pre-existing
+in ProductWorkspacePage.tsx); vite build clean; the built bundle
+carries the new copy and zero occurrences of "Re-run analysis".
+
+Live acceptance: recorded in the follow-up note after deploy.
