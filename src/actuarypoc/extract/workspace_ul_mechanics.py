@@ -8,6 +8,7 @@ into an invented actuarial assumption.
 from __future__ import annotations
 
 import io
+import json
 import math
 import re
 from copy import deepcopy
@@ -177,6 +178,90 @@ def candidate_diff(
         "onlyInB": len(set(b) - set(a)),
         "examples": examples,
     }
+
+
+def conflicting_row_selectors(
+    mechanic: str,
+    rows_a: List[Dict[str, Any]],
+    rows_b: List[Dict[str, Any]],
+) -> List[Tuple[Any, ...]]:
+    """Selector keys where two row sets carry DIFFERENT values.
+
+    This is the only genuine conflict between two filed candidates:
+    the same lookup key priced two ways.  Rows that merely cover
+    different selectors (the base specimen's Non-Tobacco slice vs
+    the Nicotine specimen's Tobacco slice) do not conflict — they
+    are complementary parts of one table.  Rows identical on both
+    sides do not conflict either; they dedupe.
+    """
+
+    a = {row_selector_key(row): row for row in rows_a or []}
+    b = {row_selector_key(row): row for row in rows_b or []}
+    return [
+        selector
+        for selector in sorted(set(a) & set(b), key=str)
+        if row_value_key(mechanic, a[selector]) != row_value_key(mechanic, b[selector])
+    ]
+
+
+def _overridden_selector_keys(candidate: Dict[str, Any]) -> set:
+    """The selector keys a candidate's accepted rows have lost to an
+    override (stored JSON-shaped on the candidate as lists)."""
+
+    return {
+        tuple(item)
+        for item in (candidate or {}).get("overriddenSelectors") or []
+        if isinstance(item, (list, tuple))
+    }
+
+
+def candidate_effective_rows(candidate: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """A candidate's rows as they contribute to the table in force:
+    all of them, minus the selectors another candidate's acceptance
+    explicitly overrode."""
+
+    overridden = _overridden_selector_keys(candidate)
+    if not overridden:
+        return list((candidate or {}).get("rows") or [])
+    return [
+        row
+        for row in (candidate or {}).get("rows") or []
+        if row_selector_key(row) not in overridden
+    ]
+
+
+def accepted_union_rows(
+    candidates: List[Dict[str, Any]], mechanic: str
+) -> Tuple[List[Dict[str, Any]], List[Tuple[Any, ...]]]:
+    """The table in force for a mechanic: the UNION of every accepted
+    candidate's effective rows, identical rows deduped with merged
+    provenance.
+
+    Returns ``(rows, conflicts)`` — selector keys on which two
+    accepted candidates still disagree.  Callers decide what a
+    conflict means (acceptance refuses; analysis carry-over leaves
+    the mechanic out rather than merging silently); this helper
+    never picks a winner.
+    """
+
+    merged: List[Dict[str, Any]] = []
+    seen_values: Dict[Tuple[Any, ...], Tuple[Any, ...]] = {}
+    conflicts: List[Tuple[Any, ...]] = []
+    for candidate in candidates or []:
+        if not isinstance(candidate, dict):
+            continue
+        if candidate.get("reviewStatus") != "accepted":
+            continue
+        for row in candidate_effective_rows(candidate):
+            selector = row_selector_key(row)
+            value = row_value_key(mechanic, row)
+            if selector in seen_values and seen_values[selector] != value:
+                if selector not in conflicts:
+                    conflicts.append(selector)
+                continue
+            seen_values[selector] = value
+            merged.append(row)
+    return dedupe_rows(merged, mechanic), conflicts
 
 
 def rows_coverage_text(rows: List[Dict[str, Any]]) -> str:
@@ -675,8 +760,24 @@ def usable_mechanics(extracted: Dict[str, Any]) -> Dict[str, Any]:
 def accept_filed_mechanic(
     artifact: Dict[str, Any], mechanic: str, *, candidate_id: str | None = None,
     reviewed_by: str = "workspace_user",
+    resolve_conflict: bool = False,
 ) -> Dict[str, Any]:
-    """Accept one complete filed-PDF candidate set and make only that mechanic executable."""
+    """Accept one filed-PDF candidate into the mechanic's table in force.
+
+    Candidates are SELECTOR SLICES of one table, not competing
+    versions (Oct 27, 2026 model correction): the base specimen's
+    Non-Tobacco COI rows and the Nicotine specimen's Tobacco rows
+    are complementary halves of the coverage.  Accepting a
+    candidate therefore never displaces another accepted candidate
+    — the table in force is the union of every accepted candidate's
+    rows, identical rows deduped.  The one genuine decision is an
+    overlap where two filings price the SAME selector differently:
+    that conflict refuses here unless ``resolve_conflict`` carries
+    the user's explicit choice, in which case this candidate's rows
+    govern the contested selectors (the losing candidate's rows are
+    recorded as overridden; a candidate that loses every row is
+    superseded — genuinely replaced as a slice).
+    """
 
     if mechanic not in set(MECHANIC_KEYS):
         raise ValueError(f"mechanic must be one of {', '.join(MECHANIC_KEYS)}")
@@ -724,53 +825,94 @@ def accept_filed_mechanic(
         provenance.pop("supersededAt", None)
         row["provenance"] = provenance
     superseded_ids: List[str] = []
+    overridden_ids: List[str] = []
     if candidate is not None:
+        prior_status = candidate.get("reviewStatus")
         candidate["rows"] = rows
         candidate["reviewStatus"] = "accepted"
-        # Candidates in the same alternative group file the same
-        # table (specimen variants): accepting this one supersedes
-        # the previously accepted alternative instead of stacking
-        # its rows on top.  The superseded candidate's records stay
-        # on the artifact, marked — the change history is untouched.
-        group = candidate_group_key(mechanic, candidate)
-        reviews = result.setdefault("reviews", {})
+        # Selector slices accumulate: this acceptance displaces
+        # nothing by itself.  What it can do is DISAGREE with an
+        # already-accepted candidate on rows both carry — the one
+        # genuine decision in the model.  A candidate that is not
+        # currently in force asserts ALL its rows on acceptance
+        # (a superseded candidate's rows were all overridden, so
+        # re-accepting it is exactly that decision again); one that
+        # is in force asserts its effective rows.
+        if resolve_conflict and candidate.get("overriddenSelectors"):
+            # Re-deciding in this candidate's favour restores its
+            # overridden rows; the conflict computation below then
+            # re-decides them against the current holder.
+            candidate.pop("overriddenSelectors", None)
+            candidate.pop("overriddenBy", None)
+            candidate.pop("overriddenAt", None)
+        effective_rows = (
+            list(rows)
+            if prior_status != "accepted"
+            else candidate_effective_rows(candidate)
+        )
+        conflicts_by_other: Dict[str, Tuple[Dict[str, Any], List[Tuple[Any, ...]]]] = {}
         for other in candidates:
             if other is candidate or other.get("reviewStatus") != "accepted":
                 continue
-            if candidate_group_key(mechanic, other) != group:
-                continue
-            other["reviewStatus"] = PDF_REVIEW_SUPERSEDED
-            for other_row in other.get("rows") or []:
-                other_row["provenance"] = {
-                    **(other_row.get("provenance") or {}),
-                    "reviewStatus": PDF_REVIEW_SUPERSEDED,
-                    "supersededBy": candidate.get("id"),
-                    "supersededAt": accepted_at,
-                }
-            superseded_ids.append(str(other.get("id")))
-            prior_review = reviews.get(str(other.get("id")))
-            if isinstance(prior_review, dict):
-                prior_review["status"] = PDF_REVIEW_SUPERSEDED
-                prior_review["supersededBy"] = candidate.get("id")
-                prior_review["supersededAt"] = accepted_at
-    active_rows = rows
-    if candidate is not None:
-        active_rows = [
-            row
-            for item in candidates
-            if item.get("reviewStatus") == "accepted"
-            for row in (item.get("rows") or [])
-        ]
-    seen_values: Dict[Tuple[Any, ...], Tuple[Any, ...]] = {}
-    for active_row in active_rows:
-        selector = row_selector_key(active_row)
-        value = row_value_key(mechanic, active_row)
-        if selector in seen_values and seen_values[selector] != value:
-            raise ValueError(
-                f"Filed {mechanic} candidates conflict for selector {selector}"
+            conf = conflicting_row_selectors(
+                mechanic, effective_rows, candidate_effective_rows(other)
             )
-        seen_values[selector] = value
-    active_rows = dedupe_rows(active_rows, mechanic)
+            if conf:
+                conflicts_by_other[str(other.get("id"))] = (other, conf)
+        if conflicts_by_other and not resolve_conflict:
+            other, conf = next(iter(conflicts_by_other.values()))
+            example = ", ".join(
+                f"{field} {value}"
+                for field, value in zip(ROW_SELECTOR_FIELDS, conf[0])
+                if value is not None
+            )
+            total = sum(len(item_conf) for _, item_conf in conflicts_by_other.values())
+            raise ValueError(
+                f"Filed {mechanic} candidate conflicts with the accepted table"
+                f" from {other.get('filename') or 'the filing'}"
+                f" on {total} row(s) (e.g. {example}): the filings disagree"
+                " on those rows. Accept it with conflict resolution to let"
+                " this candidate's rows govern where they disagree, or keep"
+                " the version in force."
+            )
+        reviews = result.setdefault("reviews", {})
+        for other_id, (other, conf) in conflicts_by_other.items():
+            overridden = _overridden_selector_keys(other)
+            overridden.update(conf)
+            other["overriddenSelectors"] = sorted(
+                (list(key) for key in overridden), key=str
+            )
+            other["overriddenBy"] = candidate.get("id")
+            other["overriddenAt"] = accepted_at
+            overridden_ids.append(other_id)
+            other_rows = list(other.get("rows") or [])
+            if other_rows and all(
+                row_selector_key(row) in overridden for row in other_rows
+            ):
+                # Every row lost the override: the candidate is
+                # genuinely replaced — the same slice, corrected —
+                # which is the one case "superseded" names.
+                other["reviewStatus"] = PDF_REVIEW_SUPERSEDED
+                for other_row in other_rows:
+                    other_row["provenance"] = {
+                        **(other_row.get("provenance") or {}),
+                        "reviewStatus": PDF_REVIEW_SUPERSEDED,
+                        "supersededBy": candidate.get("id"),
+                        "supersededAt": accepted_at,
+                    }
+                superseded_ids.append(other_id)
+                prior_review = reviews.get(other_id)
+                if isinstance(prior_review, dict):
+                    prior_review["status"] = PDF_REVIEW_SUPERSEDED
+                    prior_review["supersededBy"] = candidate.get("id")
+                    prior_review["supersededAt"] = accepted_at
+        active_rows, residual = accepted_union_rows(candidates, mechanic)
+        if residual:
+            raise ValueError(
+                f"Filed {mechanic} candidates conflict for selector {residual[0]}"
+            )
+    else:
+        active_rows = dedupe_rows(rows, mechanic)
     validation_artifact = {"mechanics": {mechanic: active_rows}}
     validated = usable_mechanics(validation_artifact)
     if mechanic not in validated:
@@ -790,5 +932,151 @@ def accept_filed_mechanic(
         "activeRowCount": len(active_rows),
         "sourceType": "filed_pdf",
         "supersededCandidateIds": superseded_ids,
+        "overriddenCandidateIds": overridden_ids,
     }
     return result
+
+
+def _row_identity_key(row: Dict[str, Any]) -> str:
+    """A row's identity without its provenance — the same
+    canonicalisation the candidate-id signature uses, so a row from
+    a re-extraction matches its prior incarnation exactly."""
+
+    canonical = {key: value for key, value in row.items() if key != "provenance"}
+    return json.dumps(canonical, sort_keys=True, default=str)
+
+
+#: Row-provenance fields a review decision writes; a carry-over
+#: transplants exactly these from the prior row to its re-extracted
+#: twin, leaving the fresh extraction's own provenance intact.
+_REVIEW_PROVENANCE_FIELDS = (
+    "reviewStatus", "reviewedBy", "reviewedAt", "supersededBy", "supersededAt",
+)
+
+
+def carry_over_decision_state(
+    fresh_artifact: Dict[str, Any], prior_artifact: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Carry a workspace's confirmed decision state across an
+    analysis rebuild, merged by candidate identity.
+
+    Analysis rebuilds the mechanics artifact from the documents;
+    without this step a re-run silently discards every human
+    decision that lives on the artifact (the Oct 27, 2026 defect:
+    equation approvals were carried over, table acceptances were
+    not, so one re-run un-filed every table).  Candidate ids are
+    content hashes of their rows, so a re-extraction of unchanged
+    documents reproduces the same ids and decisions transplant by
+    id: candidate review state (accepted / superseded, override
+    records), the per-row review provenance, the ``reviews`` log,
+    proposal dismissals, and any synthetic table state.  The table
+    in force is then rebuilt as the union of the accepted
+    candidates, exactly as an acceptance builds it.
+
+    A decision whose candidate no longer exists in the fresh
+    extraction (its document changed or went away) is NOT carried
+    and NOT silently dropped either: it is named in the returned
+    ``notes`` so the analysis result can state it.  Workspace edits
+    and corrections are carried by their own re-apply steps, which
+    run after this one and win their mechanics' usable rows, exactly
+    as they did when first applied.
+    """
+
+    result = deepcopy(fresh_artifact or {})
+    prior = prior_artifact or {}
+    notes: List[str] = []
+
+    # Synthetic tables are confirmed state too (a reviewed synthetic
+    # schedule the user accepted); their rows exist nowhere in the
+    # documents, so they transplant with their usable rows.
+    prior_synthetic = prior.get("synthetic") or {}
+    if prior_synthetic:
+        result["synthetic"] = deepcopy(prior_synthetic)
+        for mechanic in prior_synthetic:
+            rows = list((prior.get("usable") or {}).get(mechanic) or [])
+            if rows:
+                result.setdefault("usable", {})[mechanic] = deepcopy(rows)
+                result.setdefault("status", {})[mechanic] = (
+                    (prior.get("status") or {}).get(mechanic) or "synthetic_scenario"
+                )
+
+    # Proposal dismissals persist so a dismissed proposal does not
+    # regenerate after a re-run.
+    if prior.get("dismissedProposals"):
+        result["dismissedProposals"] = deepcopy(prior["dismissedProposals"])
+
+    for mechanic in MECHANIC_KEYS:
+        fresh_candidates = [
+            candidate
+            for candidate in (result.get("candidates") or {}).get(mechanic) or []
+            if isinstance(candidate, dict)
+        ]
+        prior_by_id = {
+            str(candidate.get("id")): candidate
+            for candidate in (prior.get("candidates") or {}).get(mechanic) or []
+            if isinstance(candidate, dict) and candidate.get("id")
+        }
+        decided_ids: List[str] = []
+        for candidate in fresh_candidates:
+            prior_candidate = prior_by_id.get(str(candidate.get("id")))
+            if prior_candidate is None:
+                continue
+            prior_status = prior_candidate.get("reviewStatus")
+            if prior_status not in ("accepted", PDF_REVIEW_SUPERSEDED):
+                continue
+            candidate["reviewStatus"] = prior_status
+            for field in ("overriddenSelectors", "overriddenBy", "overriddenAt"):
+                if field in prior_candidate:
+                    candidate[field] = deepcopy(prior_candidate[field])
+            prior_rows = {}
+            for prior_row in prior_candidate.get("rows") or []:
+                prior_rows.setdefault(_row_identity_key(prior_row), prior_row)
+            for row in candidate.get("rows") or []:
+                prior_row = prior_rows.get(_row_identity_key(row))
+                if prior_row is None:
+                    continue
+                prior_provenance = prior_row.get("provenance") or {}
+                provenance = dict(row.get("provenance") or {})
+                for field in _REVIEW_PROVENANCE_FIELDS:
+                    if field in prior_provenance:
+                        provenance[field] = prior_provenance[field]
+                    else:
+                        provenance.pop(field, None)
+                row["provenance"] = provenance
+            decided_ids.append(str(candidate.get("id")))
+        fresh_ids = {str(candidate.get("id")) for candidate in fresh_candidates}
+        for prior_id, prior_candidate in prior_by_id.items():
+            if (
+                prior_candidate.get("reviewStatus")
+                in ("accepted", PDF_REVIEW_SUPERSEDED)
+                and prior_id not in fresh_ids
+            ):
+                notes.append(
+                    f"A previously {prior_candidate.get('reviewStatus')} filed "
+                    f"{mechanic} table (candidate {prior_id}) is no longer "
+                    "extracted from the workspace's documents; its review "
+                    "decision was not carried over."
+                )
+        if any(c.get("reviewStatus") == "accepted" for c in fresh_candidates):
+            union_rows, conflicts = accepted_union_rows(fresh_candidates, mechanic)
+            if conflicts:
+                # Stored state that disagrees with itself must not be
+                # merged silently; the mechanic states its absence
+                # until a human re-decides the contested rows.
+                notes.append(
+                    f"The carried-over accepted {mechanic} tables disagree on "
+                    f"{len(conflicts)} row(s); the mechanic was left without "
+                    "a table in force rather than merging contradictory rows."
+                )
+            else:
+                result.setdefault("usable", {})[mechanic] = union_rows
+                result.setdefault("status", {})[mechanic] = "executable"
+                (result.get("synthetic") or {}).pop(mechanic, None)
+        if decided_ids:
+            for key, review in (prior.get("reviews") or {}).items():
+                if key in decided_ids or (
+                    isinstance(review, dict)
+                    and str(review.get("candidateId")) in decided_ids
+                ):
+                    result.setdefault("reviews", {})[key] = deepcopy(review)
+    return {"artifact": result, "notes": notes}

@@ -179,13 +179,16 @@ def _pending_candidate_views(artifact: Dict[str, Any], mechanic: str) -> List[Di
 
 
 def _candidate_views(artifact: Dict[str, Any], mechanic: str) -> List[Dict[str, Any]]:
-    """Every filed candidate for a slot, as ONE choice (revamp).
+    """Every filed candidate for a slot, with its own state.
 
-    Candidates that file the same table (same alternative group) are
-    presented together with their state — in force, awaiting review,
-    or superseded by the candidate that replaced them — and, for
-    each alternative, how its rows differ from the candidate in
-    force (or from the first alternative when none is in force).
+    Candidates are selector slices of one table (Oct 27 model):
+    each is in force or not on its own — several can be in force
+    together, their rows unioned — so the view reports per-candidate
+    state (in force, awaiting review, superseded, and how many of
+    its rows an override decision took out of force), plus how its
+    rows compare with the first candidate in force (identical rows
+    dedupe; rows only it carries are added coverage; rows priced
+    differently are the conflict region).
     """
 
     candidates = [
@@ -203,6 +206,11 @@ def _candidate_views(artifact: Dict[str, Any], mechanic: str) -> List[Dict[str, 
     for candidate in candidates:
         rows = list(candidate.get("rows") or [])
         group = candidate_group_key(mechanic, candidate)
+        overridden = {
+            tuple(item)
+            for item in candidate.get("overriddenSelectors") or []
+            if isinstance(item, (list, tuple))
+        }
         view: Dict[str, Any] = {
             "id": candidate.get("id"),
             "filename": candidate.get("filename"),
@@ -215,9 +223,11 @@ def _candidate_views(artifact: Dict[str, Any], mechanic: str) -> List[Dict[str, 
             "group": sorted(group[1]),
             "coverageText": rows_coverage_text(rows),
             "selectors": candidate_selector_summary(rows),
+            "overriddenRowCount": len(overridden),
+            "overriddenBy": candidate.get("overriddenBy"),
             "diffVsReference": None,
         }
-        if candidate is not reference and candidate_group_key(mechanic, candidate) == candidate_group_key(mechanic, reference):
+        if candidate is not reference:
             view["diffVsReference"] = candidate_diff(
                 list(reference.get("rows") or []), rows, mechanic
             )

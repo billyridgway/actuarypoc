@@ -266,6 +266,8 @@ def _stub_workspace_store(monkeypatch, artifact):
     monkeypatch.setattr(server, "get_workspace", lambda workspace_id: {"id": workspace_id})
     monkeypatch.setattr(server, "load_workspace_executable_mechanics", lambda workspace_id: artifact)
     monkeypatch.setattr(server, "store_workspace_executable_mechanics", lambda workspace_id, value: "key")
+    # Accept/remove also mark the saved projection stale (Oct 27, 2026).
+    monkeypatch.setattr(server, "set_workspace_projection_stale", lambda *a, **k: None)
 
 
 def test_accept_persists_fallback_surrender_as_deterministic_not_ai(monkeypatch):

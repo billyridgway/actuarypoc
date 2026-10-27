@@ -373,6 +373,15 @@ def test_panel_shape_and_gap_mapping(store: FakeMinio) -> None:
 
 
 def test_analysis_update_clears_staleness(store: FakeMinio) -> None:
+    """Staleness clears only through the analysis's start (Oct 27, 2026).
+
+    An analysis recomputes the saved projection from the inputs as of
+    its start: ``clear_projection_stale_through`` (the mark the caller
+    observed at start) discharges marks at or before it.  A bare
+    update — e.g. the analysis-failure path, whose snapshot was never
+    refreshed — preserves the mark.
+    """
+
     workspace_id = _seed_workspace(store)
     server.api_edit_mechanics_slot(
         workspace_id, "fees",
@@ -382,9 +391,19 @@ def test_analysis_update_clears_staleness(store: FakeMinio) -> None:
     )
     ws = workspace_store.get_workspace(workspace_id)
     assert ws is not None and ws["projection_stale"] is True
+    marked_at = ws["projection_stale_since"]
 
+    # Bare update (no through): the mark survives.
     workspace_store.update_workspace_analysis(
         workspace_id, status="analyzed", snapshot={"product": {"code": "X"}}
+    )
+    ws = workspace_store.get_workspace(workspace_id)
+    assert ws is not None and ws["projection_stale"] is True
+
+    # Through the observed mark: cleared.
+    workspace_store.update_workspace_analysis(
+        workspace_id, status="analyzed", snapshot={"product": {"code": "X"}},
+        clear_projection_stale_through=marked_at,
     )
     ws = workspace_store.get_workspace(workspace_id)
     assert ws is not None and ws["projection_stale"] is False

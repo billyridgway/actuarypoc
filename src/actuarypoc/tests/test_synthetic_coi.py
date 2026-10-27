@@ -82,6 +82,7 @@ def test_accept_and_remove_persist_synthetic_provenance_only_after_review(monkey
     monkeypatch.setattr(server, "_workspace_synthetic_coi_context", lambda ws: ("context", ["Preferred", "Standard"]))
     monkeypatch.setattr(server, "load_workspace_executable_mechanics", lambda workspace_id: artifact)
     monkeypatch.setattr(server, "store_workspace_executable_mechanics", lambda workspace_id, value: stored.append(value) or "object-key")
+    monkeypatch.setattr(server, "set_workspace_projection_stale", lambda *a, **k: None)
 
     response = server.api_accept_synthetic_coi(
         "workspace-1",

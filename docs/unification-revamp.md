@@ -243,3 +243,142 @@ filed-candidate tests whose union semantics this revamp retires —
 accepting an alternative now supersedes, and a same-selector
 conflict is only possible across different alternative groups,
 where it still refuses.
+
+
+---
+
+## Addendum — Oct 27, 2026: confirmed state survives re-analysis; candidates are selector slices
+
+### What Billy found
+
+The morning after the revamp shipped, Billy confirmed every table
+choice and approved all seven equations on the live workspace
+(08:54–08:58Z), then re-ran the analysis at the stale banner's own
+advice. Afterwards the equations were still in force but every table
+acceptance was gone — all candidates back to `review_required`, all
+six choice proposals pending again — and a fresh projection priced
+COI at $0 with `coverageIssues` empty. The stale banner also never
+cleared, and the header simultaneously claimed "Projection current".
+
+### Confirmed mechanism (not the first hypothesis)
+
+The regression sequence (confirm → re-run analysis → assert still in
+force) was written first and run against the unfixed code: it
+reproduced the wipe exactly, at API level. In code:
+`api_workspace_analyze` builds a FRESH executable-mechanics artifact
+from the documents and carried over only `workspaceEdits`,
+`corrections`, and equation records from the prior artifact.
+Candidate acceptances, usable rows, override/supersede state,
+proposal dismissals, and synthetic state were not carried — the
+fresh artifact's candidates are `review_required` by construction.
+Two aggravating details: the analysis job commits that fresh
+artifact EARLY (its extracting-mechanics phase), so acceptances
+vanish within about a minute of the job starting, while the
+stale-clearing workspace update runs only at job end (~18 minutes
+for 13 filings); and the slot-card accept path
+(`POST /filed-mechanics/accept`) wrote neither a change-log record
+nor a staleness mark, unlike every other mutation path.
+
+### The fix
+
+* `carry_over_decision_state(fresh, prior)` (workspace_ul_mechanics)
+  runs inside analysis, before the edit/correction re-applies:
+  synthetic state, `dismissedProposals`, per-candidate decision
+  state (by candidate id — ids are content hashes of the canonical
+  rows, so re-extraction of unchanged documents reproduces them),
+  row-provenance decision fields, and `reviews` entries transplant;
+  usable tables rebuild as the union of accepted candidates. A
+  decided candidate the new extraction no longer produces is
+  reported in the artifact's warnings, never silently dropped.
+* Write-path audit: the direct filed-table accept now appends a
+  `filed_table_accept` change record and marks the saved projection
+  stale, as do the synthetic COI/surrender accept and remove
+  endpoints (previously none of the four did either).
+
+### Candidate model correction — selector slices (Billy, Oct 27)
+
+Billy: *"I need to choose the nicotine pdf to run a tobacco
+projection. Seems like I should be able to approve all of the
+choices and they should cover the male/female, tobacco/non, etc."*
+The revamp's own acceptance data proved him right: the COI choice
+diff was 0 identical / 0 differing / 121 rows only in each —
+selector-disjoint. The base specifications PDF and the Nicotine
+specimen are complementary SELECTOR SLICES of one table, not
+competing versions, so the one-choice-per-group model is retired:
+
+* Each filed candidate is approved/rejected independently; the
+  usable table is the UNION of all approved candidates' rows
+  (identical-row dedupe with `alsoFiledAs` provenance unchanged).
+  Selector-disjoint approvals accumulate coverage — no supersede
+  between slices. Fees follow the same rule within a component.
+* A decision is required only where two candidates overlap on
+  selectors with DIFFERING values: the accept refuses (409, naming
+  the other candidate and an example selector), the proposal becomes
+  a two-option conflict choice (the version in force vs the
+  challenger), and only the user's explicit override lets the
+  challenger's rows govern the contested selectors. A candidate
+  overridden on EVERY row is marked superseded — the one surviving
+  meaning of the word: a corrected version of the same slice.
+* UI: slot cards list per-version approvals with selector summaries
+  ("Covers: …") and per-candidate state ("In force — part of the
+  table"); a refused accept offers the explicit override on the
+  card; conflict proposals state the disagreement and tag the
+  option currently in force.
+
+
+### One stale truth
+
+`projectionStale` now has one precise meaning everywhere: **the
+saved projection predates the latest input change** (the change's
+timestamp is `projectionStaleSince`). Every input-changing writer
+sets it (edits, corrections, proposal confirms/dismissals, equation
+decisions, filed-table accepts, synthetic accept/remove). It is
+cleared by whoever refreshes the saved projection from current
+inputs: a completed projection run clears it on its success path,
+and a completed analysis clears marks at or before the timestamp
+the analysis observed at its start (`clear_projection_stale_through`)
+— a change made WHILE an analysis runs postdates its recomputation
+and stays marked. The analysis-failure path preserves the mark (its
+snapshot was never refreshed). The workbench header's run-state
+label derives from the same flag ("Saved projection is stale"),
+never from session state, and the banner states the flag's actual
+meaning. While an analysis runs, the open workbench polls the
+workspace (~4 s); the reload that observes completion bumps the
+inputs epoch, so both panels refetch the post-analysis artifact —
+an open page can no longer show pre-analysis panel state beside a
+post-analysis projection. The filing-review counts are labeled with
+the last COMPLETED analysis time only.
+
+### Missing tables are named
+
+The coverage check now also derives, from each in-force equation's
+formula body, the tables it reads: a table with no rows in force
+produces a `table_not_in_force` issue naming the equation and the
+table ("The approved COI charge equation reads the COI table, but
+no COI table is in force — accept the filed COI table so it can be
+calculated."). Naming is not blocking: unlike a selector mismatch
+on an in-force table (which still refuses, 409), a missing table
+lets the run proceed and states the absence — `missingMechanics`
+carries reason `table_not_in_force` (replacing the bare
+`evaluation_failed`), and per-year failures still collapse into one
+`failureSummary` group.
+
+### Tests
+
+New `test_analysis_state_persistence.py` (8 tests) runs Billy's
+exact sequence at API level plus the new model: both COI slices
+approved → union of 6 rows → Tobacco and Non-Tobacco scenarios each
+compute, priced by their own slice's rates → re-analysis → both
+survive; the conflict path (direct accept refuses, proposal asks,
+challenger governs, fully-overridden incumbent superseded; the
+keep-incumbent branch records `proposal_conflict_kept`); dismissal
+survival; the stale lifecycle (analyze → clear; confirm → set;
+projection run → clear; filed accept → set; re-analysis → clear);
+missing-table naming; carry-over unit coverage. Inherited tests
+updated for the deliberate contract changes: the four revamp
+choice/supersede tests (rewritten for slices), the
+accepts-only-selected union half, `test_analysis_update_clears_staleness`
+(the through-timestamp contract), and store-boundary stubs in the
+synthetic/filed-accept tests for the two new store calls. Final:
+332 passed, exactly the same 5 inherited failures; tsc error set
+identical to pristine HEAD.

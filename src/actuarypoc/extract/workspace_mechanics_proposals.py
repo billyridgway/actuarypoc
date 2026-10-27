@@ -52,15 +52,16 @@ from actuarypoc.extract.workspace_mechanics_panel import (
 from actuarypoc.extract.workspace_ul_mechanics import (
     accept_filed_mechanic,
     candidate_diff,
-    candidate_group_key,
+    candidate_effective_rows,
     candidate_selector_summary,
+    conflicting_row_selectors,
     rows_coverage_text,
 )
 
 
 PROPOSAL_KIND_FILED_TABLE = "filed_table"
-#: Unification revamp: filed-table proposals are one CHOICE per
-#: alternative group (see _filed_table_proposals).
+#: Filed-table proposals are one per pending candidate (see
+#: _filed_table_proposals); the kind name is kept from the revamp.
 PROPOSAL_KIND_FILED_TABLE_CHOICE = "filed_table_choice"
 PROPOSAL_KIND_EQUATION = "equation"
 # Retired by Phase 7 (kept as a name so old payloads stay readable):
@@ -120,17 +121,18 @@ def _proposal_id(kind: str, payload: Dict[str, Any]) -> str:
 
 
 def _filed_table_proposals(artifact: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """One CHOICE proposal per group of alternative filed tables.
+    """One proposal per PENDING filed candidate — slices, not versions.
 
-    Unification revamp: two documents filing the same table (the
-    base specimen and its Nicotine variant) used to generate one
-    proposal EACH, so the user confirmed a sequence of alternatives
-    and accepting both stacked their rows.  Now candidates in one
-    alternative group (same mechanic; for fees, the same component
-    set) form a single proposal whose options are the candidates,
-    with a computed diff between them.  Once any candidate in the
-    group is in force, the group leaves the queue — choosing or
-    switching is then a slot-card action, not a recurring proposal.
+    Candidates are selector slices of one table (Oct 27, 2026 model
+    correction): the base specimen's Non-Tobacco COI rows and the
+    Nicotine specimen's Tobacco rows are complementary coverage, so
+    each pending candidate is proposed on its own and accepting one
+    never displaces another — the table in force is the union.  The
+    unification revamp's one-choice-per-group shape survives only
+    where a choice is genuinely required: a pending candidate that
+    prices a selector differently from a candidate already in force
+    is proposed as a conflict choice between the version in force
+    and the challenger, over exactly the rows where they disagree.
     """
 
     proposals: List[Dict[str, Any]] = []
@@ -148,103 +150,179 @@ def _filed_table_proposals(artifact: Dict[str, Any]) -> List[Dict[str, Any]]:
             str((row.get("provenance") or {}).get("candidateId"))
             for row in (artifact.get("usable") or {}).get(mechanic) or []
         }
-        groups: Dict[Any, List[Dict[str, Any]]] = {}
+        accepted = [
+            candidate
+            for candidate in candidates or []
+            if isinstance(candidate, dict)
+            and candidate.get("reviewStatus") == "accepted"
+        ]
+        was = _corrections.describe_current(artifact, slot)
         for candidate in candidates or []:
             if not isinstance(candidate, dict):
                 continue
-            groups.setdefault(candidate_group_key(str(mechanic), candidate), []).append(candidate)
-        for group_key, members in groups.items():
-            if any(member.get("reviewStatus") == "accepted" for member in members):
-                continue  # a choice was made; switching lives on the slot card
-            pending = [
-                member for member in members
-                if member.get("reviewStatus") == "review_required"
-                and str(member.get("id") or "")
-                and str(member.get("id")) not in usable_ids
-            ]
-            if not pending:
+            candidate_id = str(candidate.get("id") or "")
+            if not candidate_id or candidate.get("reviewStatus") != "review_required":
                 continue
-            was = _corrections.describe_current(artifact, slot)
-            options: List[Dict[str, Any]] = []
-            for candidate in pending:
-                candidate_id = str(candidate.get("id") or "")
-                provenance = candidate.get("provenance") or {}
-                rows = list(candidate.get("rows") or [])
-                evidence = {
-                    "filename": candidate.get("filename") or provenance.get("filename"),
-                    "page": candidate.get("page") or provenance.get("page"),
-                    "heading": candidate.get("tableHeading"),
-                    "snippet": (
-                        f"{candidate.get('rowCount')} rows extracted"
-                        + (f" under “{candidate.get('tableHeading')}”" if candidate.get("tableHeading") else "")
-                        + (f" ({candidate.get('valueBasis')})" if candidate.get("valueBasis") else "")
-                    ),
-                }
-                options.append({
-                    "candidateId": candidate_id,
-                    "filename": evidence["filename"],
-                    "page": evidence["page"],
-                    "tableHeading": candidate.get("tableHeading"),
-                    "rowCount": candidate.get("rowCount") or len(rows),
-                    "valueBasis": candidate.get("valueBasis"),
-                    "coverageText": rows_coverage_text(rows),
-                    "selectors": candidate_selector_summary(rows),
-                    "evidence": evidence,
-                    "confirmBack": (
-                        f"{slot['label']}: was {was['description']}; now the filed table"
-                        f" of {candidate.get('rowCount')} rows"
-                        + (f" from {evidence['filename']}" if evidence.get("filename") else "")
-                        + (f", p. {evidence['page']}" if evidence.get("page") else "")
-                        + ", accepted on your confirmation."
-                    ),
-                })
-            first_rows = list(pending[0].get("rows") or [])
-            option_diffs: List[Dict[str, Any]] = []
-            for candidate in pending[1:]:
-                diff = candidate_diff(first_rows, list(candidate.get("rows") or []), str(mechanic))
-                option_diffs.append({
-                    "candidateId": str(candidate.get("id") or ""),
-                    "comparedTo": str(pending[0].get("id") or ""),
-                    "identicalRows": diff["identicalRows"],
-                    "differingRows": diff["differingRows"],
-                    "onlyInFirst": diff["onlyInA"],
-                    "onlyInOption": diff["onlyInB"],
+            if candidate_id in usable_ids:
+                continue
+            provenance = candidate.get("provenance") or {}
+            rows = list(candidate.get("rows") or [])
+            evidence = {
+                "filename": candidate.get("filename") or provenance.get("filename"),
+                "page": candidate.get("page") or provenance.get("page"),
+                "heading": candidate.get("tableHeading"),
+                "snippet": (
+                    f"{candidate.get('rowCount')} rows extracted"
+                    + (f" under “{candidate.get('tableHeading')}”" if candidate.get("tableHeading") else "")
+                    + (f" ({candidate.get('valueBasis')})" if candidate.get("valueBasis") else "")
+                ),
+            }
+            option = {
+                "candidateId": candidate_id,
+                "filename": evidence["filename"],
+                "page": evidence["page"],
+                "tableHeading": candidate.get("tableHeading"),
+                "rowCount": candidate.get("rowCount") or len(rows),
+                "valueBasis": candidate.get("valueBasis"),
+                "coverageText": rows_coverage_text(rows),
+                "selectors": candidate_selector_summary(rows),
+                "evidence": evidence,
+                "inForce": False,
+            }
+            # Genuine conflicts only: rows this candidate and a
+            # candidate in force both carry, priced differently.
+            conflicts: List[Dict[str, Any]] = []
+            differing_total = 0
+            for incumbent in accepted:
+                incumbent_rows = candidate_effective_rows(incumbent)
+                conf = conflicting_row_selectors(str(mechanic), rows, incumbent_rows)
+                if not conf:
+                    continue
+                diff = candidate_diff(rows, incumbent_rows, str(mechanic))
+                conflicts.append({
+                    "candidateId": str(incumbent.get("id") or ""),
+                    "filename": incumbent.get("filename"),
+                    "page": incumbent.get("page"),
+                    "differingRows": len(conf),
                     "examples": diff["examples"],
                 })
-            if len(options) == 1:
-                label = (
-                    f"Accept the filed {slot['label'].lower()} table"
-                    f" from {options[0]['filename'] or 'the filing'}"
-                    + (f" (p. {options[0]['page']})" if options[0].get("page") else "")
+                differing_total += len(conf)
+            if not conflicts:
+                option["confirmBack"] = (
+                    f"{slot['label']}: was {was['description']}; now the filed table"
+                    f" of {candidate.get('rowCount')} rows"
+                    + (f" from {evidence['filename']}" if evidence.get("filename") else "")
+                    + (f", p. {evidence['page']}" if evidence.get("page") else "")
+                    + ", accepted on your confirmation. It adds its coverage to"
+                    " the table in force — versions already accepted stay in force."
                 )
-                confirm_back = options[0]["confirmBack"]
-            else:
-                label = (
-                    f"Choose the filed {slot['label'].lower()} table — "
-                    f"{len(options)} filed versions"
-                )
-                confirm_back = (
-                    f"{slot['label']}: was {was['description']}; now the filed table "
-                    "you choose below, accepted on your confirmation."
-                )
+                proposals.append({
+                    "id": _proposal_id(PROPOSAL_KIND_FILED_TABLE_CHOICE, {
+                        "slot": slot["id"], "candidateId": candidate_id,
+                    }),
+                    "kind": PROPOSAL_KIND_FILED_TABLE_CHOICE,
+                    "slot": slot["id"],
+                    "mechanic": mechanic,
+                    "candidateId": candidate_id,
+                    "options": [option],
+                    "optionDiffs": [],
+                    "switch": None,
+                    "variant": None,
+                    "params": None,
+                    "label": (
+                        f"Accept the filed {slot['label'].lower()} table"
+                        f" from {evidence['filename'] or 'the filing'}"
+                        + (f" (p. {evidence['page']})" if evidence.get("page") else "")
+                    ),
+                    "confirmBack": option["confirmBack"],
+                    "evidence": evidence,
+                    "status": "pending",
+                })
+                continue
+            incumbent = conflicts[0]
+            incumbent_candidate = next(
+                item for item in accepted
+                if str(item.get("id") or "") == incumbent["candidateId"]
+            )
+            incumbent_rows = list(incumbent_candidate.get("rows") or [])
+            full_diff = candidate_diff(rows, incumbent_rows, str(mechanic))
+            incumbent_option = {
+                "candidateId": incumbent["candidateId"],
+                "filename": incumbent["filename"],
+                "page": incumbent["page"],
+                "tableHeading": incumbent_candidate.get("tableHeading"),
+                "rowCount": incumbent_candidate.get("rowCount") or len(incumbent_rows),
+                "valueBasis": incumbent_candidate.get("valueBasis"),
+                "coverageText": rows_coverage_text(incumbent_rows),
+                "selectors": candidate_selector_summary(incumbent_rows),
+                "evidence": {
+                    "filename": incumbent["filename"],
+                    "page": incumbent["page"],
+                    "heading": incumbent_candidate.get("tableHeading"),
+                    "snippet": (
+                        f"{incumbent_candidate.get('rowCount')} rows extracted"
+                        + " — already in force"
+                    ),
+                },
+                "inForce": True,
+                "confirmBack": (
+                    f"{slot['label']}: keep the filed table"
+                    f" from {incumbent['filename'] or 'the filing'} as the version"
+                    f" that governs the {differing_total} row(s) where the two"
+                    f" filings disagree; the table from"
+                    f" {evidence['filename'] or 'the filing'} is not accepted"
+                    " for those rows."
+                ),
+            }
+            option["confirmBack"] = (
+                f"{slot['label']}: accept the filed table"
+                f" of {candidate.get('rowCount')} rows"
+                f" from {evidence['filename'] or 'the filing'}"
+                + (f", p. {evidence['page']}" if evidence.get("page") else "")
+                + f"; where its rows disagree with the table in force"
+                f" from {incumbent['filename'] or 'the filing'}"
+                f" ({differing_total} row(s)), this version's rows govern"
+                " and the in-force version's are overridden."
+            )
             proposals.append({
                 "id": _proposal_id(PROPOSAL_KIND_FILED_TABLE_CHOICE, {
                     "slot": slot["id"],
-                    "group": [str(part) for part in group_key[1]] or ["-"],
-                    "candidateIds": sorted(option["candidateId"] for option in options),
+                    "candidateId": candidate_id,
+                    "conflictWith": incumbent["candidateId"],
                 }),
                 "kind": PROPOSAL_KIND_FILED_TABLE_CHOICE,
                 "slot": slot["id"],
                 "mechanic": mechanic,
-                "candidateId": options[0]["candidateId"] if len(options) == 1 else None,
-                "options": options,
-                "optionDiffs": option_diffs,
+                "candidateId": None,
+                "options": [incumbent_option, option],
+                "optionDiffs": [{
+                    "candidateId": candidate_id,
+                    "comparedTo": incumbent["candidateId"],
+                    "identicalRows": full_diff["identicalRows"],
+                    "differingRows": differing_total,
+                    "onlyInFirst": full_diff["onlyInB"],
+                    "onlyInOption": full_diff["onlyInA"],
+                    "examples": incumbent["examples"],
+                }],
+                "conflict": {
+                    "candidateId": candidate_id,
+                    "incumbentCandidateIds": [item["candidateId"] for item in conflicts],
+                    "differingRows": differing_total,
+                    "examples": incumbent["examples"],
+                },
                 "switch": None,
                 "variant": None,
                 "params": None,
-                "label": label,
-                "confirmBack": confirm_back,
-                "evidence": options[0]["evidence"],
+                "label": (
+                    f"Conflicting filed {slot['label'].lower()} tables — choose"
+                    f" which governs the {differing_total} row(s) where they disagree"
+                ),
+                "confirmBack": (
+                    f"{slot['label']}: two filed versions disagree on"
+                    f" {differing_total} row(s) where their coverage overlaps."
+                    " Choose which version governs those rows."
+                ),
+                "evidence": evidence,
                 "status": "pending",
             })
     return proposals
@@ -464,9 +542,12 @@ def apply_proposal(
     origin and evidence stamped onto the equation record.  The caller
     (the API) enforces the confirmation gate before calling this.
 
-    A filed-table CHOICE proposal additionally requires the chosen
-    option (``option_candidate_id``) unless it carries exactly one
-    option — the choice is the user's, never a default.
+    A filed-table proposal carries its candidate as the single
+    option, or — where the candidate conflicts with a table in
+    force — two options (the version in force vs the challenger);
+    either way the chosen option (``option_candidate_id``) is
+    required unless the proposal carries exactly one option — the
+    choice is the user's, never a default.
     """
 
     slot = SLOT_BY_ID[str(proposal["slot"])]
@@ -494,11 +575,53 @@ def apply_proposal(
             candidate_id = str(proposal["candidateId"])
             confirm_back = proposal["confirmBack"]
             evidence = proposal["evidence"]
+        conflict = proposal.get("conflict") or {}
+        incumbent_ids = {
+            str(item) for item in conflict.get("incumbentCandidateIds") or []
+        }
+        if incumbent_ids and candidate_id in incumbent_ids:
+            # The user chose the version in force for the contested
+            # rows: the challenger is not accepted.  The decision is
+            # recorded — a dismissal entry so the conflict proposal
+            # does not regenerate, and a change record that states
+            # what was decided.  Nothing about the tables changes.
+            result = deepcopy(artifact or {})
+            dismissed = result.setdefault("dismissedProposals", [])
+            if not any(
+                item.get("id") == proposal["id"]
+                for item in dismissed if isinstance(item, dict)
+            ):
+                dismissed.append({"id": proposal["id"], "who": who, "at": at})
+            change = _change_record(
+                workspace_id=workspace_id,
+                slot=slot,
+                kind="proposal_conflict_kept",
+                who=who,
+                at=at,
+                summary=(
+                    f"Confirmed extraction proposal: {confirm_back} "
+                    f"(evidence: {evidence.get('filename')}"
+                    + (f", p. {evidence.get('page')}" if evidence.get("page") else "")
+                    + ")"
+                ),
+                prior=_summarize_rows(
+                    list(((artifact or {}).get("usable") or {}).get(mechanic) or [])
+                ),
+                new={
+                    "status": "kept_in_force",
+                    "proposalId": proposal["id"],
+                    "candidateId": conflict.get("candidateId"),
+                    "keptCandidateId": candidate_id,
+                },
+            )
+            change["proposalId"] = proposal["id"]
+            return {"artifact": result, "change": change, "proposal": proposal}
         accepted = accept_filed_mechanic(
             deepcopy(artifact or {}),
             mechanic,
             candidate_id=candidate_id,
             reviewed_by=who,
+            resolve_conflict=bool(incumbent_ids),
         )
         result = _ws_equations.transcribe_tables_as_approved(
             accepted, who=who, at=at

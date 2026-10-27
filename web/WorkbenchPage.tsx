@@ -115,6 +115,20 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
     void reload();
   }, [reload]);
 
+  // While an analysis runs on the server, poll the workspace: the
+  // reload that observes its completion bumps the inputs epoch, so
+  // both panels refetch the post-analysis artifact — an open page
+  // can never sit on pre-analysis panel state beside the new saved
+  // projection (Oct 27, 2026).
+  const analysisState = meta?.analysisJob?.state;
+  React.useEffect(() => {
+    if (analysisState !== "running") return;
+    const timer = window.setInterval(() => {
+      void reload();
+    }, 4000);
+    return () => window.clearInterval(timer);
+  }, [analysisState, reload]);
+
   // Filing-tab gap links point at a slot card on the Inputs tab:
   // switch tabs (the panel stays mounted, so this only reveals it),
   // then scroll the slot into view once it is visible.
@@ -137,8 +151,10 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
   const trust = trustLevelLabel(readiness.projectionTrustLevel ?? data?.projectionTrustLevel);
   const gapItems: any[] = Array.isArray(data?.gaps?.items) ? data.gaps.items : [];
   const inputsStale = Boolean(meta?.projectionStale);
-  const analysisTime =
-    meta?.analysisJob?.finishedAt || meta?.updatedAt || null;
+  const analysisRunning = analysisState === "running";
+  // The counts are labeled with the last COMPLETED analysis — never
+  // the workspace's updatedAt, which any later edit would move.
+  const analysisTime = meta?.analysisJob?.finishedAt || null;
 
   const scenarioOptions = (inputId: string): Array<{ value: string; label: string }> | null => {
     const node = (ws.projectionGraph?.nodes ?? []).find((n: any) => n.inputId === inputId);
@@ -202,8 +218,13 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
                   the filing's requirements — frozen at the analysis
                   run, not the current approval state (which lives on
                   the Inputs & Equations tab). The label says so. */}
-              Filing review (from the analysis
-              {analysisTime ? ` finished ${analysisTime}` : ""}):{" "}
+              {analysisRunning
+                ? `Filing review (from the last completed analysis${
+                    analysisTime ? ` finished ${analysisTime}` : ""
+                  } — a new analysis is running and this page will refresh when it finishes): `
+                : `Filing review (from the analysis${
+                    analysisTime ? ` finished ${analysisTime}` : ""
+                  }): `}
               {compliance.implemented ?? 0} implemented · {compliance.partial ?? 0} partial ·{" "}
               {compliance.missing ?? 0} missing
               {gapItems.length > 0 ? ` · ${gapItems.length} open gap${gapItems.length === 1 ? "" : "s"}` : ""}
@@ -212,11 +233,19 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
           {inputsStale && (
             <div className="workbench__stale" role="status">
               <span>
-                Inputs changed since the last analysis — the saved projection may be
-                stale.{" "}
+                Inputs changed since the saved projection was computed — the saved
+                projection may be stale.{" "}
+                {analysisRunning
+                  ? "An analysis is running; this page refreshes when it finishes. "
+                  : ""}
               </span>
-              <button type="button" className="button" disabled={rerunning} onClick={() => void rerunAnalysis()}>
-                {rerunning ? "Re-running…" : "Re-run analysis"}
+              <button
+                type="button"
+                className="button"
+                disabled={rerunning || analysisRunning}
+                onClick={() => void rerunAnalysis()}
+              >
+                {analysisRunning ? "Analysis running…" : rerunning ? "Re-running…" : "Re-run analysis"}
               </button>{" "}
               <span>or re-run the projection with the scenario below.</span>
             </div>
@@ -246,12 +275,14 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
             {"policy_fee" in ws.values && scenarioField("policy_fee", "Policy fee (annual)", "number")}
           </div>
           <div className="workbench__scenario-actions">
-            <span className={`logic-workspace__run-state${ws.dirty || !ws.selectorReady ? " is-dirty" : ""}`}>
+            <span className={`logic-workspace__run-state${ws.dirty || !ws.selectorReady || inputsStale ? " is-dirty" : ""}`}>
               {!ws.selectorReady
                 ? `Projection needs ${ws.missingSelectors.join(", ")}`
-                : ws.dirty
-                  ? "Inputs changed"
-                  : "Projection current"}
+                : inputsStale
+                  ? "Saved projection is stale"
+                  : ws.dirty
+                    ? "Inputs changed"
+                    : "Projection current"}
             </span>
             <button type="submit" className="button" disabled={ws.running || !ws.selectorReady}>
               {ws.running ? "Running projection…" : "Run projection"}

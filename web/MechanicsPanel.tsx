@@ -37,7 +37,8 @@ interface SlotView {
     rowCount?: number | null;
     valueBasis?: string | null;
   }>;
-  /** Unification revamp: every filed candidate, as one choice. */
+  /** Every filed candidate, each approved independently (selector
+   * slices of one table since Oct 27, 2026). */
   candidates?: CandidateView[];
   coverageText?: string;
   usedByLabels?: string[];
@@ -70,6 +71,8 @@ interface CandidateView {
   inForce?: boolean;
   coverageText?: string;
   selectors?: Record<string, any[]>;
+  overriddenRowCount?: number;
+  overriddenBy?: string | null;
   diffVsReference?: CandidateDiff | null;
   referenceCandidateId?: string;
   referenceInForce?: boolean;
@@ -117,6 +120,7 @@ interface ProposalOption {
   valueBasis?: string | null;
   coverageText?: string;
   selectors?: Record<string, any[]>;
+  inForce?: boolean;
   confirmBack: string;
   evidence?: {
     filename?: string | null;
@@ -134,6 +138,12 @@ interface ProposalView {
   confirmBack: string;
   candidateId?: string | null;
   options?: ProposalOption[];
+  conflict?: {
+    candidateId: string;
+    incumbentCandidateIds: string[];
+    differingRows: number;
+    examples?: Array<Record<string, any>>;
+  } | null;
   optionDiffs?: Array<{
     candidateId: string;
     comparedTo: string;
@@ -373,9 +383,13 @@ export const MechanicsPanel: React.FC<{
   const [corrBands, setCorrBands] = React.useState<Record<string, BandRow[]>>({});
   const [busyProposal, setBusyProposal] = React.useState<string | null>(null);
   // Unification revamp: the chosen option of a filed-table choice
-  // proposal, and the chosen candidate on a slot card.
+  // proposal. Slot-card candidates are approved independently since
+  // the selector-slice model (Oct 27, 2026) — no radio choice there.
   const [choiceSelection, setChoiceSelection] = React.useState<Record<string, string>>({});
-  const [candidateSelection, setCandidateSelection] = React.useState<Record<string, string>>({});
+  // A refused accept that named a genuine conflict, keyed
+  // `${slotId}:${candidateId}` — the card then offers the explicit
+  // override decision instead of a bare error.
+  const [conflictFor, setConflictFor] = React.useState<Record<string, string>>({});
 
   const bandsFor = (slot: SlotView): BandRow[] => {
     const existing = corrBands[slot.id];
@@ -492,7 +506,11 @@ export const MechanicsPanel: React.FC<{
     }
   };
 
-  const handleAcceptCandidate = async (slot: SlotView, candidateId?: string) => {
+  const handleAcceptCandidate = async (
+    slot: SlotView,
+    candidateId?: string,
+    resolveConflict = false,
+  ) => {
     if (!slot.mechanic) return;
     setBusySlot(slot.id);
     setMessage(null);
@@ -503,13 +521,42 @@ export const MechanicsPanel: React.FC<{
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ mechanic: slot.mechanic, candidateId: candidateId ?? null }),
+          body: JSON.stringify({
+            mechanic: slot.mechanic,
+            candidateId: candidateId ?? null,
+            resolveConflict,
+          }),
         },
       );
       if (!resp.ok) {
         const text = await resp.text();
-        throw new Error(text || `Accept failed (HTTP ${resp.status})`);
+        let detail = text;
+        try {
+          detail = JSON.parse(text)?.detail || text;
+        } catch {
+          /* keep raw text */
+        }
+        // A genuine conflict is a decision to offer, not an error:
+        // the row disagrees with a version in force, and only the
+        // user can say which governs. Nothing was written.
+        if (
+          resp.status === 409 &&
+          typeof detail === "string" &&
+          detail.includes("conflicts with the accepted table")
+        ) {
+          setConflictFor((prev) => ({
+            ...prev,
+            [`${slot.id}:${candidateId ?? ""}`]: detail,
+          }));
+          return;
+        }
+        throw new Error(detail || `Accept failed (HTTP ${resp.status})`);
       }
+      setConflictFor((prev) => {
+        const next = { ...prev };
+        delete next[`${slot.id}:${candidateId ?? ""}`];
+        return next;
+      });
       setMessage(`Filed ${slot.label.toLowerCase()} accepted and in force.`);
       await loadPanel();
       if (onSnapshotReload) onSnapshotReload();
@@ -532,7 +579,7 @@ export const MechanicsPanel: React.FC<{
         const text = await resp.text();
         throw new Error(text || `Re-run failed (HTTP ${resp.status})`);
       }
-      setMessage("Analysis re-run with the edited inputs.");
+      setMessage("Analysis started — it runs on the server; this page refreshes when it finishes.");
       await loadPanel();
       if (onSnapshotReload) onSnapshotReload();
     } catch (err: any) {
@@ -745,7 +792,7 @@ export const MechanicsPanel: React.FC<{
       {message && <p className="muted">{message}</p>}
       {panel?.projectionStale && !hideStaleBanner && (
         <div className="slot-stale-banner">
-          <strong>Inputs changed since the last analysis.</strong>{" "}
+          <strong>Inputs changed since the saved projection was computed.</strong>{" "}
           The saved projection may be stale (changed: {panel.projectionStaleSlots.map(slotLabel).join(", ")}).{" "}
           <button type="button" className="button" disabled={rerunning} onClick={handleRerun}>
             {rerunning ? "Re-running…" : "Re-run analysis"}
@@ -778,6 +825,14 @@ export const MechanicsPanel: React.FC<{
                   <span className="basis-tag">equation</span>
                 ) : null}
               </p>
+              {proposal.conflict && (
+                <p className="error">
+                  These two filed tables disagree on {proposal.conflict.differingRows}{" "}
+                  row{proposal.conflict.differingRows === 1 ? "" : "s"} where their
+                  coverage overlaps — choose which one governs those rows. Nothing is
+                  merged silently.
+                </p>
+              )}
               {proposal.kind === "equation" && proposal.rendering ? (
                 <p className="muted">Equation: {proposal.rendering}</p>
               ) : null}
@@ -809,7 +864,10 @@ export const MechanicsPanel: React.FC<{
                         {option.coverageText ? ` — ${option.coverageText}` : ""}
                         {selectorSummaryText(option.selectors)
                           ? ` · ${selectorSummaryText(option.selectors)}`
-                          : ""}
+                          : ""}{" "}
+                        {option.inForce ? (
+                          <span className="basis-tag">currently in force</span>
+                        ) : null}
                       </span>
                     </label>
                   ))}
@@ -949,76 +1007,80 @@ export const MechanicsPanel: React.FC<{
           {(slot.candidates ?? []).length > 0 && (
             <div className="slot-candidate">
               <p className="muted">
-                <strong>Filed versions of this table</strong> — one choice: the version
-                in force is the one the projection reads. Choosing another replaces it
-                (the replaced version stays on record as superseded).
+                <strong>Filed versions of this table</strong> — each version covers
+                part of the table's selectors; accept each one that should be in
+                force. The table in force is the union of the accepted versions.
               </p>
-              <div className="choice-options" role="radiogroup" aria-label={`Filed versions — ${slot.label}`}>
+              <div className="choice-options">
                 {(slot.candidates ?? []).map((candidate) => {
-                  const selectedId =
-                    candidateSelection[slot.id] ??
-                    (slot.candidates ?? []).find((c) => c.inForce)?.id;
+                  const conflictKey = `${slot.id}:${candidate.id ?? ""}`;
                   return (
-                    <label
+                    <div
                       key={candidate.id || `${candidate.filename}-${candidate.page}`}
                       className="choice-option"
                     >
-                      <input
-                        type="radio"
-                        name={`candidates-${slot.id}`}
-                        checked={selectedId === candidate.id}
-                        onChange={() =>
-                          setCandidateSelection((prev) => ({
-                            ...prev,
-                            [slot.id]: candidate.id ?? "",
-                          }))
-                        }
-                      />
                       <span>
                         <strong>{candidate.filename || "the filing"}</strong>
                         {candidate.page != null ? ` (p. ${candidate.page})` : ""}
                         {candidate.coverageText ? ` — ${candidate.coverageText}` : ""}
                         {selectorSummaryText(candidate.selectors)
-                          ? ` · ${selectorSummaryText(candidate.selectors)}`
+                          ? ` · Covers: ${selectorSummaryText(candidate.selectors)}`
                           : ""}{" "}
                         {candidate.inForce ? (
-                          <span className="basis-tag">In force</span>
+                          candidate.overriddenRowCount ? (
+                            <span className="basis-tag">
+                              In force — {candidate.overriddenRowCount} row
+                              {candidate.overriddenRowCount === 1 ? "" : "s"} overridden
+                              by a later acceptance
+                            </span>
+                          ) : (
+                            <span className="basis-tag">In force — part of the table</span>
+                          )
                         ) : candidate.reviewStatus === "superseded" ? (
                           <span className="basis-tag">Superseded</span>
                         ) : (
                           <span className="basis-tag">Awaiting review</span>
                         )}
                       </span>
-                    </label>
+                      {candidate.diffVsReference && !candidate.inForce && (
+                        <p className="muted">
+                          Compared with the version in force:{" "}
+                          {candidateDiffText(candidate.diffVsReference)}.
+                        </p>
+                      )}
+                      {!candidate.inForce && (
+                        <p>
+                          <button
+                            type="button"
+                            className="button button-secondary"
+                            disabled={busySlot === slot.id}
+                            onClick={() => void handleAcceptCandidate(slot, candidate.id)}
+                          >
+                            {candidate.reviewStatus === "superseded"
+                              ? "Put this version back in force"
+                              : "Accept this version"}
+                          </button>
+                        </p>
+                      )}
+                      {conflictFor[conflictKey] && (
+                        <p className="error">
+                          {conflictFor[conflictKey]}{" "}
+                          <button
+                            type="button"
+                            className="button"
+                            disabled={busySlot === slot.id}
+                            onClick={() =>
+                              void handleAcceptCandidate(slot, candidate.id, true)
+                            }
+                          >
+                            Accept and override the conflicting rows
+                          </button>
+                        </p>
+                      )}
+                    </div>
                   );
                 })}
               </div>
-              {(() => {
-                const selectedId =
-                  candidateSelection[slot.id] ??
-                  (slot.candidates ?? []).find((c) => c.inForce)?.id;
-                const selected = (slot.candidates ?? []).find((c) => c.id === selectedId);
-                return (
-                  <>
-                    {selected?.diffVsReference && (
-                      <p className="muted">
-                        Compared with the version in force:{" "}
-                        {candidateDiffText(selected.diffVsReference)}.
-                      </p>
-                    )}
-                    <button
-                      type="button"
-                      className="button button-secondary"
-                      disabled={busySlot === slot.id || !selected || selected.inForce}
-                      onClick={() => void handleAcceptCandidate(slot, selected?.id)}
-                    >
-                      {selected?.reviewStatus === "superseded"
-                        ? "Put this version back in force"
-                        : "Put the selected version in force"}
-                    </button>
-                  </>
-                );
-              })()}
             </div>
           )}
           <details className="slot-details">

@@ -22,6 +22,18 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _parse_iso(value: Any) -> Optional[datetime]:
+    """Parse an ISO-8601 timestamp for ordering comparisons; None
+    when the value is absent or unparseable (never raises)."""
+
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def _workspace_key(workspace_id: str) -> str:
     return f"workspaces/{workspace_id}/workspace.json"
 
@@ -415,10 +427,39 @@ def update_workspace_analysis(
     compliance_missing_count: Optional[int] = None,
     projection_trust_level: Optional[str] = None,
     last_analysis_run_id: Optional[str] = None,
+    clear_projection_stale_through: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     workspace = get_workspace(workspace_id)
     if workspace is None:
         return None
+    # Staleness has one precise meaning: the saved projection predates
+    # the latest input change (marked by projection_stale_since).  A
+    # completed analysis recomputes the saved projection from the
+    # inputs as of the moment the analysis STARTED, so it clears only
+    # staleness marked at or before that moment — an input change
+    # made while the analysis ran postdates the recomputation and
+    # must stay marked.  Callers pass the stale-since they observed
+    # at start as ``clear_projection_stale_through``; without it, an
+    # existing mark is preserved (e.g. the analysis-failure path,
+    # whose snapshot was never refreshed).
+    current_since = workspace.get("projection_stale_since")
+    if current_since is None or (
+        clear_projection_stale_through is not None
+        and _parse_iso(current_since) is not None
+        and _parse_iso(clear_projection_stale_through) is not None
+        and _parse_iso(current_since) <= _parse_iso(clear_projection_stale_through)
+    ):
+        stale_fields = {
+            "projection_stale": False,
+            "projection_stale_since": None,
+            "projection_stale_slots": [],
+        }
+    else:
+        stale_fields = {
+            "projection_stale": bool(workspace.get("projection_stale")),
+            "projection_stale_since": current_since,
+            "projection_stale_slots": list(workspace.get("projection_stale_slots") or []),
+        }
     workspace.update(
         {
             "status": status,
@@ -436,12 +477,7 @@ def update_workspace_analysis(
             "compliance_missing_count": compliance_missing_count,
             "projection_trust_level": projection_trust_level,
             "last_analysis_run_id": last_analysis_run_id,
-            # A fresh analysis recomputes the projection from the current
-            # mechanics (workspace edits included), so it clears any
-            # staleness a slot edit marked.
-            "projection_stale": False,
-            "projection_stale_since": None,
-            "projection_stale_slots": [],
+            **stale_fields,
             "updated_at": _now(),
         }
     )

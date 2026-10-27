@@ -88,7 +88,12 @@ from actuarypoc.extract.assumptions_for_product import (
 )
 from actuarypoc.extract.mechanics_for_product import generate_mechanics_for_product
 from actuarypoc.extract.mechanic_assumptions_extractor import extract_mechanic_assumptions
-from actuarypoc.extract.workspace_ul_mechanics import accept_filed_mechanic, extract_ul_mechanics, usable_mechanics
+from actuarypoc.extract.workspace_ul_mechanics import (
+    accept_filed_mechanic,
+    carry_over_decision_state as _carry_over_decision_state,
+    extract_ul_mechanics,
+    usable_mechanics,
+)
 from actuarypoc.extract.workspace_mechanics_panel import (
     SLOT_BY_ID as _SLOT_BY_ID,
     annotate_gap_items as _annotate_gap_items,
@@ -2751,6 +2756,19 @@ def api_workspace_analyze(
             workspace_id, exc,
         )
         prior_artifact = {}
+    # Confirmed decision state is durable too (Oct 27, 2026): filed-
+    # table acceptances, override/supersede records, proposal
+    # dismissals, and synthetic tables transplant from the prior
+    # artifact by candidate identity BEFORE the edit/correction
+    # re-applies (which keep their precedence for their mechanics).
+    # The first version of this rebuild carried only edits,
+    # corrections, and equation records — one re-run un-filed every
+    # accepted table while the equations that read them survived.
+    carried = _carry_over_decision_state(mechanics_artifact, prior_artifact)
+    mechanics_artifact = carried["artifact"]
+    for note in carried["notes"]:
+        logging.warning("[workspace-analysis] %s: %s", workspace_id, note)
+        mechanics_artifact.setdefault("warnings", []).append(note)
     mechanics_artifact = _reapply_workspace_edits(
         mechanics_artifact, prior_artifact.get("workspaceEdits")
     )
@@ -2933,6 +2951,12 @@ def api_workspace_analyze(
         compliance_missing_count=compliance.get("missing"),
         projection_trust_level=readiness.get("projectionTrustLevel"),
         last_analysis_run_id=None,
+        # The saved projection was recomputed from the inputs as of
+        # this analysis's start (``ws`` was read then): clear only
+        # staleness marked at or before that read.  An input change
+        # made while this analysis ran postdates the recomputation
+        # and stays marked.
+        clear_projection_stale_through=ws.get("projection_stale_since"),
     )
     if updated is None:
         raise HTTPException(status_code=503, detail="Failed to persist workspace analysis result")
@@ -3117,6 +3141,54 @@ def _selector_match_issues(
             "missingSelectors": missing_selectors,
             "message": message,
         })
+
+    # An in-force equation whose table is not in force AT ALL cannot
+    # calculate from the filing — name it here, before the run,
+    # instead of letting the run surface it afterwards as a per-year
+    # evaluation failure with no cause (Oct 27, 2026: the projection
+    # ran, COI priced at zero, and coverageIssues was empty because
+    # this check only looked at tables that had rows).
+    table_labels = {
+        "coi": "COI",
+        "surrender": "surrender",
+        "corridor": "corridor / minimum death benefit",
+        "fees": "policy and admin fees",
+        "nar_factors": "NAR factor",
+    }
+    equations_in_force = executable.get("_equations") or {}
+    named: set = set()
+    for equation_mechanic in _equations.MECHANICS:
+        record = equations_in_force.get(equation_mechanic)
+        if not isinstance(record, dict):
+            continue
+        for reference in _workspace_linkage.body_table_references(record.get("body")):
+            table = str(reference.get("table") or "")
+            if not table or (equation_mechanic, table) in named:
+                continue
+            named.add((equation_mechanic, table))
+            if list(executable.get(table) or []):
+                continue
+            label = table_labels.get(table, table)
+            equation_label = _equations.MECHANIC_LABELS.get(
+                equation_mechanic, equation_mechanic
+            )
+            all_years = list(range(1, horizon_years + 1))
+            issues.append({
+                "mechanic": table,
+                "table": table,
+                "kind": "table_not_in_force",
+                "equationMechanic": equation_mechanic,
+                "years": all_years,
+                "yearRange": _year_range_text(all_years),
+                "scenario": scenario,
+                "tableSelectors": {},
+                "missingSelectors": [],
+                "message": (
+                    f"The approved {equation_label.lower()} equation reads "
+                    f"the {label} table, but no {label} table is in force — "
+                    f"accept the filed {label} table so it can be calculated."
+                ),
+            })
     return issues
 
 
@@ -3130,6 +3202,11 @@ class FiledMechanicReviewRequest(BaseModel):  # type: ignore[misc]
     mechanic: str
     candidateId: Optional[str] = None
     reviewedBy: Optional[str] = None
+    # Carries the user's explicit conflict decision: accept anyway,
+    # letting this candidate's rows govern where they disagree with
+    # a candidate already in force.  Without it a genuine conflict
+    # refuses (409) and nothing is written.
+    resolveConflict: bool = False
 
 
 def _status_without_synthetic(artifact: Dict[str, Any], mechanic: str) -> str:
@@ -3166,12 +3243,14 @@ def api_accept_filed_mechanic(
         raise HTTPException(status_code=404, detail="Workspace not found")
     artifact = load_workspace_executable_mechanics(workspace_id) or {}
     mechanic = str(payload.mechanic or "").strip().lower()
+    who = str(payload.reviewedBy or "workspace_user")
     try:
         reviewed = accept_filed_mechanic(
             artifact,
             mechanic,
             candidate_id=payload.candidateId,
-            reviewed_by=str(payload.reviewedBy or "workspace_user"),
+            reviewed_by=who,
+            resolve_conflict=bool(payload.resolveConflict),
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -3181,18 +3260,72 @@ def api_accept_filed_mechanic(
     # alone calculates nothing under the doctrine.
     transcription = _workspace_equations.transcribe_tables_as_approved(
         reviewed,
-        who=str(payload.reviewedBy or "workspace_user"),
+        who=who,
         at=_correction_now(),
     )
     reviewed = transcription["artifact"]
     reviewed["objectKey"] = store_workspace_executable_mechanics(workspace_id, reviewed)
+    # An acceptance is an input change like any other: it is recorded
+    # in the change history and marks the saved projection stale
+    # until a re-run recomputes it.  (This direct path previously did
+    # neither, so a slot-card switch left no trace and no staleness.)
+    review = (reviewed.get("reviews") or {}).get(payload.candidateId or mechanic) or {}
+    accepted_candidate = next(
+        (
+            item
+            for item in (reviewed.get("candidates") or {}).get(mechanic) or []
+            if str(item.get("id")) == str(payload.candidateId)
+        ),
+        None,
+    )
+    slot_id = {
+        "coi": "coi", "surrender": "surrender", "fees": "fees",
+        "nar_factors": "nar", "corridor": "corridor",
+    }.get(mechanic)
+    slot_label = (_SLOT_BY_ID.get(slot_id or "") or {}).get("label") or mechanic
+    source_text = ""
+    if accepted_candidate is not None:
+        source_text = (
+            f" from {accepted_candidate.get('filename') or 'the filing'}"
+            + (f", p. {accepted_candidate.get('page')}" if accepted_candidate.get("page") else "")
+        )
+    overridden_ids = list(review.get("overriddenCandidateIds") or [])
+    change = {
+        "id": f"chg-{uuid.uuid4().hex[:12]}",
+        "workspaceId": workspace_id,
+        "slot": slot_id,
+        "mechanic": mechanic,
+        "kind": "filed_table_accept",
+        "who": who,
+        "at": _correction_now(),
+        "summary": (
+            f"Accepted the filed {slot_label.lower()} table{source_text} — "
+            f"{len((reviewed.get('usable') or {}).get(mechanic) or [])} rows in force"
+            + (
+                f"; its rows govern over {len(overridden_ids)} previously "
+                "accepted version(s) where they disagreed."
+                if overridden_ids else ""
+            )
+        ),
+        "prior": {},
+        "new": {
+            "candidateId": payload.candidateId,
+            "status": (reviewed.get("status") or {}).get(mechanic),
+            "overriddenCandidateIds": overridden_ids,
+        },
+    }
+    append_workspace_mechanics_change(workspace_id, change)
+    if slot_id:
+        set_workspace_projection_stale(workspace_id, stale=True, slots=[slot_id])
     return {
         "accepted": True,
         "mechanic": mechanic,
         "equationsTranscribed": [
             _workspace_equations.record_view(r) for r in transcription["transcribed"]
         ],
-        "review": (reviewed.get("reviews") or {}).get(payload.candidateId or mechanic),
+        "review": review,
+        "change": change,
+        "projectionStale": True,
         "status": (reviewed.get("status") or {}).get(mechanic),
         "activeRowCount": len((reviewed.get("usable") or {}).get(mechanic) or []),
         "remainingCandidateCount": sum(
@@ -3257,6 +3390,7 @@ def api_accept_synthetic_coi(workspace_id: str, payload: SyntheticCoiAcceptReque
         "disclaimer": preview["disclaimer"],
     }
     artifact["objectKey"] = store_workspace_executable_mechanics(workspace_id, artifact)
+    set_workspace_projection_stale(workspace_id, stale=True, slots=["coi"])
     return {"accepted": True, "syntheticCoi": artifact["synthetic"]["coi"]}
 
 
@@ -3275,6 +3409,7 @@ def api_remove_synthetic_coi(workspace_id: str) -> Dict[str, Any]:
     artifact.setdefault("status", {})["coi"] = _status_without_synthetic(artifact, "coi")
     synthetic.pop("coi", None)
     store_workspace_executable_mechanics(workspace_id, artifact)
+    set_workspace_projection_stale(workspace_id, stale=True, slots=["coi"])
     return {"removed": True}
 
 
@@ -3329,6 +3464,7 @@ def api_accept_synthetic_surrender(workspace_id: str, payload: SyntheticCoiAccep
         "disclaimer": preview["disclaimer"],
     }
     artifact["objectKey"] = store_workspace_executable_mechanics(workspace_id, artifact)
+    set_workspace_projection_stale(workspace_id, stale=True, slots=["surrender"])
     return {"accepted": True, "syntheticSurrender": artifact["synthetic"]["surrender"]}
 
 
@@ -3345,6 +3481,7 @@ def api_remove_synthetic_surrender(workspace_id: str) -> Dict[str, Any]:
     artifact.setdefault("status", {})["surrender"] = _status_without_synthetic(artifact, "surrender")
     synthetic.pop("surrender", None)
     store_workspace_executable_mechanics(workspace_id, artifact)
+    set_workspace_projection_stale(workspace_id, stale=True, slots=["surrender"])
     return {"removed": True}
 
 
@@ -4468,18 +4605,29 @@ def api_workspace_projection(
     artifact = load_workspace_executable_mechanics(workspace_id) or {}
     request["_workspaceExecutableMechanics"] = _executable_mechanics_view(artifact)
     selector_issues = _selector_match_issues(request["_workspaceExecutableMechanics"], request)
-    if selector_issues and not payload.allowSelectorFallback:
+    # The gate refuses a run whose IN-FORCE tables do not cover the
+    # scenario (its numbers would be silently wrong).  A table that
+    # is not in force at all is different: the run proceeds and the
+    # response names the missing table (selectorIntegrity issues,
+    # coverageIssues, and missingMechanics reason
+    # "table_not_in_force") — the doctrine's stated absence, not a
+    # refusal, and it needs no fallback authorization.
+    blocking_issues = [
+        issue for issue in selector_issues
+        if issue.get("kind") != "table_not_in_force"
+    ]
+    if blocking_issues and not payload.allowSelectorFallback:
         raise HTTPException(status_code=409, detail={
             "code": "selector_table_mismatch",
             "message": "Accepted filed tables do not cover this underwriting scenario.",
-            "issues": selector_issues,
+            "issues": blocking_issues,
         })
     projection, mechanics, warnings, notes, gaps = _build_ul_projection_view(product_code, request)
     if projection is None:
         raise HTTPException(status_code=503, detail="Diagnostic projection is not available")
     projection["selectorIntegrity"] = {
         "passed": not selector_issues,
-        "fallbackAuthorized": bool(selector_issues and payload.allowSelectorFallback),
+        "fallbackAuthorized": bool(blocking_issues and payload.allowSelectorFallback),
         "issues": selector_issues,
         "scenario": {
             "sex": payload.sex,
@@ -4490,7 +4638,7 @@ def api_workspace_projection(
     if isinstance(projection.get("reconciliation"), dict):
         projection["reconciliation"]["selectorIntegrityPassed"] = not selector_issues
         projection["reconciliation"]["selectorFallbackAuthorized"] = bool(
-            selector_issues and payload.allowSelectorFallback
+            blocking_issues and payload.allowSelectorFallback
         )
     graph_snapshot = dict(ws.get("latest_snapshot_json") or {})
     graph_snapshot["product"] = {
@@ -4502,6 +4650,12 @@ def api_workspace_projection(
     graph_snapshot["mechanicsExplanation"] = mechanics
     graph_snapshot.setdefault("productUnderstanding", _build_product_understanding(graph_snapshot))
     graph_snapshot.setdefault("capabilityAssessment", _build_capability_assessment(graph_snapshot))
+    # The run recomputed the projection from the CURRENT inputs, so
+    # the saved-projection staleness is discharged: the flag means
+    # "the saved projection predates the latest input change", and
+    # after a completed run it no longer does.  (A refused run — the
+    # 409 coverage gate above — discharges nothing.)
+    set_workspace_projection_stale(workspace_id, stale=False)
     return {
         "illustration": projection,
         "mechanicsExplanation": mechanics,
@@ -12891,6 +13045,7 @@ def _run_ul_projection(
         "death_benefit": {"corridor"},
         "policy_fees": {"fees"},
         "premium_load": {"fees"},
+        "nar": {"nar_factors"},
     }
     for issue in coverage_issues:
         for mechanic_name, tables_read in _coverage_tables.items():
@@ -12927,6 +13082,23 @@ def _run_ul_projection(
                     f"No approved {_equations.MECHANIC_LABELS[mechanic].lower()} "
                     "equation is in force, so it is not calculated."
                 ),
+            })
+        elif failed_years and any(
+            item.get("kind") == "table_not_in_force"
+            for item in coverage_by_mechanic.get(mechanic, [])
+        ):
+            # The equation is in force but its table is not: name the
+            # missing table (the coverage issue states it) rather
+            # than reporting a bare evaluation failure.
+            issue = next(
+                item for item in coverage_by_mechanic[mechanic]
+                if item.get("kind") == "table_not_in_force"
+            )
+            missing_mechanics.append({
+                "mechanic": mechanic,
+                "label": _equations.MECHANIC_LABELS[mechanic],
+                "reason": "table_not_in_force",
+                "detail": str(issue.get("message") or ""),
             })
         elif failed_years and coverage_by_mechanic.get(mechanic):
             issue = coverage_by_mechanic[mechanic][0]

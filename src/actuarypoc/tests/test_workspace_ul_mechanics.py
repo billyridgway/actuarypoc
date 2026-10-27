@@ -171,6 +171,18 @@ def test_filed_mechanic_accept_endpoint_persists_reviewed_artifact(monkeypatch) 
         server, "store_workspace_executable_mechanics",
         lambda workspace_id, value: stored.update(value) or "workspaces/demo/executable-mechanics.json",
     )
+    # The accept path also records a change entry and marks the saved
+    # projection stale (Oct 27, 2026); stub that store boundary too.
+    changes = []
+    monkeypatch.setattr(
+        server, "append_workspace_mechanics_change",
+        lambda workspace_id, change: changes.append(change),
+    )
+    stale_marks = []
+    monkeypatch.setattr(
+        server, "set_workspace_projection_stale",
+        lambda workspace_id, **kwargs: stale_marks.append(kwargs),
+    )
 
     response = server.api_accept_filed_mechanic(
         "demo", server.FiledMechanicReviewRequest(mechanic="surrender", reviewedBy="reviewer"),
@@ -180,6 +192,10 @@ def test_filed_mechanic_accept_endpoint_persists_reviewed_artifact(monkeypatch) 
     assert response["status"] == "executable"
     assert stored["reviews"]["surrender"]["reviewedBy"] == "reviewer"
     assert len(stored["usable"]["surrender"]) == 2
+    # The acceptance is on the record and the saved projection is
+    # marked stale until a re-run (Oct 27, 2026).
+    assert changes and changes[0]["kind"] == "filed_table_accept"
+    assert stale_marks == [{"stale": True, "slots": ["surrender"]}]
 
 
 def test_reload_reapplies_accepted_filed_mechanics(monkeypatch) -> None:
@@ -220,16 +236,20 @@ def test_accepts_only_selected_filed_candidate() -> None:
     assert accepted["candidates"]["coi"][0]["reviewStatus"] == "review_required"
     assert accepted["candidates"]["coi"][1]["reviewStatus"] == "accepted"
 
-    # Unification revamp: the two candidates file the SAME table
-    # (alternative specimens), so accepting the other one is a
-    # switch, not a union — it supersedes the first instead of
-    # stacking both into the in-force table.
-    switched = accept_filed_mechanic(accepted, "coi", candidate_id="a")
-    assert len(switched["usable"]["coi"]) == 1
-    assert switched["usable"]["coi"][0]["rate"] == 0.1
-    assert switched["usable"]["coi"][0]["tobacco_status"] == "Non-Tobacco"
-    assert switched["candidates"]["coi"][0]["reviewStatus"] == "accepted"
-    assert switched["candidates"]["coi"][1]["reviewStatus"] == "superseded"
+    # Selector-slice model (Oct 27, 2026, superseding the revamp's
+    # one-choice-per-group rule): the two candidates cover DISJOINT
+    # selectors (Non-Tobacco vs Tobacco), so accepting the second is
+    # additive coverage, not a switch — both stay in force and the
+    # usable table is their union.  (Billy: "I should be able to
+    # approve all of the choices and they should cover the
+    # male/female, tobacco/non, etc.")
+    both = accept_filed_mechanic(accepted, "coi", candidate_id="a")
+    assert len(both["usable"]["coi"]) == 2
+    assert {row["tobacco_status"] for row in both["usable"]["coi"]} == {
+        "Non-Tobacco", "Tobacco",
+    }
+    assert both["candidates"]["coi"][0]["reviewStatus"] == "accepted"
+    assert both["candidates"]["coi"][1]["reviewStatus"] == "accepted"
 
 
 def test_rejects_conflicting_filed_candidates_for_same_selector() -> None:

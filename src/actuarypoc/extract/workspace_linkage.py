@@ -73,6 +73,8 @@ _TABLE_CHANGE_KINDS = {
     "table_replace",
     "nar_factor",
     "proposal_accept",
+    "proposal_conflict_kept",
+    "filed_table_accept",
     "correction",
     "correction_note",
 }

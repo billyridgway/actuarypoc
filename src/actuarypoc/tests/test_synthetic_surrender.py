@@ -87,6 +87,7 @@ def test_accept_remove_and_projection_execution(monkeypatch) -> None:
     monkeypatch.setattr(server, "get_workspace", lambda workspace_id: {"id": workspace_id})
     monkeypatch.setattr(server, "load_workspace_executable_mechanics", lambda workspace_id: artifact)
     monkeypatch.setattr(server, "store_workspace_executable_mechanics", lambda workspace_id, value: stored.append(value) or "key")
+    monkeypatch.setattr(server, "set_workspace_projection_stale", lambda *a, **k: None)
 
     accepted = server.api_accept_synthetic_surrender(
         "workspace-1",
@@ -124,6 +125,7 @@ def test_synthetic_schedule_does_not_hide_pending_filed_candidate(monkeypatch) -
     monkeypatch.setattr(server, "get_workspace", lambda workspace_id: {"id": workspace_id})
     monkeypatch.setattr(server, "load_workspace_executable_mechanics", lambda workspace_id: artifact)
     monkeypatch.setattr(server, "store_workspace_executable_mechanics", lambda workspace_id, value: "key")
+    monkeypatch.setattr(server, "set_workspace_projection_stale", lambda *a, **k: None)
 
     server.api_accept_synthetic_surrender("workspace-1", server.SyntheticCoiAcceptRequest(parameters=PARAMETERS))
     assert artifact["candidates"]["surrender"][0]["reviewStatus"] == "review_required"

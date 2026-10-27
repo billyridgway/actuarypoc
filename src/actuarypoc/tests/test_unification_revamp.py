@@ -153,43 +153,51 @@ def _two_specimen_artifact() -> dict:
     }
 
 
-def test_two_specimens_become_one_choice_with_a_diff():
+def test_two_specimens_become_two_independent_approvals():
+    """Selector-slice model (Oct 27, 2026): the revamp's one-choice-
+    per-group model forced the user to amputate half the table's
+    coverage — the base specimen and the Nicotine specimen are
+    complementary slices (Non-Tobacco vs Tobacco rows), not rival
+    versions.  Each pending candidate is its own approval proposal,
+    labeled with the coverage it adds."""
+
     found = proposals.generate_proposals(_two_specimen_artifact(), [])
-    assert len(found) == 1
-    choice = found[0]
-    assert choice["kind"] == "filed_table_choice"
-    assert choice["candidateId"] is None
-    assert [o["candidateId"] for o in choice["options"]] == ["cand-base", "cand-nic"]
-    # Same rates, different specimen class: no identical/differing
-    # rows (the selectors differ on every row) — the diff says the
-    # rows live on disjoint selectors, and each option's selector
-    # summary names its class.
-    diff = choice["optionDiffs"][0]
-    assert diff["identicalRows"] == 0 and diff["differingRows"] == 0
-    assert diff["onlyInFirst"] == 3 and diff["onlyInOption"] == 3
-    assert choice["options"][0]["selectors"]["tobacco_status"] == ["Non-Tobacco"]
-    assert choice["options"][1]["selectors"]["tobacco_status"] == ["Tobacco"]
+    assert len(found) == 2
+    assert all(p["kind"] == "filed_table_choice" for p in found)
+    by_candidate = {p["candidateId"]: p for p in found}
+    assert set(by_candidate) == {"cand-base", "cand-nic"}
+    for candidate_id, tobacco in (("cand-base", "Non-Tobacco"), ("cand-nic", "Tobacco")):
+        proposal = by_candidate[candidate_id]
+        assert [o["candidateId"] for o in proposal["options"]] == [candidate_id]
+        assert proposal["options"][0]["selectors"]["tobacco_status"] == [tobacco]
+        assert "conflict" not in proposal
 
 
-def test_choice_confirm_requires_the_choice_and_applies_the_chosen_one():
+def test_each_slice_confirms_independently_and_coverage_unions():
     artifact = _two_specimen_artifact()
-    choice = proposals.generate_proposals(artifact, [])[0]
-    with pytest.raises(ValueError, match="Choose which filed table"):
-        proposals.apply_proposal(
-            artifact, choice, workspace_id="ws-t", who="eddy", at="2026-10-27T00:00:00Z",
-        )
+    nic = next(
+        p for p in proposals.generate_proposals(artifact, [])
+        if p["candidateId"] == "cand-nic"
+    )
     outcome = proposals.apply_proposal(
-        artifact, choice, workspace_id="ws-t", who="eddy",
-        at="2026-10-27T00:00:00Z", option_candidate_id="cand-nic",
+        artifact, nic, workspace_id="ws-t", who="eddy", at="2026-10-27T00:00:00Z",
     )
     usable = outcome["artifact"]["usable"]["coi"]
     assert len(usable) == 3
     assert {row["tobacco_status"] for row in usable} == {"Tobacco"}
-    # The group leaves the queue once a choice is in force.
+    # The other slice is still its own pending approval — accepting
+    # one slice never decides the other.
+    remaining = proposals.generate_proposals(outcome["artifact"], [])
+    assert [p["candidateId"] for p in remaining] == ["cand-base"]
+    outcome = proposals.apply_proposal(
+        outcome["artifact"], remaining[0], workspace_id="ws-t", who="eddy",
+        at="2026-10-27T00:01:00Z",
+    )
+    assert len(outcome["artifact"]["usable"]["coi"]) == 6
     assert proposals.generate_proposals(outcome["artifact"], []) == []
 
 
-def test_fee_components_form_separate_choices():
+def test_fee_component_slices_are_independent_and_conflicts_surface_on_accept():
     fees_a = [_filed_row("fees", component="monthly_expense", duration=1,
                          premium_mode=None, amount=18.95, fee_unit="monthly_fixed")]
     fees_b = [_filed_row("fees", component="monthly_expense", duration=1,
@@ -203,24 +211,32 @@ def test_fee_components_form_separate_choices():
         _candidate("fees", "cand-exp-b", fees_b, filename="nicotine.pdf", page=5),
         _candidate("fees", "cand-admin", fees_admin, filename="base.pdf", page=2),
     ]
+    # Nothing accepted yet: three independent approvals.
     found = proposals.generate_proposals(artifact, [])
-    assert len(found) == 2
-    expense_choice = next(p for p in found if len(p["options"]) == 2)
-    diff = expense_choice["optionDiffs"][0]
-    assert diff["differingRows"] == 1  # same selector, 18.95 vs 27.40
+    assert len(found) == 3
+    assert all(len(p["options"]) == 1 for p in found)
+    # Accept the first expense slice; the second prices the SAME
+    # selector differently (18.95 vs 27.40) — a genuine conflict,
+    # surfaced as a named two-option choice, never a silent merge.
+    accepted = accept_filed_mechanic(artifact, "fees", candidate_id="cand-exp-a")
+    found = proposals.generate_proposals(accepted, [])
+    conflict = next(p for p in found if p.get("conflict"))
+    assert conflict["conflict"]["differingRows"] == 1
+    assert [o["candidateId"] for o in conflict["options"]] == ["cand-exp-a", "cand-exp-b"]
+    assert conflict["options"][0]["inForce"] is True
 
 
-def test_accepting_an_alternative_supersedes_the_previous_one():
+def test_accepting_both_specimens_unions_their_coverage():
     artifact = _two_specimen_artifact()
     accepted = accept_filed_mechanic(artifact, "coi", candidate_id="cand-base")
     assert {r["tobacco_status"] for r in accepted["usable"]["coi"]} == {"Non-Tobacco"}
-    switched = accept_filed_mechanic(accepted, "coi", candidate_id="cand-nic")
-    assert len(switched["usable"]["coi"]) == 3
-    assert {r["tobacco_status"] for r in switched["usable"]["coi"]} == {"Tobacco"}
-    states = {c["id"]: c["reviewStatus"] for c in switched["candidates"]["coi"]}
-    assert states == {"cand-base": "superseded", "cand-nic": "accepted"}
-    assert switched["reviews"]["cand-nic"]["supersededCandidateIds"] == ["cand-base"]
-    assert switched["reviews"]["cand-base"]["status"] == "superseded"
+    both = accept_filed_mechanic(accepted, "coi", candidate_id="cand-nic")
+    assert len(both["usable"]["coi"]) == 6
+    assert {r["tobacco_status"] for r in both["usable"]["coi"]} == {
+        "Non-Tobacco", "Tobacco",
+    }
+    states = {c["id"]: c["reviewStatus"] for c in both["candidates"]["coi"]}
+    assert states == {"cand-base": "accepted", "cand-nic": "accepted"}
 
 
 def test_identical_rows_dedupe_keeping_both_provenances():
