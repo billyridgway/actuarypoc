@@ -53,10 +53,40 @@ from actuarypoc.extract.workspace_ul_mechanics import (
     accept_filed_mechanic,
     candidate_diff,
     candidate_effective_rows,
+    candidate_provenance,
     candidate_selector_summary,
     conflicting_row_selectors,
     rows_coverage_text,
 )
+
+
+#: How a missing source is stated, everywhere a proposal, a card, or
+#: a change record names where a table or equation came from.  A
+#: missing value must be said plainly — never rendered as "None"
+#: and never dressed up as a vague "the filing".
+SOURCE_NOT_RECORDED = "source not recorded"
+
+
+def _from_phrase(filename: Optional[str]) -> str:
+    """Sentence fragment naming a table's source: "from FILE", or
+    the plain statement that no source was recorded."""
+
+    return f"from {filename}" if filename else f"({SOURCE_NOT_RECORDED})"
+
+
+def _evidence_summary(evidence: Optional[Dict[str, Any]]) -> str:
+    """The change-history evidence parenthetical for a proposal:
+    "(evidence: FILE, p. N)" — or, when no source was recorded,
+    "(evidence: source not recorded)".  Never "(evidence: None)"."""
+
+    evidence = evidence or {}
+    filename = evidence.get("filename")
+    if not filename:
+        return f"(evidence: {SOURCE_NOT_RECORDED})"
+    text = f"(evidence: {filename}"
+    if evidence.get("page"):
+        text += f", p. {evidence['page']}"
+    return text + ")"
 
 
 PROPOSAL_KIND_FILED_TABLE = "filed_table"
@@ -165,12 +195,20 @@ def _filed_table_proposals(artifact: Dict[str, Any]) -> List[Dict[str, Any]]:
                 continue
             if candidate_id in usable_ids:
                 continue
-            provenance = candidate.get("provenance") or {}
+            # Provenance comes from the candidate as a whole — its
+            # own fields, the sources its identical table was filed
+            # under, and its rows — so a candidate merged from
+            # several documents still shows the real document, page,
+            # and heading its rows carry (Oct 27, 2026: the merged
+            # surrender / administrative-fee / NAR-factor candidates
+            # were proposed with no evidence at all).
+            source = candidate_provenance(candidate)
             rows = list(candidate.get("rows") or [])
             evidence = {
-                "filename": candidate.get("filename") or provenance.get("filename"),
-                "page": candidate.get("page") or provenance.get("page"),
-                "heading": candidate.get("tableHeading"),
+                "filename": source["filename"],
+                "page": source["page"],
+                "heading": candidate.get("tableHeading") or source["tableHeading"],
+                "sources": source["sources"],
                 "snippet": (
                     f"{candidate.get('rowCount')} rows extracted"
                     + (f" under “{candidate.get('tableHeading')}”" if candidate.get("tableHeading") else "")
@@ -182,6 +220,7 @@ def _filed_table_proposals(artifact: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "filename": evidence["filename"],
                 "page": evidence["page"],
                 "tableHeading": candidate.get("tableHeading"),
+                "sources": source["sources"],
                 "rowCount": candidate.get("rowCount") or len(rows),
                 "valueBasis": candidate.get("valueBasis"),
                 "coverageText": rows_coverage_text(rows),
@@ -199,10 +238,11 @@ def _filed_table_proposals(artifact: Dict[str, Any]) -> List[Dict[str, Any]]:
                 if not conf:
                     continue
                 diff = candidate_diff(rows, incumbent_rows, str(mechanic))
+                incumbent_source = candidate_provenance(incumbent)
                 conflicts.append({
                     "candidateId": str(incumbent.get("id") or ""),
-                    "filename": incumbent.get("filename"),
-                    "page": incumbent.get("page"),
+                    "filename": incumbent_source["filename"],
+                    "page": incumbent_source["page"],
                     "differingRows": len(conf),
                     "examples": diff["examples"],
                 })
@@ -211,8 +251,12 @@ def _filed_table_proposals(artifact: Dict[str, Any]) -> List[Dict[str, Any]]:
                 option["confirmBack"] = (
                     f"{slot['label']}: was {was['description']}; now the filed table"
                     f" of {candidate.get('rowCount')} rows"
-                    + (f" from {evidence['filename']}" if evidence.get("filename") else "")
-                    + (f", p. {evidence['page']}" if evidence.get("page") else "")
+                    + (
+                        f" from {evidence['filename']}"
+                        + (f", p. {evidence['page']}" if evidence.get("page") else "")
+                        if evidence.get("filename")
+                        else f" ({SOURCE_NOT_RECORDED})"
+                    )
                     + ", accepted on your confirmation. It adds its coverage to"
                     " the table in force — versions already accepted stay in force."
                 )
@@ -231,8 +275,12 @@ def _filed_table_proposals(artifact: Dict[str, Any]) -> List[Dict[str, Any]]:
                     "params": None,
                     "label": (
                         f"Accept the filed {slot['label'].lower()} table"
-                        f" from {evidence['filename'] or 'the filing'}"
-                        + (f" (p. {evidence['page']})" if evidence.get("page") else "")
+                        + (
+                            f" from {evidence['filename']}"
+                            + (f" (p. {evidence['page']})" if evidence.get("page") else "")
+                            if evidence.get("filename")
+                            else f" ({SOURCE_NOT_RECORDED})"
+                        )
                     ),
                     "confirmBack": option["confirmBack"],
                     "evidence": evidence,
@@ -246,11 +294,13 @@ def _filed_table_proposals(artifact: Dict[str, Any]) -> List[Dict[str, Any]]:
             )
             incumbent_rows = list(incumbent_candidate.get("rows") or [])
             full_diff = candidate_diff(rows, incumbent_rows, str(mechanic))
+            incumbent_source = candidate_provenance(incumbent_candidate)
             incumbent_option = {
                 "candidateId": incumbent["candidateId"],
                 "filename": incumbent["filename"],
                 "page": incumbent["page"],
                 "tableHeading": incumbent_candidate.get("tableHeading"),
+                "sources": incumbent_source["sources"],
                 "rowCount": incumbent_candidate.get("rowCount") or len(incumbent_rows),
                 "valueBasis": incumbent_candidate.get("valueBasis"),
                 "coverageText": rows_coverage_text(incumbent_rows),
@@ -259,6 +309,7 @@ def _filed_table_proposals(artifact: Dict[str, Any]) -> List[Dict[str, Any]]:
                     "filename": incumbent["filename"],
                     "page": incumbent["page"],
                     "heading": incumbent_candidate.get("tableHeading"),
+                    "sources": incumbent_source["sources"],
                     "snippet": (
                         f"{incumbent_candidate.get('rowCount')} rows extracted"
                         + " — already in force"
@@ -267,20 +318,20 @@ def _filed_table_proposals(artifact: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "inForce": True,
                 "confirmBack": (
                     f"{slot['label']}: keep the filed table"
-                    f" from {incumbent['filename'] or 'the filing'} as the version"
+                    f" {_from_phrase(incumbent['filename'])} as the version"
                     f" that governs the {differing_total} row(s) where the two"
-                    f" filings disagree; the table from"
-                    f" {evidence['filename'] or 'the filing'} is not accepted"
+                    f" filings disagree; the table"
+                    f" {_from_phrase(evidence['filename'])} is not accepted"
                     " for those rows."
                 ),
             }
             option["confirmBack"] = (
                 f"{slot['label']}: accept the filed table"
                 f" of {candidate.get('rowCount')} rows"
-                f" from {evidence['filename'] or 'the filing'}"
+                f" {_from_phrase(evidence['filename'])}"
                 + (f", p. {evidence['page']}" if evidence.get("page") else "")
                 + f"; where its rows disagree with the table in force"
-                f" from {incumbent['filename'] or 'the filing'}"
+                f" {_from_phrase(incumbent['filename'])}"
                 f" ({differing_total} row(s)), this version's rows govern"
                 " and the in-force version's are overridden."
             )
@@ -389,7 +440,7 @@ def _equation_proposals(
         confirm_back = (
             f"{label} equation: was {_current_text(artifact, mechanic)}; "
             f"now {rendering}"
-            + (f" — as stated in {filename}" if filename else "")
+            + (f" — as stated in {filename}" if filename else f" ({SOURCE_NOT_RECORDED})")
             + (f", p. {page}" if page else "")
             + ", approved on your confirmation."
         )
@@ -600,9 +651,7 @@ def apply_proposal(
                 at=at,
                 summary=(
                     f"Confirmed extraction proposal: {confirm_back} "
-                    f"(evidence: {evidence.get('filename')}"
-                    + (f", p. {evidence.get('page')}" if evidence.get("page") else "")
-                    + ")"
+                    f"{_evidence_summary(evidence)}"
                 ),
                 prior=_summarize_rows(
                     list(((artifact or {}).get("usable") or {}).get(mechanic) or [])
@@ -634,9 +683,7 @@ def apply_proposal(
             at=at,
             summary=(
                 f"Confirmed extraction proposal: {confirm_back} "
-                f"(evidence: {evidence.get('filename')}"
-                + (f", p. {evidence.get('page')}" if evidence.get("page") else "")
-                + ")"
+                f"{_evidence_summary(evidence)}"
             ),
             prior=_summarize_rows(
                 list(((artifact or {}).get("usable") or {}).get(mechanic) or [])
@@ -686,9 +733,7 @@ def apply_proposal(
             at=at,
             summary=(
                 f"Confirmed extraction proposal: {proposal['confirmBack']} "
-                f"(evidence: {proposal['evidence'].get('filename')}"
-                + (f", p. {proposal['evidence'].get('page')}" if proposal["evidence"].get("page") else "")
-                + ")"
+                f"{_evidence_summary(proposal['evidence'])}"
             ),
             prior={},
             new={

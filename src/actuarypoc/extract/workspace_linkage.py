@@ -452,16 +452,20 @@ def _table_history(
             if (row.get("provenance") or {}).get("filename") == source.get("filename")
             and (row.get("provenance") or {}).get("reviewedAt") == source.get("reviewedAt")
         )
-        origin = str(source.get("filename") or "the filing")
-        if source.get("page") is not None:
-            origin += f", p. {source['page']}"
+        if source.get("filename"):
+            origin = str(source["filename"])
+            if source.get("page") is not None:
+                origin += f", p. {source['page']}"
+            source_phrase = f" from {origin}"
+        else:
+            source_phrase = " (source not recorded)"
         entries.append({
             "kind": "filed_acceptance",
             "who": source.get("reviewedBy"),
             "at": source.get("reviewedAt"),
             "summary": (
                 f"Filed {_eq.TABLE_LABELS[table]} accepted — {row_count} "
-                f"row{'s' if row_count != 1 else ''} from {origin}."
+                f"row{'s' if row_count != 1 else ''}{source_phrase}."
             ),
             "prior": None,
             "new": {"rowCount": row_count, "status": "filed_accepted"},

@@ -353,7 +353,7 @@ const TableDetailView: React.FC<{
         {detail.sources.map((source, index) => (
           <span key={index}>
             {index > 0 ? "; " : ""}
-            {source.filename ?? "the filing"}
+            {source.filename ?? "source not recorded"}
             {source.page != null ? `, p. ${source.page}` : ""}
             {source.tableHeading ? ` — “${source.tableHeading}”` : ""}
           </span>

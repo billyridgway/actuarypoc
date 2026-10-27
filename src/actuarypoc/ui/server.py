@@ -90,6 +90,7 @@ from actuarypoc.extract.mechanics_for_product import generate_mechanics_for_prod
 from actuarypoc.extract.mechanic_assumptions_extractor import extract_mechanic_assumptions
 from actuarypoc.extract.workspace_ul_mechanics import (
     accept_filed_mechanic,
+    candidate_provenance,
     carry_over_decision_state as _carry_over_decision_state,
     extract_ul_mechanics,
     usable_mechanics,
@@ -780,8 +781,15 @@ def _extract_workspace_executable_mechanics(
             )
             candidate["sources"] = sources
             if len(sources) > 1:
-                candidate["filename"] = None
-                candidate["page"] = None
+                # The identical table was filed in more than one
+                # document and merged into this one candidate.  The
+                # candidate keeps the filename/page its rows actually
+                # came from (the first source group) — nulling them
+                # presented the approval decision with no evidence at
+                # all ("from the filing", "(evidence: None)") even
+                # though every row knows its document and page.  The
+                # full set of documents stays on ``sources`` and on
+                # each row's provenance as ``supportingSources``.
                 candidate["sourceCount"] = len(sources)
                 for row in candidate["rows"]:
                     row["provenance"] = {
@@ -3288,10 +3296,14 @@ def api_accept_filed_mechanic(
     slot_label = (_SLOT_BY_ID.get(slot_id or "") or {}).get("label") or mechanic
     source_text = ""
     if accepted_candidate is not None:
-        source_text = (
-            f" from {accepted_candidate.get('filename') or 'the filing'}"
-            + (f", p. {accepted_candidate.get('page')}" if accepted_candidate.get("page") else "")
-        )
+        accepted_provenance = candidate_provenance(accepted_candidate)
+        if accepted_provenance.get("filename"):
+            source_text = (
+                f" from {accepted_provenance['filename']}"
+                + (f", p. {accepted_provenance['page']}" if accepted_provenance.get("page") else "")
+            )
+        else:
+            source_text = " (source not recorded)"
     overridden_ids = list(review.get("overriddenCandidateIds") or [])
     change = {
         "id": f"chg-{uuid.uuid4().hex[:12]}",

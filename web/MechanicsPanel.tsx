@@ -36,6 +36,7 @@ interface SlotView {
     filename?: string | null;
     page?: number | null;
     tableHeading?: string | null;
+    sources?: SourceView[];
     rowCount?: number | null;
     valueBasis?: string | null;
   }>;
@@ -62,11 +63,31 @@ interface CandidateDiff {
   examples?: Array<Record<string, any>>;
 }
 
+/** One document a filed table was extracted from. */
+interface SourceView {
+  filename?: string | null;
+  page?: number | null;
+  tableHeading?: string | null;
+}
+
+/** The name shown for a source: the document, or the plain fact
+ *  that no source was recorded — never a vague placeholder. */
+const sourceName = (filename?: string | null): string =>
+  filename || "source not recorded";
+
+/** Note for a table filed identically in several documents (one
+ *  merged candidate): why a single document name is shown. */
+const filedIdenticallyNote = (sources?: SourceView[] | null): string =>
+  sources && sources.length > 1
+    ? ` · filed identically in ${sources.length} documents`
+    : "";
+
 interface CandidateView {
   id?: string;
   filename?: string | null;
   page?: number | null;
   tableHeading?: string | null;
+  sources?: SourceView[];
   rowCount?: number | null;
   valueBasis?: string | null;
   reviewStatus?: string | null;
@@ -118,6 +139,7 @@ interface ProposalOption {
   filename?: string | null;
   page?: number | null;
   tableHeading?: string | null;
+  sources?: SourceView[];
   rowCount?: number | null;
   valueBasis?: string | null;
   coverageText?: string;
@@ -129,6 +151,7 @@ interface ProposalOption {
     page?: number | null;
     heading?: string | null;
     snippet?: string | null;
+    sources?: SourceView[];
   } | null;
 }
 
@@ -162,6 +185,7 @@ interface ProposalView {
     page?: number | null;
     heading?: string | null;
     snippet?: string | null;
+    sources?: SourceView[];
   } | null;
 }
 
@@ -983,8 +1007,9 @@ export const MechanicsPanel: React.FC<{
               ) : null}
               {!isChoice && proposal.evidence && (
                 <p className="muted">
-                  Evidence: {proposal.evidence.filename || "the filing"}
+                  Evidence: {sourceName(proposal.evidence.filename)}
                   {proposal.evidence.page != null ? `, p. ${proposal.evidence.page}` : ""}
+                  {filedIdenticallyNote(proposal.evidence.sources)}
                   {proposal.evidence.snippet ? <> — “{proposal.evidence.snippet}”</> : null}
                 </p>
               )}
@@ -1004,8 +1029,9 @@ export const MechanicsPanel: React.FC<{
                         }
                       />
                       <span>
-                        <strong>{option.filename || "the filing"}</strong>
+                        <strong>{sourceName(option.filename)}</strong>
                         {option.page != null ? ` (p. ${option.page})` : ""}
+                        {filedIdenticallyNote(option.sources)}
                         {option.coverageText ? ` — ${option.coverageText}` : ""}
                         {selectorSummaryText(option.selectors)
                           ? ` · ${selectorSummaryText(option.selectors)}`
@@ -1165,8 +1191,9 @@ export const MechanicsPanel: React.FC<{
                       className="choice-option"
                     >
                       <span>
-                        <strong>{candidate.filename || "the filing"}</strong>
+                        <strong>{sourceName(candidate.filename)}</strong>
                         {candidate.page != null ? ` (p. ${candidate.page})` : ""}
+                        {filedIdenticallyNote(candidate.sources)}
                         {candidate.coverageText ? ` — ${candidate.coverageText}` : ""}
                         {selectorSummaryText(candidate.selectors)
                           ? ` · Covers: ${selectorSummaryText(candidate.selectors)}`

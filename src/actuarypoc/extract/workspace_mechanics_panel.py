@@ -41,6 +41,7 @@ from actuarypoc.extract.workspace_ul_mechanics import (
     _read_tables,
     candidate_diff,
     candidate_group_key,
+    candidate_provenance,
     candidate_selector_summary,
     rows_coverage_text,
     usable_mechanics,
@@ -167,11 +168,13 @@ def _pending_candidate_views(artifact: Dict[str, Any], mechanic: str) -> List[Di
     for candidate in (artifact.get("candidates") or {}).get(mechanic) or []:
         if candidate.get("reviewStatus") != "review_required":
             continue
+        provenance = candidate_provenance(candidate)
         views.append({
             "id": candidate.get("id"),
-            "filename": candidate.get("filename"),
-            "page": candidate.get("page"),
-            "tableHeading": candidate.get("tableHeading"),
+            "filename": provenance["filename"],
+            "page": provenance["page"],
+            "tableHeading": provenance["tableHeading"],
+            "sources": provenance["sources"],
             "rowCount": candidate.get("rowCount"),
             "valueBasis": candidate.get("valueBasis"),
         })
@@ -211,11 +214,13 @@ def _candidate_views(artifact: Dict[str, Any], mechanic: str) -> List[Dict[str, 
             for item in candidate.get("overriddenSelectors") or []
             if isinstance(item, (list, tuple))
         }
+        provenance = candidate_provenance(candidate)
         view: Dict[str, Any] = {
             "id": candidate.get("id"),
-            "filename": candidate.get("filename"),
-            "page": candidate.get("page"),
-            "tableHeading": candidate.get("tableHeading"),
+            "filename": provenance["filename"],
+            "page": provenance["page"],
+            "tableHeading": provenance["tableHeading"],
+            "sources": provenance["sources"],
             "rowCount": candidate.get("rowCount") or len(rows),
             "valueBasis": candidate.get("valueBasis"),
             "reviewStatus": candidate.get("reviewStatus"),

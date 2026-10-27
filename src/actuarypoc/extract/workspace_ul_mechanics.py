@@ -230,6 +230,54 @@ def candidate_effective_rows(candidate: Dict[str, Any]) -> List[Dict[str, Any]]:
     ]
 
 
+def candidate_provenance(candidate: Dict[str, Any]) -> Dict[str, Any]:
+    """The best source provenance available for a filed candidate.
+
+    Returns ``{"filename", "page", "tableHeading", "sources"}``.
+    ``sources`` is every distinct document source the candidate's
+    table was filed under: the candidate's recorded ``sources`` list
+    when present, otherwise the distinct provenance views of its
+    rows.  The scalar fields come from the candidate's own fields
+    first, then its first source, then the first row that carries
+    provenance — so a candidate whose identical table was filed in
+    two documents (one merged candidate, several sources) still
+    names a real document and page: the one its rows came from.
+    All scalar fields are None and ``sources`` is empty only when no
+    source was recorded anywhere — callers must say so plainly
+    ("source not recorded"), never render a placeholder.
+    """
+
+    candidate = candidate or {}
+    sources: List[Dict[str, Any]] = []
+    for source in candidate.get("sources") or []:
+        if not isinstance(source, dict):
+            continue
+        view = {
+            "filename": source.get("filename"),
+            "page": source.get("page"),
+            "tableHeading": source.get("tableHeading"),
+        }
+        if any(value is not None for value in view.values()) and view not in sources:
+            sources.append(view)
+    if not sources:
+        for row in candidate.get("rows") or []:
+            provenance = (row or {}).get("provenance") or {}
+            view = {
+                "filename": provenance.get("filename"),
+                "page": provenance.get("page"),
+                "tableHeading": provenance.get("tableHeading"),
+            }
+            if any(value is not None for value in view.values()) and view not in sources:
+                sources.append(view)
+    first = sources[0] if sources else {}
+    return {
+        "filename": candidate.get("filename") or first.get("filename"),
+        "page": candidate.get("page") or first.get("page"),
+        "tableHeading": candidate.get("tableHeading") or first.get("tableHeading"),
+        "sources": sources,
+    }
+
+
 def accepted_union_rows(
     candidates: List[Dict[str, Any]], mechanic: str
 ) -> Tuple[List[Dict[str, Any]], List[Tuple[Any, ...]]]:
@@ -867,9 +915,13 @@ def accept_filed_mechanic(
                 if value is not None
             )
             total = sum(len(item_conf) for _, item_conf in conflicts_by_other.values())
+            other_filename = candidate_provenance(other).get("filename")
+            other_source = (
+                f" from {other_filename}" if other_filename else " (source not recorded)"
+            )
             raise ValueError(
                 f"Filed {mechanic} candidate conflicts with the accepted table"
-                f" from {other.get('filename') or 'the filing'}"
+                f"{other_source}"
                 f" on {total} row(s) (e.g. {example}): the filings disagree"
                 " on those rows. Accept it with conflict resolution to let"
                 " this candidate's rows govern where they disagree, or keep"
