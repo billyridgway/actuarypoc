@@ -311,6 +311,7 @@ export const WorkspacePage: React.FC<{ workspaceId: string; view?: string }> = (
           <p className="muted">
             Analysis is running on the server — you can leave or refresh this page; it finishes on its own.{" "}
             {analysisPhaseLabel(job?.phase)}
+            {job?.phaseDetail ? ` — ${job.phaseDetail}` : ""}
             {elapsedLabel ? ` · ${elapsedLabel} elapsed` : ""}
           </p>
         )}

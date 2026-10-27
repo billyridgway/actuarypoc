@@ -140,6 +140,9 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
   // The counts are labeled with the last COMPLETED analysis — never
   // the workspace's updatedAt, which any later edit would move.
   const analysisTime = meta?.analysisJob?.finishedAt || null;
+  // Sub-progress within the running analysis (e.g. "Mechanics — unit
+  // 3 of 12"), recorded on the job by the slice-extraction stage.
+  const analysisDetail = analysisRunning ? meta?.analysisJob?.phaseDetail || null : null;
 
   const scenarioOptions = (inputId: string): Array<{ value: string; label: string }> | null => {
     const node = (ws.projectionGraph?.nodes ?? []).find((n: any) => n.inputId === inputId);
@@ -209,7 +212,9 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
               {analysisRunning
                 ? `Filing review — what the last completed analysis extracted from the documents${
                     analysisTime ? ` (finished ${analysisTime})` : ""
-                  }; a new analysis is running and this page will refresh when it finishes: `
+                  }; a new analysis is running and this page will refresh when it finishes${
+                    analysisDetail ? ` — now: ${analysisDetail}` : ""
+                  }: `
                 : `Filing review — what the last analysis extracted from the documents${
                     analysisTime ? ` (finished ${analysisTime})` : ""
                   }: `}

@@ -5,9 +5,23 @@
 // (analysisJob) and is read back with the normal workspace GET. These
 // helpers are the one place the web app talks to that contract.
 
+export interface AnalysisJobProgress {
+  stage?: string | null;
+  documentsDone?: number | null;
+  documentsTotal?: number | null;
+  pass?: string | null;
+  unitsDone?: number | null;
+  unitsTotal?: number | null;
+}
+
 export interface AnalysisJobState {
   state?: string | null; // "running" | "succeeded" | "failed"
   phase?: string | null;
+  // Sub-progress within a phase (slice extraction): a human-readable
+  // detail line plus the counters behind it. Absent outside the
+  // phases that report it, and cleared when the job finishes.
+  phaseDetail?: string | null;
+  phaseProgress?: AnalysisJobProgress | null;
   startedAt?: string | null;
   finishedAt?: string | null;
   error?: string | null;

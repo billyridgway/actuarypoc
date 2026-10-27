@@ -313,7 +313,14 @@ def test_metadata_dispatch_finds_late_facts(long_map):
 
 
 def test_mechanics_dispatch_covers_tail(long_map):
-    result = extract_mechanics_from_slices(product_code="SYN-LT99", slices=long_map.slices)
+    # The budget is pinned to the historical 6,000 chars: this test
+    # exercises merging one mechanic out of MANY dispatch units (the
+    # grace-period entry must accumulate >= 3 sources). At the current
+    # 48,000-char default the document is only 2 units and the same
+    # merge yields 2 sources — correct, but not what is tested here.
+    result = extract_mechanics_from_slices(
+        product_code="SYN-LT99", slices=long_map.slices, dispatch_char_budget=6000
+    )
     assert result["status"] == "ok"
     names = {m.name for m in result["mechanics"]}
     assert "Terminal Illness Accelerated Benefit Rider" in names

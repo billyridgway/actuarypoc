@@ -2570,6 +2570,8 @@ def _record_analysis_failure(workspace_id: str, error: str) -> None:
         {
             "state": "failed",
             "phase": None,
+            "phaseDetail": None,
+            "phaseProgress": None,
             "finishedAt": _correction_now(),
             "error": error,
         },
@@ -2584,8 +2586,42 @@ def _analysis_job_main(workspace_id: str, run_id: str) -> None:
         if job.get("runId") == run_id and job.get("state") == "running":
             _record_analysis_job(workspace_id, {"phase": phase})
 
+    progress_state: Dict[str, Any] = {"last_at": 0.0, "last_key": None}
+
+    def report_progress(progress: Dict[str, Any]) -> None:
+        # Sub-progress (slice-consumption pass): persisted at most
+        # ~once a second within a stage/pass, immediately when the
+        # stage or pass changes — the record is a status surface, not
+        # a log, and per-unit writes would swamp the object store.
+        current = get_workspace(workspace_id) or {}
+        job = current.get("analysis_job") or {}
+        if job.get("runId") != run_id or job.get("state") != "running":
+            return
+        key = (progress.get("stage"), progress.get("pass"))
+        now = time.monotonic()
+        if key == progress_state["last_key"] and now - progress_state["last_at"] < 1.0:
+            return
+        progress_state["last_key"] = key
+        progress_state["last_at"] = now
+        _record_analysis_job(
+            workspace_id,
+            {
+                "phaseDetail": progress.get("detail"),
+                "phaseProgress": {
+                    "stage": progress.get("stage"),
+                    "documentsDone": progress.get("documentsDone"),
+                    "documentsTotal": progress.get("documentsTotal"),
+                    "pass": progress.get("pass"),
+                    "unitsDone": progress.get("unitsDone"),
+                    "unitsTotal": progress.get("unitsTotal"),
+                },
+            },
+        )
+
     try:
-        api_workspace_analyze(workspace_id, report_phase=report_phase)
+        api_workspace_analyze(
+            workspace_id, report_phase=report_phase, report_progress=report_progress
+        )
     except HTTPException as exc:
         error = str(exc.detail)
         logging.warning(
@@ -2608,6 +2644,8 @@ def _analysis_job_main(workspace_id: str, run_id: str) -> None:
             {
                 "state": "succeeded",
                 "phase": None,
+                "phaseDetail": None,
+                "phaseProgress": None,
                 "finishedAt": _correction_now(),
                 "error": None,
             },
@@ -2654,6 +2692,8 @@ def _start_analysis_job(workspace_id: str) -> Dict[str, Any]:
                 {
                     "state": "failed",
                     "phase": None,
+                    "phaseDetail": None,
+                    "phaseProgress": None,
                     "finishedAt": _correction_now(),
                     "error": (
                         "The previous analysis was interrupted before it "
@@ -2667,6 +2707,8 @@ def _start_analysis_job(workspace_id: str) -> Dict[str, Any]:
         job = {
             "state": "running",
             "phase": "starting",
+            "phaseDetail": None,
+            "phaseProgress": None,
             "startedAt": _correction_now(),
             "finishedAt": None,
             "error": None,
@@ -2718,12 +2760,15 @@ def api_workspace_analyze_start(workspace_id: str) -> Dict[str, Any]:
 def api_workspace_analyze(
     workspace_id: str,
     report_phase: Optional[Callable[[str], None]] = None,
+    report_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     """Run an understanding analysis for a workspace, synchronously (MVP).
 
     This is the analysis core: the HTTP route runs it as a background
     job (see _start_analysis_job); direct callers may run it inline.
-    `report_phase`, when given, is called as each pipeline phase begins.
+    `report_phase`, when given, is called as each pipeline phase begins;
+    `report_progress`, when given, receives sub-phase progress dicts
+    from the slice-extraction stage (documents read, per-pass units).
 
     For the initial slice this is Promise‑UL‑compatible: we reuse the
     existing Promise UL product workspace snapshot builder and treat the
@@ -2743,6 +2788,14 @@ def api_workspace_analyze(
             return
         try:
             report_phase(phase)
+        except Exception:  # noqa: BLE001 - progress must never fail the run
+            pass
+
+    def _progress(progress: Dict[str, Any]) -> None:
+        if report_progress is None:
+            return
+        try:
+            report_progress(progress)
         except Exception:  # noqa: BLE001 - progress must never fail the run
             pass
 
@@ -2847,6 +2900,7 @@ def api_workspace_analyze(
             workspace_id=workspace_id,
             documents=docs_for_inventory,
             product_code_hint=(snapshot.get("product") or {}).get("code"),
+            progress_callback=_progress,
         )
     except Exception as exc:  # noqa: BLE001
         logging.warning("[workspace-analysis] slice extraction stage failed: %s", exc)

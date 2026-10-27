@@ -37,6 +37,11 @@ DEFAULT_MAX_CHARS = 6000
 DEFAULT_MIN_CHARS = 800
 DEFAULT_OVERLAP_CHARS = 300
 _HEADING_MIN_SLICE_CHARS = 200
+# A size cut that is due may move to a paragraph boundary (a blank
+# line) whose end lands within this many characters of the target —
+# prose reads better whole, and a charge statement split mid-sentence
+# is harder for an extractor to interpret than one kept intact.
+_PARAGRAPH_CUT_WINDOW = 800
 
 _SECTION_PREFIX = re.compile(
     r"^(SECTION|ARTICLE|PART|CHAPTER|APPENDIX|EXHIBIT|SCHEDULE|ADDENDUM)\b",
@@ -292,6 +297,39 @@ def _make_slice(
     )
 
 
+def _paragraph_split_index(
+    lines: List[_Line], *, target_chars: int, max_chars: int
+) -> Optional[int]:
+    """Index of the blank line a size cut should land on, or None.
+
+    Scans the group from the end for a blank (paragraph-break) line
+    whose inclusive end lands within ``_PARAGRAPH_CUT_WINDOW`` chars
+    of the target and never beyond ``max_chars``. The split keeps
+    ``lines[:j + 1]`` (through the blank line) in the closing group,
+    so the paragraph stays whole in one slice. Returns None when no
+    paragraph break is in the window — the caller then defers the
+    cut (forward window) or falls back to the first line boundary
+    past the target, exactly as before this preference existed.
+    """
+
+    if len(lines) < 3:
+        return None
+    start = lines[0].start
+    for j in range(len(lines) - 2, 0, -1):
+        if lines[j].text.strip():
+            continue
+        prefix_span = lines[j].end_incl - start
+        if prefix_span > max_chars:
+            continue
+        if prefix_span >= target_chars - _PARAGRAPH_CUT_WINDOW:
+            return j
+        # Prefixes only shrink from here; once below the window no
+        # earlier blank line can qualify either.
+        if prefix_span < target_chars - _PARAGRAPH_CUT_WINDOW:
+            break
+    return None
+
+
 def build_document_map(
     *,
     doc_id: str,
@@ -362,12 +400,51 @@ def build_document_map(
                 chunk_index += 1
             continue
         # Size cut at a line boundary once the target is reached, and a
-        # hard guarantee that no group spans more than max_chars.
-        if current and (
-            current_len >= target_chars or (line.end_incl - current[0].start) > max_chars
-        ):
-            _flush("size")
-            current_heading = line.text.strip() if is_heading else None
+        # hard guarantee that no group spans more than max_chars. When
+        # the cut is due but the hard cap is not at risk, a paragraph
+        # boundary is preferred: land on a recent blank line
+        # (look-back), or defer up to the window past the target
+        # waiting for one (look-ahead), or — no break in the window —
+        # cut at the line boundary exactly as before.
+        if current:
+            hard = (line.end_incl - current[0].start) > max_chars
+            if current_len >= target_chars or hard:
+                split_at = (
+                    None
+                    if hard
+                    else _paragraph_split_index(
+                        current, target_chars=target_chars, max_chars=max_chars
+                    )
+                )
+                if split_at is not None:
+                    groups.append(
+                        (current[: split_at + 1], current_heading, "size")
+                    )
+                    current = current[split_at + 1 :]
+                    current_heading = None  # continuation, not a new section
+                    current_len = sum((l.end - l.start) + 1 for l in current)
+                elif (
+                    not hard
+                    and (current[-1].end_incl - current[0].start)
+                    < target_chars + _PARAGRAPH_CUT_WINDOW
+                    and line.text.strip()
+                ):
+                    pass  # defer: a paragraph break may land in the window
+                elif (
+                    not hard
+                    and not line.text.strip()
+                    and (current[-1].end_incl - current[0].start)
+                    < target_chars + _PARAGRAPH_CUT_WINDOW
+                ):
+                    # The incoming blank line closes the paragraph
+                    # inside the window; it belongs to this group.
+                    current.append(line)
+                    current_len += line_len + 1
+                    _flush("size")
+                    continue
+                else:
+                    _flush("size")
+                    current_heading = line.text.strip() if is_heading else None
         current.append(line)
         current_len += line_len + 1  # +1 for the joining newline (approx. at tail)
     _flush("end")

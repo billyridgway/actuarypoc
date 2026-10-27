@@ -5,9 +5,11 @@ from __future__ import annotations
 Implements the dispatch half of the slice-extraction design (see
 ``docs/slice-extraction-plan.md`` §4): the existing extractors' single-call
 cores are invoked once per dispatch unit (a group of consecutive document
-slices within a char budget), sequentially and in document order, and the
-per-unit results are merged into the same output types the extractors have
-always returned.
+slices within a char budget), concurrently over a bounded pool, and the
+per-unit results are merged in document order into the same output types
+the extractors have always returned. Completion order is discarded on
+purpose: folds consume outcomes in unit order, so a parallel run's
+merged outputs are identical to a sequential run's.
 
 Two trust rules are enforced here:
 
@@ -19,10 +21,12 @@ Two trust rules are enforced here:
   to the unit's page span and the confidence is discounted.
 """
 
+import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from actuarypoc.config.assumptions import AssumptionSet
 from actuarypoc.domain.product_mechanics import FilingSource, ProductMechanic
@@ -33,7 +37,17 @@ from actuarypoc.extract.assumptions_extractor import (
 from actuarypoc.extract.document_map import DocumentSlice, group_slices_for_dispatch
 from actuarypoc.extract.mechanics_extractor import _extract_mechanics_single_call
 
-DEFAULT_DISPATCH_CHAR_BUDGET = 6000
+# Dispatch units group consecutive slices up to this many characters
+# per model call. 48k chars (~15-20 pages) is far inside the cloud
+# model's context and cuts the call count ~8x versus the original 6k;
+# the pipeline overrides it per environment via
+# ACTUARYPOC_SLICE_DISPATCH_CHARS — an on-prem appliance profile with
+# a small local model sets it back down (see
+# docs/analysis-slice-consumption.md). Slices themselves are
+# unchanged (4,000 target / 6,000 max in document_map).
+DEFAULT_DISPATCH_CHAR_BUDGET = 48000
+
+DEFAULT_DISPATCH_CONCURRENCY = 8
 
 _WS = re.compile(r"\s+")
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
@@ -88,6 +102,106 @@ def _span_label(unit: Sequence[DocumentSlice]) -> str:
             return f"chars {unit[0].char_start}-{unit[-1].char_end}"
         return "unknown location"
     return str(start) if start == end else f"pp. {start}-{end}"
+
+
+# ---------------------------------------------------------------------------
+# Concurrent unit dispatch
+# ---------------------------------------------------------------------------
+
+
+def _dispatch_concurrency(explicit: Optional[int] = None) -> int:
+    """Bounded fan-out for unit dispatch.
+
+    Precedence: explicit argument, then the
+    ACTUARYPOC_SLICE_DISPATCH_CONCURRENCY env var, then the default.
+    An on-prem appliance profile can pin this to 1 to serialize calls
+    against a local model; merge order never depends on it.
+    """
+
+    if explicit is not None:
+        return max(1, int(explicit))
+    raw = os.getenv("ACTUARYPOC_SLICE_DISPATCH_CONCURRENCY", "")
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return DEFAULT_DISPATCH_CONCURRENCY
+
+
+def _dispatch_units(
+    units: Sequence[Sequence[DocumentSlice]],
+    invoke: Callable[[Sequence[DocumentSlice]], Any],
+    *,
+    concurrency: int,
+    progress_callback: Optional[Callable[[str, int, int], None]] = None,
+    pass_name: str = "",
+) -> List[Tuple[Any, Optional[str], float]]:
+    """Run ``invoke(unit)`` for every unit; outcomes in unit order.
+
+    Returns ``(value, error, latency_s)`` per unit — ``error`` is None
+    on success, else the same ``Type: message`` string the sequential
+    loop recorded. A failing unit is isolated to its own slot, and
+    ``progress_callback`` fires (pass_name, units_done, units_total)
+    after each completion, in whichever order units finish.
+    """
+
+    total = len(units)
+    outcomes: List[Optional[Tuple[Any, Optional[str], float]]] = [None] * total
+
+    def _run(index: int, unit: Sequence[DocumentSlice]) -> None:
+        unit_t0 = time.monotonic()
+        try:
+            value = invoke(unit)
+            outcomes[index] = (value, None, round(time.monotonic() - unit_t0, 3))
+        except Exception as exc:  # noqa: BLE001 - per-unit isolation by design
+            outcomes[index] = (
+                None,
+                f"{type(exc).__name__}: {exc}",
+                round(time.monotonic() - unit_t0, 3),
+            )
+
+    if concurrency <= 1 or total <= 1:
+        for index, unit in enumerate(units):
+            _run(index, unit)
+            if progress_callback is not None:
+                progress_callback(pass_name, index + 1, total)
+    else:
+        done = 0
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            futures = [pool.submit(_run, i, unit) for i, unit in enumerate(units)]
+            for future in as_completed(futures):
+                future.result()  # _run records its own failures; this joins
+                done += 1
+                if progress_callback is not None:
+                    progress_callback(pass_name, done, total)
+    return [outcome for outcome in outcomes if outcome is not None]
+
+
+def _fold_outcomes(
+    report: Dict[str, Any],
+    units: Sequence[Sequence[DocumentSlice]],
+    outcomes: Sequence[Tuple[Any, Optional[str], float]],
+) -> List[Any]:
+    """Fold dispatch outcomes into the report, in unit order.
+
+    Returns the successful values in unit order — the list the merge
+    rules consume, identical to what the sequential loop built.
+    """
+
+    values: List[Any] = []
+    for unit, (value, error, latency) in zip(units, outcomes):
+        report["calls"] += 1
+        report["slices_dispatched"] += len(unit)
+        report["unit_latencies_s"].append(latency)
+        if error is None:
+            values.append(value)
+            report["succeeded_units"] += 1
+        else:
+            report["failed_units"].append(
+                {"slice_ids": [s.slice_id for s in unit], "error": error}
+            )
+    return values
 
 
 # ---------------------------------------------------------------------------
@@ -384,30 +498,29 @@ def extract_mechanics_from_slices(
     slices: Sequence[DocumentSlice],
     model: Optional[str] = None,
     dispatch_char_budget: int = DEFAULT_DISPATCH_CHAR_BUDGET,
+    concurrency: Optional[int] = None,
+    progress_callback: Optional[Callable[[str, int, int], None]] = None,
 ) -> Dict[str, Any]:
     """Dispatch mechanics extraction over slices and merge the results."""
 
     t0 = time.monotonic()
     report = _base_report(slices)
-    per_unit: List[List[ProductMechanic]] = []
-    for unit in group_slices_for_dispatch(list(slices), char_budget=dispatch_char_budget):
-        report["calls"] += 1
-        report["slices_dispatched"] += len(unit)
-        unit_t0 = time.monotonic()
-        try:
-            raw = _extract_mechanics_single_call(
-                product_code=product_code, text=unit_block(unit), model=model
-            )
-            per_unit.append([reanchor_mechanic(m, unit) for m in raw])
-            report["succeeded_units"] += 1
-        except Exception as exc:  # noqa: BLE001 - per-unit isolation by design
-            report["failed_units"].append(
-                {
-                    "slice_ids": [s.slice_id for s in unit],
-                    "error": f"{type(exc).__name__}: {exc}",
-                }
-            )
-        report["unit_latencies_s"].append(round(time.monotonic() - unit_t0, 3))
+    units = group_slices_for_dispatch(list(slices), char_budget=dispatch_char_budget)
+
+    def _invoke(unit: Sequence[DocumentSlice]) -> List[ProductMechanic]:
+        raw = _extract_mechanics_single_call(
+            product_code=product_code, text=unit_block(unit), model=model
+        )
+        return [reanchor_mechanic(m, unit) for m in raw]
+
+    outcomes = _dispatch_units(
+        units,
+        _invoke,
+        concurrency=_dispatch_concurrency(concurrency),
+        progress_callback=progress_callback,
+        pass_name="mechanics",
+    )
+    per_unit = _fold_outcomes(report, units, outcomes)
     report["mechanics"] = merge_mechanics(per_unit, product_code=product_code)
     return _finish_report(report, t0)
 
@@ -417,28 +530,26 @@ def extract_product_metadata_from_slices(
     slices: Sequence[DocumentSlice],
     model: Optional[str] = None,
     dispatch_char_budget: int = DEFAULT_DISPATCH_CHAR_BUDGET,
+    concurrency: Optional[int] = None,
+    progress_callback: Optional[Callable[[str, int, int], None]] = None,
 ) -> Dict[str, Any]:
     """Dispatch metadata extraction over slices; merge field-wise."""
 
     t0 = time.monotonic()
     report = _base_report(slices)
-    per_unit: List[Tuple[Dict[str, Any], Sequence[DocumentSlice]]] = []
-    for unit in group_slices_for_dispatch(list(slices), char_budget=dispatch_char_budget):
-        report["calls"] += 1
-        report["slices_dispatched"] += len(unit)
-        unit_t0 = time.monotonic()
-        try:
-            meta = _extract_metadata_single_call(text=unit_block(unit), model=model)
-            per_unit.append((meta, unit))
-            report["succeeded_units"] += 1
-        except Exception as exc:  # noqa: BLE001
-            report["failed_units"].append(
-                {
-                    "slice_ids": [s.slice_id for s in unit],
-                    "error": f"{type(exc).__name__}: {exc}",
-                }
-            )
-        report["unit_latencies_s"].append(round(time.monotonic() - unit_t0, 3))
+    units = group_slices_for_dispatch(list(slices), char_budget=dispatch_char_budget)
+
+    def _invoke(unit: Sequence[DocumentSlice]) -> Tuple[Dict[str, Any], Sequence[DocumentSlice]]:
+        return (_extract_metadata_single_call(text=unit_block(unit), model=model), unit)
+
+    outcomes = _dispatch_units(
+        units,
+        _invoke,
+        concurrency=_dispatch_concurrency(concurrency),
+        progress_callback=progress_callback,
+        pass_name="metadata",
+    )
+    per_unit = _fold_outcomes(report, units, outcomes)
     merged, provenance, conflicts = merge_metadata(per_unit)
     # Refine provenance to the individual slice that contains the
     # winning value, when it can be located verbatim (or whitespace-
@@ -470,34 +581,33 @@ def extract_assumption_set_from_slices(
     description_hint: Optional[str] = None,
     model: Optional[str] = None,
     dispatch_char_budget: int = DEFAULT_DISPATCH_CHAR_BUDGET,
+    concurrency: Optional[int] = None,
+    progress_callback: Optional[Callable[[str, int, int], None]] = None,
 ) -> Dict[str, Any]:
     """Dispatch AssumptionSet extraction over slices and merge."""
 
     t0 = time.monotonic()
     report = _base_report(slices)
-    per_unit: List[Tuple[AssumptionSet, Sequence[DocumentSlice]]] = []
-    for unit in group_slices_for_dispatch(list(slices), char_budget=dispatch_char_budget):
-        report["calls"] += 1
-        report["slices_dispatched"] += len(unit)
-        unit_t0 = time.monotonic()
-        try:
-            asn = _assumption_set_single_call(
-                product_code=product_code,
-                text=unit_block(unit),
-                set_id=set_id,
-                description_hint=description_hint,
-                model=model,
-            )
-            per_unit.append((asn, unit))
-            report["succeeded_units"] += 1
-        except Exception as exc:  # noqa: BLE001
-            report["failed_units"].append(
-                {
-                    "slice_ids": [s.slice_id for s in unit],
-                    "error": f"{type(exc).__name__}: {exc}",
-                }
-            )
-        report["unit_latencies_s"].append(round(time.monotonic() - unit_t0, 3))
+    units = group_slices_for_dispatch(list(slices), char_budget=dispatch_char_budget)
+
+    def _invoke(unit: Sequence[DocumentSlice]) -> Tuple[AssumptionSet, Sequence[DocumentSlice]]:
+        asn = _assumption_set_single_call(
+            product_code=product_code,
+            text=unit_block(unit),
+            set_id=set_id,
+            description_hint=description_hint,
+            model=model,
+        )
+        return (asn, unit)
+
+    outcomes = _dispatch_units(
+        units,
+        _invoke,
+        concurrency=_dispatch_concurrency(concurrency),
+        progress_callback=progress_callback,
+        pass_name="assumptions",
+    )
+    per_unit = _fold_outcomes(report, units, outcomes)
     if per_unit:
         merged, conflicts = merge_assumption_sets(
             per_unit, product_code=product_code, set_id=set_id
