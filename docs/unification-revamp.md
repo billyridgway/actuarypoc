@@ -382,3 +382,35 @@ accepts-only-selected union half, `test_analysis_update_clears_staleness`
 synthetic/filed-accept tests for the two new store calls. Final:
 332 passed, exactly the same 5 inherited failures; tsc error set
 identical to pristine HEAD.
+
+
+### Live acceptance (Oct 27, 2026, after the fix)
+
+Convergence: CI run for `162229d4` succeeded (Jobs API, build-app
+incl. build-push); GHCR `:main` leaf `c98ebf51…` with image config
+`GIT_SHA=162229d4…`; the rolled pod's `/health` reports
+`git_sha 162229d4…`; the served bundle is byte-identical in hash to
+a local build of the new sources and carries the new UI copy
+(per-version approvals, "Saved projection is stale", the conflict
+override action).
+
+On the running app, a throwaway workspace (`ws-3f698b27`, created
+from the base Policy Specifications and the Nicotine specimen in
+the object store, deleted afterwards): analysis produced the same
+candidate ids as the live workspace (content hashes); BOTH COI
+candidates were confirmed independently and stood in force together
+— 242 rows, the union of the two 121-row slices; Tobacco and
+Non-Tobacco projections each computed COI (year-1 charge 126.78 —
+the filed specimens price identically per duration, so slice
+discrimination is asserted by the API-level tests with distinct
+rates). **The analysis was then re-run, and both acceptances
+survived**: candidates still in force, 242 rows, no COI proposal
+regenerated, `projectionStale` false, both projections still
+computing COI. A direct filed-table accept then set
+`projectionStale`; a projection run cleared it. The conflict
+override flow was not exercised live (no naturally conflicting
+pair exists on these filings; it is covered by the API-level
+tests). ws-b5ea66f5 was read-only throughout: its `updatedAt`
+(`2026-10-27T09:20:10.502959Z`, from Billy's own activity that
+morning) is unchanged by this work — its tables remain for Billy
+to re-confirm under the new model, its equations untouched.
