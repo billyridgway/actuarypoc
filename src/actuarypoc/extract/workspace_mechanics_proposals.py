@@ -885,6 +885,17 @@ def apply_bulk_approval(
     force, or an equation whose mechanic gained a different in-force
     equation, is skipped and reported — never silently merged, never
     a silent replacement.
+
+    Application order is EQUATIONS FIRST, then filed tables (live
+    gate, Oct 27, 2026): accepting a table transcribes equations for
+    every mechanic that has no record yet, so a batch that accepted
+    tables first let transcription put ITS premium-load reading (the
+    fee-table lookup) in force, and the harvested reading the
+    summary had promised — the memo's stated percentage of premium —
+    was displaced before its turn came.  Approving the confirmed
+    equations first makes transcription defer to them (it never
+    touches a mechanic that already has a record), so the batch
+    delivers exactly the set the user confirmed.
     """
 
     slices = slices or []
@@ -895,7 +906,10 @@ def apply_bulk_approval(
     applied: List[Dict[str, Any]] = []
     skipped: List[Dict[str, Any]] = []
 
-    for item in plan["eligible"]:
+    ordered = sorted(
+        plan["eligible"], key=lambda i: 0 if i["kind"] == "equation" else 1
+    )
+    for item in ordered:
         current = generate_proposals(result, slices)
         proposal = next(
             (p for p in current if p.get("id") == item["proposalId"]), None

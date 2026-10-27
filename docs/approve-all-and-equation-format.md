@@ -35,6 +35,13 @@ individual suggestions.
   artifact as earlier items land, so an item that became contested
   mid-batch (its rows now disagree with a table approved seconds
   earlier in the same batch) is skipped and reported, never forced.
+  Items apply **equations first, then tables**: accepting a table
+  transcribes equations for every mechanic with no record yet, so a
+  tables-first batch let transcription's premium-load reading (the
+  fee-table lookup) displace the harvested reading the summary had
+  promised (the memo's stated percentage of premium) — caught by the
+  Oct 27 live gate, fixed by the ordering, and pinned by
+  `test_apply_delivers_the_promised_reading_not_the_transcribed_one`.
   Every applied item is recorded individually in the change history
   with its evidence, stamped with the batch's `batchId` and
   `bulkApproval: true`. Projection staleness is marked once, from the

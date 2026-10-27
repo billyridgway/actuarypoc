@@ -423,3 +423,51 @@ def test_confirmed_bulk_call_leaves_contested_items_pending(
     changes = _history(client, workspace_id)
     assert len(changes) == 6
     assert all(c.get("batchId") == body["batchId"] for c in changes)
+
+
+def test_apply_delivers_the_promised_reading_not_the_transcribed_one() -> None:
+    """Live-gate regression (Oct 27, 2026): the memo's prose harvests
+    an ephemeral premium-load reading (10% of premium, a const body)
+    while accepting the fees table transcribes a DIFFERENT premium
+    load (the fee-table lookup) for any mechanic with no record yet.
+    A tables-first batch displaced the promised reading before its
+    turn; the batch must land the confirmed equations first so
+    transcription defers to them."""
+    artifact = _extracted_artifact()
+    fees_rows = [
+        _filed_row(
+            "fees", "specimen-base.pdf", 5, component="premium_expense",
+            duration=None, premium_mode=None, amount=10.0,
+            fee_unit="percent_premium",
+        ),
+        _filed_row(
+            "fees", "specimen-base.pdf", 5, component="policy_fee",
+            duration=None, premium_mode=None, amount=60.0,
+            fee_unit="annual_fixed",
+        ),
+    ]
+    artifact["mechanics"]["fees"] = fees_rows
+    artifact["candidates"]["fees"] = [
+        _candidate("fees", "cand-fees", fees_rows,
+                   filename="specimen-base.pdf", page=5)
+    ]
+    slices = [{
+        "text": (
+            "The Premium Expense Charge is currently set at 10% for "
+            "new issues, applied to each premium."
+        ),
+        "document_hint": "memo.pdf",
+        "page": 2,
+    }]
+    plan = plan_bulk_approval(artifact, slices)
+    eligible_eq = [i for i in plan["eligible"] if i["kind"] == "equation"]
+    assert [i["mechanic"] for i in eligible_eq] == ["premium_load"]
+
+    outcome = apply_bulk_approval(
+        artifact, slices, workspace_id="ws-test", who="workspace_user", at=AT
+    )
+    assert outcome["skipped"] == []
+    assert len(outcome["applied"]) == len(plan["eligible"])
+    in_force = ws_eq.in_force(outcome["artifact"], "premium_load")
+    assert in_force is not None
+    assert in_force["body"] == {"mul": [{"qty": "premium_due"}, {"const": 0.1}]}
