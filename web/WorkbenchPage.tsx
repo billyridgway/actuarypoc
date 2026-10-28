@@ -79,7 +79,6 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
   // hold a stale generation of the approval truth again.
   const [inputsEpoch, setInputsEpoch] = React.useState(0);
   const bumpInputsEpoch = React.useCallback(() => setInputsEpoch((n) => n + 1), []);
-  const ws = useProjectionWorkspace(data, workspaceId);
 
   const reload = React.useCallback(async () => {
     try {
@@ -95,6 +94,11 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
       /* keep the current bench state if a refresh fails */
     }
   }, [workspaceId, bumpInputsEpoch]);
+
+  // A saved projection clears the stale flag on the server; reloading
+  // through the same path as every other bench refresh makes the
+  // header's stale banner/chip clear the moment a run completes.
+  const ws = useProjectionWorkspace(data, workspaceId, { onProjectionSaved: reload });
 
   React.useEffect(() => {
     void reload();
@@ -136,6 +140,10 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
   const trust = trustLevelLabel(readiness.projectionTrustLevel ?? data?.projectionTrustLevel);
   const gapItems: any[] = Array.isArray(data?.gaps?.items) ? data.gaps.items : [];
   const inputsStale = Boolean(meta?.projectionStale);
+  // Live reconciliation of the frozen counts below: what has come
+  // into force since that analysis ran (computed server-side on
+  // every read; null when nothing has changed since the analysis).
+  const reconciliationText = meta?.filingReviewReconciliation?.text ?? null;
   const analysisRunning = analysisState === "running";
   // The counts are labeled with the last COMPLETED analysis — never
   // the workspace's updatedAt, which any later edit would move.
@@ -221,6 +229,7 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
               {compliance.implemented ?? 0} implemented · {compliance.partial ?? 0} partial ·{" "}
               {compliance.missing ?? 0} missing
               {gapItems.length > 0 ? ` · ${gapItems.length} open gap${gapItems.length === 1 ? "" : "s"}` : ""}
+              {reconciliationText ? ` — ${reconciliationText}` : ""}
             </span>
           </p>
           {inputsStale && (

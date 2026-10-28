@@ -103,6 +103,7 @@ from actuarypoc.extract.workspace_mechanics_panel import (
     build_mechanics_panel as _build_mechanics_panel,
     build_slot_view as _build_slot_view,
     correction_view as _correction_view,
+    filing_review_reconciliation as _filing_review_reconciliation,
     parse_table_bytes as _parse_slot_table_bytes,
     reapply_workspace_edits as _reapply_workspace_edits,
     validate_table_rows as _validate_slot_table_rows,
@@ -2206,8 +2207,20 @@ def api_get_workspace(workspace_id: str) -> Dict[str, Any]:
     snapshot["projectionGraph"] = _compile_snapshot_projection_graph(snapshot)
     _annotate_snapshot_gap_slots(snapshot)
 
+    workspace_payload = _workspace_to_api(ws)
+    # Filing-review reconciliation: the snapshot's compliance counts
+    # are the last analysis's frozen record and are NOT recomputed —
+    # but the header also names what has come into force since that
+    # analysis, computed live against the current artifact, so a
+    # requirement approved minutes after the analysis does not keep
+    # reading as missing (Oct 27, 2026).
+    artifact = load_workspace_executable_mechanics(workspace_id) or {}
+    workspace_payload["filingReviewReconciliation"] = _filing_review_reconciliation(
+        snapshot, artifact
+    )
+
     return {
-        "workspace": _workspace_to_api(ws),
+        "workspace": workspace_payload,
         "documents": documents_payload,
         "sources": _workspace_sources_view(docs),
         "snapshot": snapshot,

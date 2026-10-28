@@ -417,6 +417,28 @@ def _equation_for_record(
     raise ValueError(f"Unknown correction variant: {variant!r}")
 
 
+def _before_clause(was: Dict[str, Any]) -> str:
+    """The "before" clause of a correction confirm-back.
+
+    ``describe_current`` descriptions are state summaries, and two of
+    them describe an EMPTY slot; embedded after "was" they read as
+    "was nothing is in force" / "was no surrender schedule is in
+    force".  State those cases plainly instead — the was/now
+    information stays, the grammar goes (Billy, Oct 27, 2026).
+    Every other description keeps the "was …" form.
+    """
+
+    description = was["description"]
+    if description == "nothing is in force":
+        return "nothing was in force before"
+    if description.startswith("no surrender schedule is in force"):
+        return (
+            "no surrender schedule was in force before"
+            " — no surrender charge was calculated"
+        )
+    return f"was {description}"
+
+
 def _confirm_back(
     slot: Dict[str, Any],
     variant: str,
@@ -426,7 +448,6 @@ def _confirm_back(
 ) -> str:
     """Restate a correction in actuarial language for confirmation."""
 
-    was_text = was["description"]
     if variant == "surrender_basis":
         grading = int(params["gradingYears"])
         grade = f"grading to 0 over {grading} year" + ("s" if grading != 1 else "")
@@ -436,7 +457,7 @@ def _confirm_back(
             now = f"{_pct(float(params['percent']))} of face amount, {grade}"
         else:
             now = f"a flat {_money(float(params['amount']))} in year 1, {grade}"
-        return f"Surrender charge: was {was_text}; now {now}."
+        return f"Surrender charge: {_before_clause(was)}; now {now}."
     if variant == "coi_timing":
         return (
             f"COI charge timing: was {_TIMING_PHRASES[_current_timing(artifact)]}; "
@@ -449,14 +470,14 @@ def _confirm_back(
             rows = list((artifact.get("usable") or {}).get("nar_factors") or [])
             factor = rows[0].get("factor") if rows else 1.0
             now = f"death benefit ÷ {factor} (the NAR factor in force) − account value"
-        return f"Net amount at risk for COI: was {was_text}; now {now}."
+        return f"Net amount at risk for COI: {_before_clause(was)}; now {now}."
     if variant in ("surrender_banded", "coi_banded"):
         bands_text = "; ".join(
             _band_phrase(index, band) for index, band in enumerate(params["bands"], start=1)
         )
         if variant == "surrender_banded":
-            return f"Surrender charge: was {was_text}; now a banded schedule — {bands_text}."
-        return f"COI rates: was {was_text}; now banded by policy duration — {bands_text}."
+            return f"Surrender charge: {_before_clause(was)}; now a banded schedule — {bands_text}."
+        return f"COI rates: {_before_clause(was)}; now banded by policy duration — {bands_text}."
     raise ValueError(f"Unknown correction variant: {variant!r}")
 
 

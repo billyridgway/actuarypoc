@@ -149,6 +149,52 @@ check("null math node degrades to prose", () => {
   expectTokens(html, ["just prose"]);
 });
 
+// --- Proposal-shaped payloads (equations consolidation) ----------
+// Since the consolidation, an equation proposal in the mechanics
+// panel renders through this same component, fed with exactly the
+// fields the proposal payload carries (math + rendering +
+// timingNote, built server-side from the candidate body).  A
+// suggestion must be approved in the same typeset form it will run
+// in; a proposal whose body has no typeset form (math null) must
+// degrade to its prose — never a throw, never blank.
+const renderProposal = (proposal) =>
+  renderToString(
+    React.createElement(EquationDisplay, {
+      math: proposal.math,
+      rendering: proposal.rendering,
+      timingNote: proposal.timingNote ?? null,
+    }),
+  );
+check("proposal-shaped payload renders typeset with In words caption", () => {
+  const rec = live.premium_load;
+  const html = renderProposal({
+    kind: "equation",
+    math: rec.math,
+    rendering: rec.rendering,
+    timingNote: rec.timingNote,
+  });
+  expectTokens(html, ["equation-math", "premium due this month", "In words:"]);
+});
+check("proposal-shaped payload renders its Timing line", () => {
+  const rec = live.coi_charge;
+  const html = renderProposal({
+    kind: "equation",
+    math: rec.math,
+    rendering: rec.rendering,
+    timingNote: rec.timingNote,
+  });
+  expectTokens(html, ["equation-math", "Timing:", "beginning of each month"]);
+});
+check("proposal with null math degrades to prose only", () => {
+  const html = renderProposal({
+    kind: "equation",
+    math: null,
+    rendering: "the stated charge, not yet structured",
+    timingNote: null,
+  });
+  expectTokens(html, ["the stated charge, not yet structured"]);
+});
+
 rmSync(buildDir, { recursive: true, force: true });
 if (failures > 0) {
   console.log(`\n${failures} check(s) failed`);

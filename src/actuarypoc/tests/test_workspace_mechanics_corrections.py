@@ -388,8 +388,8 @@ def test_correction_over_missing_and_over_edit(store: FakeMinio) -> None:
     preview = server.api_preview_mechanics_correction(
         workspace_id, "surrender", _surrender_spec()
     )
-    assert "no surrender schedule is in force" in preview["confirmBack"]
-    assert "no surrender charge is calculated" in preview["confirmBack"]
+    assert "no surrender schedule was in force before" in preview["confirmBack"]
+    assert "no surrender charge was calculated" in preview["confirmBack"]
     server.api_apply_mechanics_correction(
         workspace_id, "surrender", _surrender_spec(confirmed=True)
     )

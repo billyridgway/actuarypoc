@@ -180,6 +180,11 @@ interface ProposalView {
   }>;
   equationMechanic?: string | null;
   rendering?: string | null;
+  /** Typeset form of the proposed equation's body (same math tree
+   *  the in-force record views carry); null when the body has no
+   *  typeset form — the prose rendering then stands alone. */
+  math?: MathNode | null;
+  timingNote?: string | null;
   evidence?: {
     filename?: string | null;
     page?: number | null;
@@ -1003,7 +1008,13 @@ export const MechanicsPanel: React.FC<{
                 </p>
               )}
               {proposal.kind === "equation" && proposal.rendering ? (
-                <p className="muted">Equation: {proposal.rendering}</p>
+                <div className="proposal-equation">
+                  <EquationDisplay
+                    math={proposal.math}
+                    rendering={proposal.rendering}
+                    timingNote={proposal.timingNote}
+                  />
+                </div>
               ) : null}
               {!isChoice && proposal.evidence && (
                 <p className="muted">
@@ -1078,47 +1089,24 @@ export const MechanicsPanel: React.FC<{
         <div className="slot-card" id="equations-in-force">
           <h3>Equations in force</h3>
           <p className="muted">
-            Only approved equations calculate. A mechanic with no approved equation is
-            not calculated — the projection states the absence instead of substituting
-            a fallback.
+            One line per mechanic — the full equations, typeset with their
+            provenance, live in the Equations section. Only approved
+            equations calculate; a mechanic with none is not calculated.
           </p>
-          {Object.entries(panel.equations.mechanics).map(([mechanic, view]) => (
-            <div key={mechanic} className="slot-candidate">
-              <p>
-                <strong>{view.label}</strong>{" "}
-                {view.inForce ? (
-                  <span className="basis-tag">approved</span>
-                ) : (
-                  <span className="basis-tag">not calculated</span>
-                )}
-                {view.records.some((r) => r.conflict) ? (
-                  <span className="basis-tag">conflict</span>
-                ) : null}
-              </p>
-              {view.inForce ? (
-                <EquationDisplay
-                  math={view.inForce.math}
-                  rendering={view.inForce.rendering}
-                  timingNote={view.inForce.timingNote}
-                  approvalBy={view.inForce.approval?.by ?? null}
-                />
-              ) : (
-                <p className="muted">{view.resolution}</p>
-              )}
-              {view.records
-                .filter((r) => r.state === "pending")
-                .map((r) => (
-                  <p key={r.id} className="muted">
-                    Pending approval: {r.rendering ?? "(stated, not yet structured)"}
-                  </p>
-                ))}
-            </div>
-          ))}
+          <ul className="equation-status-list">
+            {Object.entries(panel.equations.mechanics).map(([mechanic, view]) => (
+              <li key={mechanic}>
+                <strong>{view.label}</strong> —{" "}
+                {view.inForce ? "approved" : "not calculated"}
+                {view.records.some((r) => r.conflict) ? " · conflict" : ""}
+              </li>
+            ))}
+          </ul>
           {panel.equations.conflicts.length > 0 && (
             <p className="muted">
               {panel.equations.conflicts.length} stated calculation(s) conflict with an
-              equation in force or could not be structured — see the equation records;
-              nothing was silently dropped or auto-approved.
+              equation in force or could not be structured — see the Equations
+              section; nothing was silently dropped or auto-approved.
             </p>
           )}
         </div>

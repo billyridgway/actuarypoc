@@ -40,7 +40,17 @@ const REQUIRED_PROJECTION_SELECTORS = [
   ["tobacco_status", "tobacco / nicotine status"],
 ] as const;
 
-export const useProjectionWorkspace = (snapshot: any, workspaceId: string) => {
+export const useProjectionWorkspace = (
+  snapshot: any,
+  workspaceId: string,
+  options?: {
+    /** Called after a projection run saves: the composing page
+     *  refreshes its workspace meta (the server cleared the stale
+     *  flag when the projection saved), so the stale banner/chip
+     *  clears immediately instead of surviving to the next reload. */
+    onProjectionSaved?: () => void | Promise<void>;
+  },
+) => {
   const [illustration, setIllustration] = React.useState(snapshot?.illustration ?? null);
   const [projectionGraph, setProjectionGraph] = React.useState<ProjectionGraphDefinition | null>(snapshot?.projectionGraph ?? null);
   const [executableMechanics, setExecutableMechanics] = React.useState<any>(snapshot?.executableMechanics ?? null);
@@ -147,6 +157,11 @@ export const useProjectionWorkspace = (snapshot: any, workspaceId: string) => {
       setProjectionGraph(body.projectionGraph ?? null);
       setDirty(false);
       setRunMessage("Projection complete. Results updated below.");
+      try {
+        await options?.onProjectionSaved?.();
+      } catch {
+        /* a failed meta refresh never fails the run itself */
+      }
       window.setTimeout(() => document.getElementById("projection-results")?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
     } catch (err: any) {
       setError(err?.message || "Projection failed.");

@@ -74,6 +74,20 @@ def _from_phrase(filename: Optional[str]) -> str:
     return f"from {filename}" if filename else f"({SOURCE_NOT_RECORDED})"
 
 
+def _was_clause(description: str) -> str:
+    """The "before" clause of a table confirm-back.
+
+    ``describe_current`` reports an empty slot's state as "nothing is
+    in force"; embedded in a summary that reads "was nothing is in
+    force".  State the empty case plainly instead — the was/now
+    information stays, the grammar goes (Billy, Oct 27, 2026).
+    """
+
+    if description == "nothing is in force":
+        return "nothing was in force before"
+    return f"was {description}"
+
+
 def _evidence_summary(evidence: Optional[Dict[str, Any]]) -> str:
     """The change-history evidence parenthetical for a proposal:
     "(evidence: FILE, p. N)" — or, when no source was recorded,
@@ -249,7 +263,7 @@ def _filed_table_proposals(artifact: Dict[str, Any]) -> List[Dict[str, Any]]:
                 differing_total += len(conf)
             if not conflicts:
                 option["confirmBack"] = (
-                    f"{slot['label']}: was {was['description']}; now the filed table"
+                    f"{slot['label']}: {_was_clause(was['description'])}; now the filed table"
                     f" of {candidate.get('rowCount')} rows"
                     + (
                         f" from {evidence['filename']}"
@@ -399,6 +413,19 @@ def _current_text(artifact: Dict[str, Any], mechanic: str) -> str:
     return str(current.get("rendering") or "an approved equation")
 
 
+def _equation_before_clause(artifact: Dict[str, Any], mechanic: str) -> str:
+    """The "before" clause of an equation confirm-back, plainly stated.
+
+    The empty case gets its own sentence shape — "nothing was in
+    force before" — rather than the shorthand "was no approved
+    equation in force" (Billy, Oct 27, 2026).
+    """
+
+    if _ws_equations.in_force(artifact, mechanic) is None:
+        return "nothing was in force before — the mechanic is not calculated"
+    return f"was {_current_text(artifact, mechanic)}"
+
+
 def _equation_proposals(
     artifact: Dict[str, Any], slices: List[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
@@ -418,6 +445,8 @@ def _equation_proposals(
         page: Optional[int],
         equation_id: Optional[str],
         candidate: Optional[Dict[str, Any]],
+        body: Optional[Dict[str, Any]] = None,
+        timing: Optional[str] = None,
     ) -> None:
         slot_id = _EQUATION_SLOT_BY_MECHANIC.get(mechanic)
         slot = SLOT_BY_ID.get(slot_id or "")
@@ -438,7 +467,7 @@ def _equation_proposals(
             "snippet": statement,
         }
         confirm_back = (
-            f"{label} equation: was {_current_text(artifact, mechanic)}; "
+            f"{label} equation: {_equation_before_clause(artifact, mechanic)}; "
             f"now {rendering}"
             + (f" — as stated in {filename}" if filename else f" ({SOURCE_NOT_RECORDED})")
             + (f", p. {page}" if page else "")
@@ -460,6 +489,16 @@ def _equation_proposals(
             "equationId": equation_id,
             "candidate": candidate,
             "rendering": rendering,
+            # The typeset form of the exact body a confirmation would
+            # put in force — built by the same walker the in-force
+            # record views use, so a suggestion is approved in the
+            # same form it will run in (Oct 27, 2026).  None when the
+            # body has a shape the walker does not know; the prose
+            # rendering then stands alone, as on an in-force card.
+            "math": (
+                _eq.render_math_tree(body, mechanic) if body is not None else None
+            ),
+            "timingNote": _eq.timing_sentence(timing),
             "label": f"Approve the {label.lower()} equation from the filing",
             "confirmBack": confirm_back,
             "evidence": evidence,
@@ -479,6 +518,8 @@ def _equation_proposals(
             page=source.get("page"),
             equation_id=str(record.get("id")),
             candidate=None,
+            body=record.get("body"),
+            timing=record.get("timing"),
         )
 
     # Fresh deterministic harvest candidates over the slices.
@@ -537,6 +578,8 @@ def _equation_proposals(
                 "page": candidate.get("page"),
                 "assist": candidate.get("assist"),
             },
+            body=body,
+            timing=timing,
         )
     return proposals
 

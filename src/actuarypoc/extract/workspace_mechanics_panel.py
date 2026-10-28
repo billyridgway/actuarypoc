@@ -35,6 +35,7 @@ import math
 from typing import Any, Dict, List, Optional, Sequence
 import uuid
 
+from actuarypoc.extract import workspace_equations as _ws_equations
 from actuarypoc.extract.workspace_ul_mechanics import (
     _name,
     _parse_row,
@@ -98,6 +99,152 @@ def annotate_gap_items(gap_items: Sequence[Dict[str, Any]]) -> List[Dict[str, An
             row["slotId"] = slot_id
         annotated.append(row)
     return annotated
+
+
+# ---------------------------------------------------------------------------
+# Filing-review reconciliation (Oct 27, 2026)
+#
+# The workbench header shows the last analysis's compliance snapshot —
+# implemented / partial / missing counts and open gaps, frozen at
+# analysis time by design.  Frozen reads as current, though: a
+# requirement the analysis counted missing can come into force minutes
+# later through approvals, and the header never said so.  This
+# reconciliation is computed LIVE against the current artifact on
+# every read: the snapshot counts do not change, but the payload
+# names what has since come into force, and the header appends it.
+# ---------------------------------------------------------------------------
+
+#: Snapshot requirement ids (the UL catalogue ids in
+#: domain/ul_requirements.py, plus their field-evidence ids) and the
+#: slot whose in-force state satisfies the requirement.
+REQUIREMENT_SLOT_MAP: Dict[str, str] = {
+    "coi_table": "coi",
+    "coi_rates": "coi",
+    "surrender_schedule": "surrender",
+    "policy_admin_fees": "fees",
+    "policy_admin_fee": "fees",
+}
+
+#: The equation that must be approved for a slot to count as in force
+#: in the reconciliation — a filed table alone does not calculate
+#: without its equation.  (The fees slot's equation is policy_fees;
+#: premium_load is a separate mechanic that reads the same table.)
+SLOT_EQUATION_MECHANIC: Dict[str, str] = {
+    "coi": "coi_charge",
+    "surrender": "surrender_charge",
+    "fees": "policy_fees",
+    "nar": "nar_definition",
+    "corridor": "death_benefit",
+    "crediting": "crediting",
+}
+
+
+def _slot_now_in_force(artifact: Dict[str, Any], slot_id: str) -> bool:
+    """Whether a slot can calculate NOW: its filed table is in force
+    (usable rows present) and its equation is approved."""
+
+    slot = SLOT_BY_ID.get(slot_id) or {}
+    mechanic = slot.get("mechanic")
+    if mechanic:
+        rows = list((artifact.get("usable") or {}).get(str(mechanic)) or [])
+        if not rows:
+            return False
+    equation_mechanic = SLOT_EQUATION_MECHANIC.get(slot_id)
+    if equation_mechanic is not None:
+        return _ws_equations.in_force(artifact, equation_mechanic) is not None
+    return True
+
+
+def _requirement_slot(requirement: Dict[str, Any]) -> Optional[str]:
+    slot_id = REQUIREMENT_SLOT_MAP.get(str(requirement.get("id") or ""))
+    if slot_id:
+        return slot_id
+    for evidence in requirement.get("evidence") or []:
+        slot_id = REQUIREMENT_SLOT_MAP.get(str((evidence or {}).get("id") or ""))
+        if slot_id:
+            return slot_id
+    return None
+
+
+def filing_review_reconciliation(
+    snapshot: Dict[str, Any], artifact: Dict[str, Any]
+) -> Dict[str, Any]:
+    """What has come into force since the snapshot's analysis ran.
+
+    Returns the analysis-time counts (from the snapshot's own
+    summary, so they always match the header's frozen counts), the
+    requirements the analysis counted missing/partial that are NOW
+    in force, the snapshot gaps whose subject is NOW resolved, and
+    a ready-to-render ``text`` clause — None when nothing has
+    changed since the analysis, in which case the header shows the
+    frozen line alone.
+    """
+
+    snapshot = snapshot or {}
+    artifact = artifact or {}
+    matrix = snapshot.get("complianceMatrix") or {}
+    requirements = list(matrix.get("requirements") or [])
+    summary = matrix.get("summary") or {}
+    missing = int(summary.get("missing") or 0)
+    partial = int(summary.get("partial") or 0)
+    if not summary:
+        missing = sum(
+            1 for r in requirements
+            if (r.get("classification") or {}).get("implementationState") == "not_implemented"
+        )
+        partial = sum(
+            1 for r in requirements
+            if (r.get("classification") or {}).get("implementationState") == "partial"
+        )
+    gap_items = list(((snapshot.get("gaps") or {}).get("items")) or [])
+
+    resolved_requirements: List[Dict[str, Any]] = []
+    for requirement in requirements:
+        state = (requirement.get("classification") or {}).get("implementationState")
+        if state not in {"not_implemented", "partial"}:
+            continue
+        slot_id = _requirement_slot(requirement)
+        if slot_id is None or not _slot_now_in_force(artifact, slot_id):
+            continue
+        resolved_requirements.append({
+            "id": str(requirement.get("id") or ""),
+            "name": str(requirement.get("name") or requirement.get("id") or ""),
+        })
+
+    resolved_gaps: List[Dict[str, Any]] = []
+    for gap in gap_items:
+        slot_id = GAP_SLOT_MAP.get(str(gap.get("id") or ""))
+        if slot_id is None or not _slot_now_in_force(artifact, slot_id):
+            continue
+        resolved_gaps.append({
+            "id": str(gap.get("id") or ""),
+            "title": str(gap.get("title") or gap.get("id") or ""),
+        })
+
+    parts: List[str] = []
+    if resolved_requirements:
+        counts = []
+        if missing:
+            counts.append(f"{missing} missing")
+        if partial:
+            counts.append(f"{partial} partial")
+        names = ", ".join(item["name"] for item in resolved_requirements)
+        parts.append(f"{' · '.join(counts)} at analysis — now in force: {names}")
+    if resolved_gaps:
+        titles = ", ".join(item["title"] for item in resolved_gaps)
+        parts.append(
+            f"{len(gap_items)} open gap"
+            + ("s" if len(gap_items) != 1 else "")
+            + f" at analysis — now resolved: {titles}"
+        )
+    return {
+        "missingAtAnalysis": missing,
+        "partialAtAnalysis": partial,
+        "openGapsAtAnalysis": len(gap_items),
+        "resolvedRequirements": resolved_requirements,
+        "resolvedGaps": resolved_gaps,
+        "text": "; ".join(parts) if parts else None,
+    }
 
 
 def _rows_digest(rows: Sequence[Dict[str, Any]]) -> str:
@@ -680,6 +827,7 @@ __all__ = [
     "GAP_SLOT_MAP",
     "STATUS_LABELS",
     "annotate_gap_items",
+    "filing_review_reconciliation",
     "build_mechanics_panel",
     "build_slot_view",
     "correction_view",
