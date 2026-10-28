@@ -380,6 +380,12 @@ def _step_state(
         return "approval" if tables_pending else "settled"
     if readings:
         return "approval"
+    if coverage_state == "covered":
+        # Covered by the documents, but no standalone reading stands
+        # yet — the equation arrives with its table's acceptance (the
+        # filed-table transcription path: COI, surrender).  Awaiting
+        # that approval; never "not in the documents" (Billy's rule).
+        return "approval"
     if coverage_state == "stated":
         return "stated_not_extracted"
     return "not_in_documents"

@@ -274,6 +274,28 @@ def test_step_carried_when_only_a_carried_reading_is_in_effect() -> None:
     assert _step(view, "death_benefit")["state"] == "carried"
 
 
+def test_step_covered_by_a_filed_table_is_approval_not_missing() -> None:
+    """COI before any approval: no standalone equation reading stands
+    yet (its body is the filed table's transcription), but the
+    documents DO state it — the step is awaiting approval, never
+    "not in the documents" (the live gate's pre-approval state)."""
+
+    artifact = {
+        "equations": [],
+        "candidates": {
+            "coi": [{
+                "id": "cand-coi", "filename": "specs.pdf", "page": 6,
+                "rows": [{"duration": 1, "rate": 0.001,
+                          "rate_unit": "per_1000_monthly"}],
+            }],
+        },
+        "usable": {},
+    }
+    view = structure.build_structure(artifact, slot_views=[_slot("coi", status="missing", pending=1)])
+    assert _step(view, "coi")["state"] == "approval"
+    assert _step(view, "coi")["coverage"]["state"] == "covered"
+
+
 def test_step_not_in_documents_and_stated_not_extracted() -> None:
     view = structure.build_structure({"equations": [], "candidates": {}, "usable": {}})
     assert _step(view, "premium")["state"] == "not_in_documents"
