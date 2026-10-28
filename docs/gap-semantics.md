@@ -21,10 +21,18 @@ table coverage in `workspace_mechanics_panel.document_coverage`):
    deterministic-harvest candidate with a body. For `coi_charge`, a
    timing statement counts when the filed table's single rate unit
    supplies the body (the proposal path's derivation). A filed table
-   candidate (or rows in force) covers the table side of a slot. The
-   holistic review's found-by-review candidates are ordinary pending
-   records by the time coverage is computed, so they cover exactly
-   like first-pass candidates. **Covered is not a gap, whatever the
+   whose transcription compiles to a body also covers its governing
+   mechanic (`coi_charge`, `surrender_charge`, `policy_fees`,
+   `nar_definition`, `death_benefit`) — accepting the table is what
+   puts that equation in force. `premium_load` is never
+   table-covered: its transcription applies a chassis percentage,
+   while the filed percentage is stated in prose. Finally, any
+   mechanic carrying an equation proposal on the suggestions surface
+   is covered by construction — coverage unions the proposal
+   builder's output so the two can never diverge. The holistic
+   review's found-by-review candidates are ordinary pending records
+   by the time coverage is computed, so they cover exactly like
+   first-pass candidates. **Covered is not a gap, whatever the
    approval state.**
 2. **Not in the documents** — no statement of the calculation was
    found. This is the only genuine document gap.

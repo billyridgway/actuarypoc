@@ -192,8 +192,35 @@ def document_coverage(
         )
         for mechanic in TABLE_MECHANICS
     }
+    equations = _ws_equations.equation_document_coverage(artifact, slices)
+    # The suggestions surface is ground truth for "we hold an
+    # extracted candidate": union in every mechanic that carries an
+    # equation proposal, so coverage can never diverge from what the
+    # user is actually shown as approvable.  (Imported here — the
+    # proposals module imports this one.)
+    try:
+        from actuarypoc.extract.workspace_mechanics_proposals import (
+            generate_proposals,
+        )
+
+        for proposal in generate_proposals(artifact, list(slices or [])):
+            if proposal.get("kind") != "equation":
+                continue
+            mechanic = str(proposal.get("equationMechanic") or "")
+            entry = equations.get(mechanic)
+            if entry is None or entry.get("state") == "covered":
+                continue
+            evidence = proposal.get("evidence") or {}
+            equations[mechanic] = {
+                "state": "covered",
+                "filename": evidence.get("filename"),
+                "page": evidence.get("page"),
+                "statement": evidence.get("snippet"),
+            }
+    except Exception:  # noqa: BLE001 - direct checks above still stand
+        pass
     return {
-        "equations": _ws_equations.equation_document_coverage(artifact, slices),
+        "equations": equations,
         "tables": tables,
     }
 

@@ -146,7 +146,13 @@ def in_force_map(artifact: Mapping[str, Any]) -> Dict[str, Dict[str, Any]]:
 #   with a body, an approved record sourced from a document, or a
 #   deterministic-harvest candidate with a body; for coi_charge, a
 #   timing statement whose body the filed table's single rate unit
-#   supplies — the same derivation the proposal path performs).
+#   supplies — the same derivation the proposal path performs).  A
+#   filed table whose transcription compiles to a body also covers
+#   its governing mechanic (coi_charge, surrender_charge,
+#   policy_fees, nar_definition, death_benefit) — accepting the
+#   table is what puts that equation in force.  premium_load is
+#   never table-covered: its transcription applies a chassis
+#   percentage, while the filed percentage is stated in prose.
 # * ``stated`` — the documents state the calculation but extraction
 #   holds no usable body for it (an unmapped record, or a harvest
 #   statement it could not structure).  That is OUR extraction gap,
@@ -235,6 +241,73 @@ def equation_document_coverage(
             note(mechanic, "covered", candidate)
         else:
             note(mechanic, "stated", candidate)
+
+    # Filed tables are equation evidence too: accepting a filed table
+    # puts its transcription in force (transcribe_tables_as_approved
+    # -> materialize_legacy_equations), so a mechanic whose governing
+    # table the documents state — with rows extraction holds, as
+    # candidates or in force — is covered.  The derivability test is
+    # the transcription's own: the unit the filed rows carry must
+    # compile to a body.  Two mechanics are deliberately NOT covered
+    # this way: premium_load (its transcription applies a chassis
+    # percentage — the filed percentage is stated in prose, e.g. the
+    # actuarial memo, not in the fee schedule) and crediting (no
+    # governing table).
+    def table_rows(mechanic: str):
+        rows: List[Dict[str, Any]] = [
+            row for row in ((artifact or {}).get("usable") or {}).get(mechanic) or []
+            if isinstance(row, Mapping)
+        ]
+        evidence: Dict[str, Any] = {}
+        for candidate in ((artifact or {}).get("candidates") or {}).get(mechanic) or []:
+            if not isinstance(candidate, Mapping):
+                continue
+            candidate_rows = [
+                row for row in candidate.get("rows") or []
+                if isinstance(row, Mapping)
+            ]
+            if candidate_rows and not evidence:
+                evidence = {
+                    "filename": candidate.get("filename"),
+                    "page": candidate.get("page"),
+                    "statement": None,
+                }
+            rows += candidate_rows
+        if rows and not evidence:
+            provenance = rows[0].get("provenance") or {}
+            evidence = {
+                "filename": provenance.get("filename"),
+                "page": provenance.get("page"),
+                "statement": None,
+            }
+        return rows, evidence
+
+    def note_table(mechanic: str, rows_evidence) -> None:
+        rows, evidence = rows_evidence
+        if rows:
+            note(mechanic, "covered", evidence)
+
+    coi_rows = table_rows("coi")
+    if coi_rows[0]:
+        unit, _mixed = _first_unit(coi_rows[0], "rate_unit")
+        if unit:
+            try:
+                coi_body_for_unit(unit)
+                note_table("coi_charge", coi_rows)
+            except ValueError:
+                pass
+    surrender_rows = table_rows("surrender")
+    if surrender_rows[0]:
+        unit, _mixed = _first_unit(surrender_rows[0], "charge_unit")
+        if unit:
+            try:
+                surrender_body_for_unit(unit)
+                note_table("surrender_charge", surrender_rows)
+            except ValueError:
+                pass
+    note_table("policy_fees", table_rows("fees"))
+    note_table("nar_definition", table_rows("nar_factors"))
+    note_table("death_benefit", table_rows("corridor"))
 
     return coverage
 

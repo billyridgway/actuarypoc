@@ -123,6 +123,65 @@ def test_harvest_statement_covers_and_absence_does_not() -> None:
     assert empty["premium_load"]["state"] == "absent"
 
 
+def test_filed_tables_cover_their_equation_mechanics() -> None:
+    """The fresh-analysis shape: no records, no prose candidates —
+    only filed table candidates.  Accepting a filed table puts its
+    transcription in force, so the table's mechanic is covered.
+    premium_load (chassis percentage; the filed percentage is prose)
+    and crediting (no governing table) are NOT table-covered."""
+
+    artifact = {
+        "version": 1,
+        "equations": [],
+        "candidates": {
+            "coi": [{
+                "id": "cand-coi", "filename": "specimen.pdf", "page": 4,
+                "rows": [{"duration": 1, "rate": 0.19,
+                          "rate_unit": "per_1000_monthly"}],
+            }],
+            "surrender": [{
+                "id": "cand-surr", "filename": "specimen.pdf", "page": 3,
+                "rows": [{"duration": 1, "charge": 10,
+                          "charge_unit": "percent_face"}],
+            }],
+            "fees": [{
+                "id": "cand-fees", "filename": "specimen.pdf", "page": 5,
+                "rows": [{"duration": 1, "amount": 5}],
+            }],
+            "nar_factors": [{
+                "id": "cand-nar", "filename": "specimen.pdf", "page": 8,
+                "rows": [{"factor": 1.0}],
+            }],
+            "corridor": [{
+                "id": "cand-corr", "filename": "specimen.pdf", "page": 6,
+                "rows": [{"duration": 1, "percentage": 2.5}],
+            }],
+        },
+        "usable": {},
+    }
+    coverage = ws_eq.equation_document_coverage(artifact, [])
+    states = {m: e["state"] for m, e in coverage.items()}
+    assert states == {
+        "coi_charge": "covered",
+        "surrender_charge": "covered",
+        "policy_fees": "covered",
+        "nar_definition": "covered",
+        "death_benefit": "covered",
+        "premium_load": "absent",
+        "crediting": "absent",
+    }
+
+    _projection, _m, _w, _n, gaps = _view(
+        artifact, panel.document_coverage(artifact, []))
+    assert {gap["id"] for gap in gaps} == {
+        "missing_premium_load_equation",
+        "missing_crediting_equation",
+    }
+    assert all(
+        gap["coverage"] == "not_in_documents" for gap in gaps
+    )
+
+
 def test_mechanic_without_candidate_gap_is_not_stated_in_documents() -> None:
     artifact = {"version": 1, "equations": [], "candidates": {}, "usable": {}}
     coverage = panel.document_coverage(artifact, [])
