@@ -182,6 +182,9 @@ interface ProposalView {
   id: string;
   kind: "filed_table" | "filed_table_choice" | "equation";
   slot: string;
+  /** The table mechanic (filed-table proposals; the payload
+   *  carries it alongside the slot). */
+  mechanic?: string | null;
   label: string;
   confirmBack: string;
   candidateId?: string | null;
@@ -537,6 +540,291 @@ const SlotRowsTable: React.FC<{ rows: Array<Record<string, any>> }> = ({ rows })
   );
 };
 
+/** One reading of a step's equation, presented as an explicit
+ *  option (product structure, Oct 28, 2026).  Choosing an option IS
+ *  the approval act: with several readings, the radio selects and
+ *  the inline confirm applies; with exactly ONE reading there is no
+ *  radio to press first — the confirm button stands on the card
+ *  (Billy, Oct 28, 2026).  When the reading travels as a pending
+ *  proposal, the proposal's review lines and was/now restatement
+ *  ride on this card and Dismiss acts on that proposal — proposals
+ *  render inside their step now, not in a separate feed. */
+export const StructureOptionCard: React.FC<{
+  equationLabel: string;
+  radioName: string;
+  stepHasInEffect: boolean;
+  option: StructureReadingView;
+  proposal?: ProposalView | null;
+  singleOption: boolean;
+  confirming: boolean;
+  busy: boolean;
+  onSelect: () => void;
+  onConfirm: () => void;
+  onCancel: () => void;
+  onDismissProposal: () => void;
+}> = ({
+  equationLabel,
+  radioName,
+  stepHasInEffect,
+  option,
+  proposal,
+  singleOption,
+  confirming,
+  busy,
+  onSelect,
+  onConfirm,
+  onCancel,
+  onDismissProposal,
+}) => {
+  const isCurrent = option.state === "in_effect";
+  const headerContent = (
+    <>
+      <strong>{equationLabel}</strong>{" "}
+      <span className="basis-tag">{option.provenanceLabel}</span>{" "}
+      {isCurrent ? (
+        <span className="basis-tag basis-tag--filed">In effect</span>
+      ) : (
+        <span className="muted">Not in effect</span>
+      )}
+    </>
+  );
+  return (
+    <div className="choice-option structure-option">
+      {singleOption ? (
+        <div>{headerContent}</div>
+      ) : (
+        <label>
+          <input
+            type="radio"
+            name={radioName}
+            checked={isCurrent}
+            disabled={isCurrent || busy}
+            onChange={onSelect}
+          />{" "}
+          {headerContent}
+        </label>
+      )}
+      {proposal?.reviewFlag && (
+        <p className="error">
+          Holistic review flag — this suggestion needs your individual review (it
+          is excluded from Approve all uncontested): {proposal.reviewFlag.reason}
+          {(proposal.reviewFlag.evidence ?? []).map((item, index) => (
+            <span key={index}>
+              {" "}
+              [{sourceName(item.filename)}
+              {item.page != null ? `, p. ${item.page}` : ""}
+              {item.snippet ? <> — “{item.snippet}”</> : null}]
+            </span>
+          ))}
+        </p>
+      )}
+      {!proposal?.reviewFlag && proposal?.review?.evidence && (
+        <p className="muted">Review: {proposal.review.evidence}.</p>
+      )}
+      {!proposal?.reviewFlag && proposal?.review?.note && (
+        <p className="muted">Review: {proposal.review.note}</p>
+      )}
+      <EquationDisplay
+        math={option.math}
+        rendering={option.rendering}
+        timingNote={option.timingNote}
+      />
+      {option.evidence?.filename ? (
+        <p className="muted">
+          Evidence: {sourceName(option.evidence.filename)}
+          {option.evidence.page != null ? `, p. ${option.evidence.page}` : ""}
+          {option.evidence.snippet ? <> — “{option.evidence.snippet}”</> : null}
+        </p>
+      ) : option.provenanceClass === "carried_over" ? (
+        <p className="muted">
+          Evidence: none — this reading was carried over from the workspace's
+          earlier state; no filed statement stands behind it.
+        </p>
+      ) : null}
+      {proposal && !isCurrent ? (
+        <p className="muted">{proposal.confirmBack}</p>
+      ) : null}
+      {!isCurrent && (singleOption || confirming) && (
+        <p>
+          <button
+            type="button"
+            className="button"
+            disabled={busy}
+            onClick={onConfirm}
+          >
+            {stepHasInEffect
+              ? "Confirm — use this reading instead"
+              : "Confirm — put this reading in effect"}
+          </button>{" "}
+          {proposal ? (
+            <>
+              <button
+                type="button"
+                className="button button-secondary"
+                disabled={busy}
+                onClick={onDismissProposal}
+              >
+                Dismiss
+              </button>{" "}
+            </>
+          ) : null}
+          {!singleOption && (
+            <button
+              type="button"
+              className="button button-secondary"
+              disabled={busy}
+              onClick={onCancel}
+            >
+              Cancel
+            </button>
+          )}
+        </p>
+      )}
+    </div>
+  );
+};
+
+/** One pending extraction proposal — a filed-table acceptance, a
+ *  genuine table conflict, or an equation reading that matches no
+ *  structure option — rendered inside its mechanic's step (the
+ *  "Suggested from the filing" feed is retired, Oct 28, 2026).
+ *  Confirm/dismiss semantics are the proposal endpoints', unchanged.
+ *
+ *  Radio rule (Billy, Oct 28, 2026): no radio anywhere on these
+ *  cards.  A table proposal with exactly one slice shows the slice
+ *  summary with Confirm and apply / Dismiss directly — the slice
+ *  adds its coverage to the table in force (union semantics).  A
+ *  genuine conflict shows each version as its own block with its
+ *  own confirm path: the versions are explicit alternatives, and
+ *  choosing one is a decision, not a radio form. */
+export const ProposalCard: React.FC<{
+  proposal: ProposalView;
+  busy: boolean;
+  onConfirm: (candidateId?: string) => void;
+  onDismiss: () => void;
+}> = ({ proposal, busy, onConfirm, onDismiss }) => {
+  const isChoice = proposal.kind === "filed_table_choice";
+  const options = proposal.options ?? [];
+  const optionSummary = (option: ProposalOption) => (
+    <span>
+      <strong>{sourceName(option.filename)}</strong>
+      {option.page != null ? ` (p. ${option.page})` : ""}
+      {filedIdenticallyNote(option.sources)}
+      {option.coverageText ? ` — ${option.coverageText}` : ""}
+      {selectorSummaryText(option.selectors)
+        ? ` · ${selectorSummaryText(option.selectors)}`
+        : ""}{" "}
+      {option.inForce ? <span className="basis-tag">currently in force</span> : null}
+    </span>
+  );
+  return (
+    <div className="slot-candidate">
+      <p>
+        <strong>{proposal.label}</strong>
+        {proposal.kind === "equation" ? (
+          <span className="basis-tag">equation</span>
+        ) : null}
+      </p>
+      {proposal.conflict && (
+        <p className="error">
+          These two filed tables disagree on {proposal.conflict.differingRows}{" "}
+          row{proposal.conflict.differingRows === 1 ? "" : "s"} where their coverage
+          overlaps — choose which one governs those rows. Nothing is merged
+          silently.
+        </p>
+      )}
+      {proposal.reviewFlag && (
+        <p className="error">
+          Holistic review flag — this suggestion needs your individual review (it
+          is excluded from Approve all uncontested): {proposal.reviewFlag.reason}
+          {(proposal.reviewFlag.evidence ?? []).map((item, index) => (
+            <span key={index}>
+              {" "}
+              [{sourceName(item.filename)}
+              {item.page != null ? `, p. ${item.page}` : ""}
+              {item.snippet ? <> — “{item.snippet}”</> : null}]
+            </span>
+          ))}
+        </p>
+      )}
+      {!proposal.reviewFlag && proposal.review?.evidence && (
+        <p className="muted">Review: {proposal.review.evidence}.</p>
+      )}
+      {!proposal.reviewFlag && proposal.review?.note && (
+        <p className="muted">Review: {proposal.review.note}</p>
+      )}
+      {proposal.kind === "equation" && proposal.rendering ? (
+        <div className="proposal-equation">
+          <EquationDisplay
+            math={proposal.math}
+            rendering={proposal.rendering}
+            timingNote={proposal.timingNote}
+          />
+        </div>
+      ) : null}
+      {!isChoice && proposal.evidence && (
+        <p className="muted">
+          Evidence: {sourceName(proposal.evidence.filename)}
+          {proposal.evidence.page != null ? `, p. ${proposal.evidence.page}` : ""}
+          {filedIdenticallyNote(proposal.evidence.sources)}
+          {proposal.evidence.snippet ? <> — “{proposal.evidence.snippet}”</> : null}
+        </p>
+      )}
+      {isChoice &&
+        options.map((option) => {
+          const diff = (proposal.optionDiffs ?? []).find(
+            (d) => d.candidateId === option.candidateId,
+          );
+          return (
+            <div key={option.candidateId} className="proposal-option">
+              {optionSummary(option)}
+              {diff && (
+                <p className="muted">
+                  Compared with the first version: {diff.identicalRows} rows
+                  identical, {diff.differingRows} rows differ in value,{" "}
+                  {diff.onlyInFirst} rows only in the first, {diff.onlyInOption}{" "}
+                  rows only in this one.
+                </p>
+              )}
+              {option.confirmBack ? (
+                <p className="muted">{option.confirmBack}</p>
+              ) : null}
+              <button
+                type="button"
+                className="button"
+                disabled={busy}
+                onClick={() => onConfirm(option.candidateId ?? undefined)}
+              >
+                {options.length > 1 && option.inForce
+                  ? "Confirm — keep this version in force"
+                  : "Confirm and apply"}
+              </button>
+            </div>
+          );
+        })}
+      {!isChoice ? <p className="muted">{proposal.confirmBack}</p> : null}
+      {!isChoice && (
+        <button
+          type="button"
+          className="button"
+          disabled={busy}
+          onClick={() => onConfirm(undefined)}
+        >
+          Confirm and apply
+        </button>
+      )}{" "}
+      <button
+        type="button"
+        className="button button-secondary"
+        disabled={busy}
+        onClick={onDismiss}
+      >
+        Dismiss
+      </button>
+    </div>
+  );
+};
+
 export const MechanicsPanel: React.FC<{
   workspaceId: string;
   onSnapshotReload?: () => void;
@@ -577,10 +865,6 @@ export const MechanicsPanel: React.FC<{
   // summary the server returned for review, before anything applied.
   const [bulkSummary, setBulkSummary] = React.useState<BulkSummaryView | null>(null);
   const [bulkBusy, setBulkBusy] = React.useState<boolean>(false);
-  // Unification revamp: the chosen option of a filed-table choice
-  // proposal. Slot-card candidates are approved independently since
-  // the selector-slice model (Oct 27, 2026) — no radio choice there.
-  const [choiceSelection, setChoiceSelection] = React.useState<Record<string, string>>({});
   // A refused accept that named a genuine conflict, keyed
   // `${slotId}:${candidateId}` — the card then offers the explicit
   // override decision instead of a bare error.
@@ -1086,6 +1370,79 @@ export const MechanicsPanel: React.FC<{
     }
   };
 
+  // Fold the proposals into the structure (Oct 28, 2026): every
+  // pending proposal renders inside its product-structure step —
+  // equation readings in the step's options area (matched onto the
+  // step's own reading options where they are the same reading),
+  // table acceptances in the step's tables area.  Proposals whose
+  // mechanic belongs to no step render in the "Also found" group.
+  // The grouping is presentation only: confirming and dismissing
+  // still go through the proposal endpoints, unchanged.
+  const groupedProposals = new Map<string, ProposalView[]>();
+  for (const proposal of panel?.proposals ?? []) {
+    const steps = panel?.structure?.steps ?? [];
+    let stepId: string | null = null;
+    if (proposal.kind === "equation") {
+      stepId =
+        steps.find((s) => s.equationMechanic === proposal.equationMechanic)?.id ??
+        null;
+    } else {
+      stepId =
+        steps.find(
+          (s) =>
+            s.slots.some((slot) => slot.id === proposal.slot) ||
+            (proposal.mechanic != null &&
+              s.tableMechanics.includes(proposal.mechanic)),
+        )?.id ?? null;
+    }
+    const key = stepId ?? "__also_found";
+    groupedProposals.set(key, [...(groupedProposals.get(key) ?? []), proposal]);
+  }
+  /** The pending proposal that IS this structure option's reading
+   *  (same matching chooseOption uses), or null. */
+  const equationProposalForOption = (
+    step: StructureStepView,
+    option: StructureReadingView,
+  ): ProposalView | null => {
+    if (option.state !== "pending") return null;
+    return (
+      (groupedProposals.get(step.id) ?? []).find(
+        (p) => p.kind === "equation" && p.rendering === option.rendering,
+      ) ?? null
+    );
+  };
+  /** Equation proposals in a step that matched no reading option —
+   *  rendered as their own cards so nothing is ever lost. */
+  const leftoverEquationProposals = (step: StructureStepView): ProposalView[] => {
+    const matched = new Set<string>();
+    for (const option of step.options) {
+      const match = equationProposalForOption(step, option);
+      if (match) matched.add(match.id);
+    }
+    return (groupedProposals.get(step.id) ?? []).filter(
+      (p) => p.kind === "equation" && !matched.has(p.id),
+    );
+  };
+  const tableProposalsForStep = (step: StructureStepView): ProposalView[] =>
+    (groupedProposals.get(step.id) ?? []).filter((p) => p.kind !== "equation");
+  /** The structure step a bulk-summary item belongs to, labeled in
+   *  the summary where the data allows. */
+  const stepLabelForBulkItem = (item: BulkItemView): string | null => {
+    for (const step of panel?.structure?.steps ?? []) {
+      if (
+        item.mechanic &&
+        (step.equationMechanic === item.mechanic ||
+          step.tableMechanics.includes(item.mechanic))
+      ) {
+        return step.label;
+      }
+      if (item.slot && step.slots.some((slot) => slot.id === item.slot)) {
+        return step.label;
+      }
+    }
+    return null;
+  };
+
   return (
     <section className="card home-card" id="mechanics-panel">
       <h2>Product inputs</h2>
@@ -1114,6 +1471,113 @@ export const MechanicsPanel: React.FC<{
             equation and its tables; where the documents offer more than one
             reading, the choice is yours and is shown as one.
           </p>
+          {(panel.proposals ?? []).length > 0 && (
+            <>
+              {panel.holisticReview?.status === "absent" && (
+                <p className="muted">
+                  {panel.holisticReview.statement ||
+                    `Holistic review did not run: ${panel.holisticReview.reason ?? "not recorded"}.`}
+                </p>
+              )}
+              {panel.holisticReview?.status === "ran" && (
+                <p className="muted">
+                  Holistic review ran before these were offered:{" "}
+                  {panel.holisticReview.counts?.verified ?? 0} verified by an
+                  independent re-read, {panel.holisticReview.counts?.resolved ?? 0}{" "}
+                  divergence(s) reconciled, {panel.holisticReview.counts?.flags ?? 0}{" "}
+                  flagged for individual review. The review approves nothing — each
+                  suggestion still needs your confirmation.
+                </p>
+              )}
+              <div className="bulk-approve">
+                {!bulkSummary ? (
+                  <>
+                    <button
+                      type="button"
+                      className="button"
+                      disabled={bulkBusy}
+                      onClick={() => void requestBulkSummary()}
+                    >
+                      {bulkBusy ? "Checking…" : "Approve all uncontested"}
+                    </button>{" "}
+                    <span className="muted">
+                      Approves every suggestion in the steps below that nothing
+                      contests — after showing you the list. Anything with a rival
+                      reading, a replacement, or a conflicting table stays pending
+                      and is named.
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <p>
+                      <strong>{bulkSummary.confirmBack}</strong>
+                    </p>
+                    {bulkSummary.eligible.length > 0 && (
+                      <ul>
+                        {bulkSummary.eligible.map((item) => {
+                          const stepLabel = stepLabelForBulkItem(item);
+                          return (
+                            <li key={item.proposalId}>
+                              {stepLabel ? (
+                                <span className="muted">{stepLabel} — </span>
+                              ) : null}
+                              {item.kind === "equation" ? "Equation: " : "Filed table: "}
+                              {item.label}
+                              {item.provenanceLabel ? (
+                                <>
+                                  {" "}
+                                  <span className="basis-tag">{item.provenanceLabel}</span>
+                                </>
+                              ) : null}
+                              {item.reviewNote ? (
+                                <span className="muted"> — {item.reviewNote}</span>
+                              ) : null}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                    {bulkSummary.excluded.length > 0 && (
+                      <>
+                        <p className="muted">
+                          <strong>Not included — these stay pending:</strong>
+                        </p>
+                        <ul>
+                          {bulkSummary.excluded.map((item) => {
+                            const stepLabel = stepLabelForBulkItem(item);
+                            return (
+                              <li key={item.proposalId}>
+                                {stepLabel ? `${stepLabel} — ` : ""}
+                                {item.label} — {item.reason}
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      </>
+                    )}
+                    <button
+                      type="button"
+                      className="button"
+                      disabled={bulkBusy || bulkSummary.eligibleCount === 0}
+                      onClick={() => void confirmBulkApproval()}
+                    >
+                      {bulkBusy
+                        ? "Approving…"
+                        : `Confirm — approve ${bulkSummary.eligibleCount} item${bulkSummary.eligibleCount === 1 ? "" : "s"}`}
+                    </button>{" "}
+                    <button
+                      type="button"
+                      className="button button-secondary"
+                      disabled={bulkBusy}
+                      onClick={() => setBulkSummary(null)}
+                    >
+                      Cancel
+                    </button>
+                  </>
+                )}
+              </div>
+            </>
+          )}
           {panel.structure.decisions.length > 0 && (
             <div className="structure-decisions">
               <p>
@@ -1150,327 +1614,102 @@ export const MechanicsPanel: React.FC<{
                 </p>
               )}
               {step.options.length > 0 && (
-                <div className="choice-options" role="radiogroup" aria-label={`${step.label} readings`}>
-                  {step.options.map((option) => {
-                    const isCurrent = option.state === "in_effect";
-                    const confirming = confirmingOption === option.key;
-                    return (
-                      <div key={option.key} className="choice-option structure-option">
-                        <label>
-                          <input
-                            type="radio"
-                            name={`structure-option-${step.id}`}
-                            checked={isCurrent}
-                            disabled={isCurrent || busyProposal !== null}
-                            onChange={() => setConfirmingOption(option.key)}
-                          />{" "}
-                          <strong>{step.equationLabel}</strong>{" "}
-                          <span className="basis-tag">{option.provenanceLabel}</span>{" "}
-                          {isCurrent ? (
-                            <span className="basis-tag basis-tag--filed">In effect</span>
-                          ) : (
-                            <span className="muted">Not in effect</span>
-                          )}
-                        </label>
-                        <EquationDisplay
-                          math={option.math}
-                          rendering={option.rendering}
-                          timingNote={option.timingNote}
-                        />
-                        {option.evidence?.filename ? (
-                          <p className="muted">
-                            Evidence: {sourceName(option.evidence.filename)}
-                            {option.evidence.page != null ? `, p. ${option.evidence.page}` : ""}
-                            {option.evidence.snippet ? <> — “{option.evidence.snippet}”</> : null}
-                          </p>
-                        ) : option.provenanceClass === "carried_over" ? (
-                          <p className="muted">
-                            Evidence: none — this reading was carried over from the
-                            workspace's earlier state; no filed statement stands
-                            behind it.
-                          </p>
-                        ) : null}
-                        {!isCurrent && confirming && (
-                          <p>
-                            <button
-                              type="button"
-                              className="button"
-                              disabled={busyProposal !== null}
-                              onClick={() => void chooseOption(step, option)}
-                            >
-                              {step.inEffect
-                                ? "Confirm — use this reading instead"
-                                : "Confirm — put this reading in effect"}
-                            </button>{" "}
-                            <button
-                              type="button"
-                              className="button button-secondary"
-                              disabled={busyProposal !== null}
-                              onClick={() => setConfirmingOption(null)}
-                            >
-                              Cancel
-                            </button>
-                          </p>
-                        )}
-                      </div>
-                    );
-                  })}
+                <div
+                  className="choice-options"
+                  {...(step.options.length > 1
+                    ? {
+                        role: "radiogroup",
+                        "aria-label": `${step.label} readings`,
+                      }
+                    : {})}
+                >
+                  {step.options.map((option) => (
+                    <StructureOptionCard
+                      key={option.key}
+                      equationLabel={step.equationLabel}
+                      radioName={`structure-option-${step.id}`}
+                      stepHasInEffect={Boolean(step.inEffect)}
+                      option={option}
+                      proposal={equationProposalForOption(step, option)}
+                      singleOption={step.options.length === 1}
+                      confirming={confirmingOption === option.key}
+                      busy={busyProposal !== null}
+                      onSelect={() => setConfirmingOption(option.key)}
+                      onConfirm={() => void chooseOption(step, option)}
+                      onCancel={() => setConfirmingOption(null)}
+                      onDismissProposal={() => {
+                        const proposal = equationProposalForOption(step, option);
+                        if (proposal) void postProposal(proposal.id, "dismiss");
+                      }}
+                    />
+                  ))}
                 </div>
               )}
-              {step.slots.length > 0 && (
-                <p className="muted">
-                  Tables in this step:{" "}
-                  {step.slots.map((slot, index) => (
-                    <span key={slot.id}>
-                      {index > 0 ? " · " : ""}
-                      <a href={`#slot-${slot.id}`}>{slot.label}</a> ({slot.statusLabel})
-                    </span>
+              {leftoverEquationProposals(step).map((proposal) => (
+                <ProposalCard
+                  key={proposal.id}
+                  proposal={proposal}
+                  busy={busyProposal === proposal.id}
+                  onConfirm={(candidateId) =>
+                    void postProposal(proposal.id, "confirm", candidateId)
+                  }
+                  onDismiss={() => void postProposal(proposal.id, "dismiss")}
+                />
+              ))}
+              {(step.slots.length > 0 || tableProposalsForStep(step).length > 0) && (
+                <div className="structure-step-tables">
+                  {step.slots.length > 0 && (
+                    <p className="muted">
+                      Tables in this step:{" "}
+                      {step.slots.map((slot, index) => (
+                        <span key={slot.id}>
+                          {index > 0 ? " · " : ""}
+                          <a href={`#slot-${slot.id}`}>{slot.label}</a> ({slot.statusLabel})
+                        </span>
+                      ))}
+                    </p>
+                  )}
+                  {tableProposalsForStep(step).map((proposal) => (
+                    <ProposalCard
+                      key={proposal.id}
+                      proposal={proposal}
+                      busy={busyProposal === proposal.id}
+                      onConfirm={(candidateId) =>
+                        void postProposal(proposal.id, "confirm", candidateId)
+                      }
+                      onDismiss={() => void postProposal(proposal.id, "dismiss")}
+                    />
                   ))}
-                </p>
+                </div>
               )}
             </div>
           ))}
-          {panel.structure.alsoFound.length > 0 && (
+          {(panel.structure.alsoFound.length > 0 ||
+            (groupedProposals.get("__also_found") ?? []).length > 0) && (
             <div className="slot-card structure-step">
               <h4>Also found in the documents</h4>
-              <p className="muted">
-                {panel.structure.alsoFound
-                  .map((item) => `${item.mechanic} (${item.kind})`)
-                  .join(" · ")}{" "}
-                — extracted from the documents, but not part of this product
-                type's normal structure. Nothing was forced into the steps above.
-              </p>
+              {panel.structure.alsoFound.length > 0 && (
+                <p className="muted">
+                  {panel.structure.alsoFound
+                    .map((item) => `${item.mechanic} (${item.kind})`)
+                    .join(" · ")}{" "}
+                  — extracted from the documents, but not part of this product
+                  type's normal structure. Nothing was forced into the steps above.
+                </p>
+              )}
+              {(groupedProposals.get("__also_found") ?? []).map((proposal) => (
+                <ProposalCard
+                  key={proposal.id}
+                  proposal={proposal}
+                  busy={busyProposal === proposal.id}
+                  onConfirm={(candidateId) =>
+                    void postProposal(proposal.id, "confirm", candidateId)
+                  }
+                  onDismiss={() => void postProposal(proposal.id, "dismiss")}
+                />
+              ))}
             </div>
           )}
-        </div>
-      )}
-      {panel && (panel.proposals ?? []).length > 0 && (
-        <div className="slot-card" id="extraction-proposals">
-          <h3>Suggested from the filing</h3>
-          <p className="muted">
-            These were read from the filing's tables and text, with the page each came from.
-            Nothing is applied until you confirm it — confirming restates the change below
-            exactly as it will take effect.
-          </p>
-          {panel.holisticReview?.status === "absent" && (
-            <p className="muted">
-              {panel.holisticReview.statement ||
-                `Holistic review did not run: ${panel.holisticReview.reason ?? "not recorded"}.`}
-            </p>
-          )}
-          {panel.holisticReview?.status === "ran" && (
-            <p className="muted">
-              Holistic review ran before these were offered:{" "}
-              {panel.holisticReview.counts?.verified ?? 0} verified by an independent
-              re-read, {panel.holisticReview.counts?.resolved ?? 0} divergence(s)
-              reconciled, {panel.holisticReview.counts?.flags ?? 0} flagged for
-              individual review. The review approves nothing — each suggestion still
-              needs your confirmation.
-            </p>
-          )}
-          <div className="bulk-approve">
-            {!bulkSummary ? (
-              <>
-                <button
-                  type="button"
-                  className="button"
-                  disabled={bulkBusy}
-                  onClick={() => void requestBulkSummary()}
-                >
-                  {bulkBusy ? "Checking…" : "Approve all uncontested"}
-                </button>{" "}
-                <span className="muted">
-                  Approves every suggestion below that nothing contests — after showing
-                  you the list. Anything with a rival reading, a replacement, or a
-                  conflicting table stays pending and is named.
-                </span>
-              </>
-            ) : (
-              <>
-                <p>
-                  <strong>{bulkSummary.confirmBack}</strong>
-                </p>
-                {bulkSummary.eligible.length > 0 && (
-                  <ul>
-                    {bulkSummary.eligible.map((item) => (
-                      <li key={item.proposalId}>
-                        {item.kind === "equation" ? "Equation: " : "Filed table: "}
-                        {item.label}
-                        {item.provenanceLabel ? (
-                          <>
-                            {" "}
-                            <span className="basis-tag">{item.provenanceLabel}</span>
-                          </>
-                        ) : null}
-                        {item.reviewNote ? (
-                          <span className="muted"> — {item.reviewNote}</span>
-                        ) : null}
-                      </li>
-                    ))}
-                  </ul>
-                )}
-                {bulkSummary.excluded.length > 0 && (
-                  <>
-                    <p className="muted">
-                      <strong>Not included — these stay pending:</strong>
-                    </p>
-                    <ul>
-                      {bulkSummary.excluded.map((item) => (
-                        <li key={item.proposalId}>
-                          {item.label} — {item.reason}
-                        </li>
-                      ))}
-                    </ul>
-                  </>
-                )}
-                <button
-                  type="button"
-                  className="button"
-                  disabled={bulkBusy || bulkSummary.eligibleCount === 0}
-                  onClick={() => void confirmBulkApproval()}
-                >
-                  {bulkBusy
-                    ? "Approving…"
-                    : `Confirm — approve ${bulkSummary.eligibleCount} item${bulkSummary.eligibleCount === 1 ? "" : "s"}`}
-                </button>{" "}
-                <button
-                  type="button"
-                  className="button button-secondary"
-                  disabled={bulkBusy}
-                  onClick={() => setBulkSummary(null)}
-                >
-                  Cancel
-                </button>
-              </>
-            )}
-          </div>
-          {(panel.proposals ?? []).map((proposal) => {
-            const isChoice = proposal.kind === "filed_table_choice";
-            const options = proposal.options ?? [];
-            const selectedId =
-              choiceSelection[proposal.id] ??
-              (options.length === 1 ? options[0].candidateId : undefined);
-            const selected = options.find((o) => o.candidateId === selectedId);
-            const selectedDiff = (proposal.optionDiffs ?? []).find(
-              (d) => d.candidateId === selectedId,
-            );
-            return (
-            <div key={proposal.id} className="slot-candidate">
-              <p>
-                <strong>{proposal.label}</strong>
-                {proposal.kind === "equation" ? (
-                  <span className="basis-tag">equation</span>
-                ) : null}
-              </p>
-              {proposal.conflict && (
-                <p className="error">
-                  These two filed tables disagree on {proposal.conflict.differingRows}{" "}
-                  row{proposal.conflict.differingRows === 1 ? "" : "s"} where their
-                  coverage overlaps — choose which one governs those rows. Nothing is
-                  merged silently.
-                </p>
-              )}
-              {proposal.reviewFlag && (
-                <p className="error">
-                  Holistic review flag — this suggestion needs your individual
-                  review (it is excluded from Approve all uncontested):{" "}
-                  {proposal.reviewFlag.reason}
-                  {(proposal.reviewFlag.evidence ?? []).map((item, index) => (
-                    <span key={index}>
-                      {" "}
-                      [{sourceName(item.filename)}
-                      {item.page != null ? `, p. ${item.page}` : ""}
-                      {item.snippet ? <> — “{item.snippet}”</> : null}]
-                    </span>
-                  ))}
-                </p>
-              )}
-              {!proposal.reviewFlag && proposal.review?.evidence && (
-                <p className="muted">
-                  Review: {proposal.review.evidence}.
-                </p>
-              )}
-              {!proposal.reviewFlag && proposal.review?.note && (
-                <p className="muted">
-                  Review: {proposal.review.note}
-                </p>
-              )}
-              {proposal.kind === "equation" && proposal.rendering ? (
-                <div className="proposal-equation">
-                  <EquationDisplay
-                    math={proposal.math}
-                    rendering={proposal.rendering}
-                    timingNote={proposal.timingNote}
-                  />
-                </div>
-              ) : null}
-              {!isChoice && proposal.evidence && (
-                <p className="muted">
-                  Evidence: {sourceName(proposal.evidence.filename)}
-                  {proposal.evidence.page != null ? `, p. ${proposal.evidence.page}` : ""}
-                  {filedIdenticallyNote(proposal.evidence.sources)}
-                  {proposal.evidence.snippet ? <> — “{proposal.evidence.snippet}”</> : null}
-                </p>
-              )}
-              {isChoice && (
-                <div className="choice-options" role="radiogroup" aria-label={proposal.label}>
-                  {options.map((option) => (
-                    <label key={option.candidateId} className="choice-option">
-                      <input
-                        type="radio"
-                        name={`choice-${proposal.id}`}
-                        checked={selectedId === option.candidateId}
-                        onChange={() =>
-                          setChoiceSelection((prev) => ({
-                            ...prev,
-                            [proposal.id]: option.candidateId,
-                          }))
-                        }
-                      />
-                      <span>
-                        <strong>{sourceName(option.filename)}</strong>
-                        {option.page != null ? ` (p. ${option.page})` : ""}
-                        {filedIdenticallyNote(option.sources)}
-                        {option.coverageText ? ` — ${option.coverageText}` : ""}
-                        {selectorSummaryText(option.selectors)
-                          ? ` · ${selectorSummaryText(option.selectors)}`
-                          : ""}{" "}
-                        {option.inForce ? (
-                          <span className="basis-tag">currently in force</span>
-                        ) : null}
-                      </span>
-                    </label>
-                  ))}
-                  {selectedDiff && (
-                    <p className="muted">
-                      Compared with the first version: {selectedDiff.identicalRows} rows
-                      identical, {selectedDiff.differingRows} rows differ in value,{" "}
-                      {selectedDiff.onlyInFirst} rows only in the first,{" "}
-                      {selectedDiff.onlyInOption} rows only in this one.
-                    </p>
-                  )}
-                </div>
-              )}
-              <p className="muted">{selected ? selected.confirmBack : proposal.confirmBack}</p>
-              <button
-                type="button"
-                className="button"
-                disabled={busyProposal === proposal.id || (isChoice && !selectedId)}
-                onClick={() => void postProposal(proposal.id, "confirm", selectedId)}
-              >
-                Confirm and apply
-              </button>{" "}
-              <button
-                type="button"
-                className="button button-secondary"
-                disabled={busyProposal === proposal.id}
-                onClick={() => void postProposal(proposal.id, "dismiss")}
-              >
-                Dismiss
-              </button>
-            </div>
-            );
-          })}
         </div>
       )}
       {panel?.equations && (

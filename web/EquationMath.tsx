@@ -9,11 +9,14 @@
 // so the app works fully offline.
 //
 // The equation stands ALONE as its own block.  Timing is a separate
-// labeled line underneath, and the prose rendering stays as an
-// "In words:" caption — plain-English fidelity is a product
-// requirement, not a fallback to delete.  When the server could not
-// structure a body (math is null), the prose stands alone, exactly
-// as before; nothing is ever rendered blank or guessed.
+// labeled line underneath.  The prose rendering — plain-English
+// fidelity is a product requirement, not a fallback to delete —
+// sits behind a small "In words" toggle, collapsed by default
+// (Billy, Oct 28, 2026: now that the equation is provided nicely
+// typeset, showing the prose all the time is overkill; someone who
+// wants it can click).  When the server could not structure a body
+// (math is null), the prose stands alone, exactly as before;
+// nothing is ever rendered blank or guessed.
 //
 // FIELD CONTRACT (aligned Oct 27, 2026 against render_math_tree —
 // the previous revision had drifted from the server's vocabulary:
@@ -329,12 +332,45 @@ class MathErrorBoundary extends React.Component<
   }
 }
 
+// The prose rendering behind its toggle (Oct 28, 2026): collapsed
+// by default, expanded on click, state per card.  The prose text
+// itself is unchanged — this is default visibility only.
+const InWordsToggle: React.FC<{
+  rendering: string;
+  approvalBy?: string | null;
+  defaultOpen?: boolean;
+}> = ({ rendering, approvalBy, defaultOpen = false }) => {
+  const [open, setOpen] = React.useState(defaultOpen);
+  return (
+    <div className="equation-words-block">
+      <button
+        type="button"
+        className="equation-words-toggle"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        In words {open ? "▾" : "▸"}
+      </button>
+      {open ? (
+        <p className="muted equation-words">
+          In words: {rendering}
+          {approvalBy ? <> — approved by {approvalBy}</> : null}
+        </p>
+      ) : null}
+    </div>
+  );
+};
+
 export const EquationDisplay: React.FC<{
   math?: MathNode | null;
   rendering?: string | null;
   timingNote?: string | null;
   approvalBy?: string | null;
-}> = ({ math, rendering, timingNote, approvalBy }) => {
+  /** Test hook for the render contract: render the "In words"
+   *  prose expanded.  Production callers never pass this — the
+   *  toggle starts collapsed. */
+  defaultWordsOpen?: boolean;
+}> = ({ math, rendering, timingNote, approvalBy, defaultWordsOpen = false }) => {
   const prose = rendering ? (
     <p className="muted">
       {rendering}
@@ -350,10 +386,11 @@ export const EquationDisplay: React.FC<{
         </div>
         {timingNote ? <p className="equation-timing">Timing: {timingNote}</p> : null}
         {rendering ? (
-          <p className="muted equation-words">
-            In words: {rendering}
-            {approvalBy ? <> — approved by {approvalBy}</> : null}
-          </p>
+          <InWordsToggle
+            rendering={rendering}
+            approvalBy={approvalBy}
+            defaultOpen={defaultWordsOpen}
+          />
         ) : null}
       </div>
     </MathErrorBoundary>

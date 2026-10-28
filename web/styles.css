@@ -1992,6 +1992,25 @@ details > summary {
   margin-top: 0.35rem;
 }
 
+/* "In words" prose toggle (Oct 28, 2026): the prose rendering is
+   collapsed behind this small toggle by default wherever an
+   equation renders typeset. */
+.equation-words-block {
+  margin-top: 0.35rem;
+}
+
+.equation-words-toggle {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-size: 0.85rem;
+  color: var(--muted, #666);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
 .m-frac {
   display: inline-flex;
   flex-direction: column;
@@ -2088,3 +2107,41 @@ details > summary {
 .structure-step { margin-top: 1rem; }
 .structure-option { text-align: left; }
 .projection-definitions { margin: 0 0 0.75rem; }
+
+/* A flex child must be allowed to shrink below its content's
+   intrinsic width, or a wide formula forces the whole option card
+   (and the page) wider than the viewport. */
+.structure-option > * { min-width: 0; }
+
+/* Phone widths (Billy's Oct 28, 2026 screenshot: the option card's
+   label, formula, evidence, and confirm panel squeezed into
+   columns and overflowed off the right edge at ~390px): stack the
+   structure option card vertically — label/provenance, formula,
+   evidence, actions, one column, no horizontal overflow. */
+@media (max-width: 640px) {
+  .structure-option {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .structure-option > * {
+    max-width: 100%;
+  }
+}
+
+/* One option of a table proposal, presented as its own block with
+   its own confirm path (Oct 28, 2026): slices accept independently
+   (union semantics), and a genuine conflict shows each version as
+   an explicit alternative — never an exclusive radio group. */
+.proposal-option {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.45rem 0.6rem;
+  margin: 0.35rem 0;
+}
+
+.proposal-option > * { min-width: 0; max-width: 100%; }
