@@ -171,6 +171,37 @@ def test_provenance_classes() -> None:
     assert structure.provenance_class({"kind": "actuary", "statement": "Entered by hand"}) == "workspace"
 
 
+def test_transcribed_legacy_nar_definition_reads_as_carried_over() -> None:
+    """When a table acceptance transcribes the materialized NAR
+    definition, its source kind is rewritten to "document" — but the
+    definition itself has no filed statement (the form states the
+    other one), so the reading is carried over, not derived."""
+
+    record = ws_eq.new_record(
+        mechanic="nar_definition",
+        body=eq.nar_body("factor_adjusted"),
+        state="approved",
+        source={
+            "kind": "document",
+            "statement": None,
+            "note": (
+                "Materialized from the pre-doctrine workspace state: the "
+                "net amount at risk definition in force (factor_adjusted); "
+                "the filed factor applies from the NAR factor table when "
+                "one is in force."
+            ),
+            "tableSourceType": "filed_pdf",
+        },
+        at=AT,
+    )
+    record["approval"] = {"by": "workspace_user", "at": AT}
+    readings = structure.readings_for_mechanic(
+        {"equations": [record]}, "nar_definition", []
+    )
+    assert len(readings) == 1
+    assert readings[0]["provenanceClass"] == "carried_over"
+
+
 # ---------------------------------------------------------------------------
 # Step states
 # ---------------------------------------------------------------------------

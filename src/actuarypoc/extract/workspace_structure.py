@@ -236,6 +236,18 @@ def _reading_view(
 ) -> Dict[str, Any]:
     source = dict(source or {})
     pclass = provenance_class(source)
+    if (
+        mechanic == "nar_definition"
+        and pclass == PROVENANCE_DERIVED
+        and not source.get("statement")
+        and body in (_eq.nar_body("factor_adjusted"), _eq.nar_body("unadjusted"))
+    ):
+        # The legacy NAR definition, materialized from workspace state
+        # (its source kind is rewritten to "document" when a table
+        # acceptance transcribes it, but no filed statement stands
+        # behind the definition itself — the filing's factor table
+        # states factors, not this definition).  Carried over.
+        pclass = PROVENANCE_CARRIED_OVER
     return {
         "key": f"{mechanic}:{_body_key(body)[:24]}",
         "mechanic": mechanic,
