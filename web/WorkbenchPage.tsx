@@ -216,7 +216,10 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
                   that analysis run. Approvals made since do NOT move
                   them — approval state lives on the Inputs & Equations
                   tab and takes effect on the next projection run. The
-                  label says what the counts measure. */}
+                  label says what the counts measure. "Missing" means
+                  missing from the DOCUMENTS; a requirement the
+                  documents state but that is not approved yet counts
+                  as covered, shown when nonzero. */}
               {analysisRunning
                 ? `Filing review — what the last completed analysis extracted from the documents${
                     analysisTime ? ` (finished ${analysisTime})` : ""
@@ -226,7 +229,8 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
                 : `Filing review — what the last analysis extracted from the documents${
                     analysisTime ? ` (finished ${analysisTime})` : ""
                   }: `}
-              {compliance.implemented ?? 0} implemented · {compliance.partial ?? 0} partial ·{" "}
+              {compliance.implemented ?? 0} implemented · {compliance.partial ?? 0} partial
+              {compliance.covered ? ` · ${compliance.covered} covered` : ""} ·{" "}
               {compliance.missing ?? 0} missing
               {gapItems.length > 0 ? ` · ${gapItems.length} open gap${gapItems.length === 1 ? "" : "s"}` : ""}
               {reconciliationText ? ` — ${reconciliationText}` : ""}

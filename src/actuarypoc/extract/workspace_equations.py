@@ -133,6 +133,112 @@ def in_force_map(artifact: Mapping[str, Any]) -> Dict[str, Dict[str, Any]]:
     return result
 
 
+# ---------------------------------------------------------------------------
+# Document coverage (gap semantics).
+#
+# "Missing" must mean missing FROM THE DOCUMENTS (Billy, Oct 27, 2026):
+# a mechanic whose calculation the filing states, with extracted
+# evidence held, is COVERED — it is not a gap whatever its approval
+# state.  Three states are separated for every mechanic:
+#
+# * ``covered`` — the documents state the calculation and extraction
+#   holds an evidenced candidate for it (a pending harvested record
+#   with a body, an approved record sourced from a document, or a
+#   deterministic-harvest candidate with a body; for coi_charge, a
+#   timing statement whose body the filed table's single rate unit
+#   supplies — the same derivation the proposal path performs).
+# * ``stated`` — the documents state the calculation but extraction
+#   holds no usable body for it (an unmapped record, or a harvest
+#   statement it could not structure).  That is OUR extraction gap,
+#   not the documents'.
+# * ``absent`` — no statement of the calculation was found in the
+#   documents at all; only this state may be presented as missing
+#   from the documents.
+# ---------------------------------------------------------------------------
+
+
+def _coi_timing_body_available(artifact: Mapping[str, Any]) -> bool:
+    """True when the filed COI table's rows name exactly one rate unit,
+    so a timing-only COI statement's body is derivable (the proposal
+    path's rule, mirrored)."""
+
+    rows: List[Mapping[str, Any]] = list(
+        ((artifact or {}).get("usable") or {}).get("coi") or []
+    )
+    for candidate in ((artifact or {}).get("candidates") or {}).get("coi") or []:
+        if isinstance(candidate, Mapping):
+            rows += list(candidate.get("rows") or [])
+    units = {
+        str(row.get("rate_unit"))
+        for row in rows
+        if isinstance(row, Mapping) and row.get("rate_unit")
+    }
+    return len(units) == 1
+
+
+def equation_document_coverage(
+    artifact: Mapping[str, Any],
+    slices: Sequence[Mapping[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    """Per-mechanic document coverage: ``{mechanic: {state, filename,
+    page, statement}}`` — see the section note above.  The candidate
+    universe is exactly the proposal path's: records held on the
+    artifact (including review-found ones) plus the deterministic
+    harvest over ``slices``."""
+
+    rank = {"absent": 0, "stated": 1, "covered": 2}
+    coverage: Dict[str, Dict[str, Any]] = {
+        mechanic: {
+            "state": "absent",
+            "filename": None,
+            "page": None,
+            "statement": None,
+        }
+        for mechanic in _eq.MECHANICS
+    }
+
+    def note(mechanic: str, state: str, evidence: Mapping[str, Any]) -> None:
+        current = coverage.get(mechanic)
+        if current is None or rank[current["state"]] >= rank[state]:
+            return
+        coverage[mechanic] = {
+            "state": state,
+            "filename": evidence.get("filename"),
+            "page": evidence.get("page"),
+            "statement": evidence.get("statement"),
+        }
+
+    for record in records(artifact):
+        mechanic = str(record.get("mechanic") or "")
+        if mechanic not in coverage:
+            continue
+        source = record.get("source") or {}
+        if record.get("state") == "unmapped" or (
+            record.get("state") == "pending" and record.get("body") is None
+        ):
+            # The filing states it; extraction preserved the statement
+            # without structuring a body — an extraction gap.
+            note(mechanic, "stated", source)
+        elif record.get("body") is not None and record.get("state") == "pending":
+            note(mechanic, "covered", source)
+        elif record.get("body") is not None and record.get("state") == "approved":
+            if source.get("filename") or source.get("kind") == "document":
+                note(mechanic, "covered", source)
+
+    for candidate in deterministic_harvest(slices or []):
+        mechanic = str(candidate.get("mechanic") or "")
+        if mechanic not in coverage:
+            continue
+        if candidate.get("body") is not None:
+            note(mechanic, "covered", candidate)
+        elif mechanic == "coi_charge" and _coi_timing_body_available(artifact):
+            note(mechanic, "covered", candidate)
+        else:
+            note(mechanic, "stated", candidate)
+
+    return coverage
+
+
 def citation(record: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
     """The citation the loop/ledger attach to a mechanic's numbers."""
 
@@ -2359,6 +2465,7 @@ __all__ = [
     "crediting_body",
     "death_benefit_body",
     "deterministic_harvest",
+    "equation_document_coverage",
     "equations_view",
     "graded_surrender_body",
     "harvest_equations",

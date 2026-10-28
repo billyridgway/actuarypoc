@@ -98,11 +98,13 @@ from actuarypoc.extract.workspace_ul_mechanics import (
 from actuarypoc.extract.workspace_mechanics_panel import (
     SLOT_BY_ID as _SLOT_BY_ID,
     annotate_gap_items as _annotate_gap_items,
+    apply_document_coverage_to_requirements as _apply_document_coverage_to_requirements,
     apply_nar_factor_edit as _apply_nar_factor_edit,
     apply_table_edit as _apply_table_edit,
     build_mechanics_panel as _build_mechanics_panel,
     build_slot_view as _build_slot_view,
     correction_view as _correction_view,
+    document_coverage as _document_coverage,
     filing_review_reconciliation as _filing_review_reconciliation,
     parse_table_bytes as _parse_slot_table_bytes,
     reapply_workspace_edits as _reapply_workspace_edits,
@@ -1010,12 +1012,22 @@ def _reconcile_workspace_readiness(snapshot: Dict[str, Any]) -> None:
     """Use requirement statuses as the single source for all summary counts."""
 
     requirements = (snapshot.get("complianceMatrix") or {}).get("requirements") or []
-    counts = {"implemented": 0, "partial": 0, "missing": 0}
+    # Gap semantics (Oct 27, 2026): "missing" counts only requirements
+    # NOT covered by the documents.  Document-covered-but-unapproved
+    # requirements carry the distinct "covered" status and are counted
+    # in their own bucket — never folded into missing.  The bucket is
+    # published in the summary (and named in the message) only when it
+    # is nonzero, so older snapshots' shapes are unchanged.
+    raw_counts = {"implemented": 0, "partial": 0, "covered": 0, "missing": 0}
     for requirement in requirements:
         if not isinstance(requirement, dict):
             continue
         status = str(requirement.get("status") or "missing").lower()
-        counts[status if status in counts else "missing"] += 1
+        raw_counts[status if status in raw_counts else "missing"] += 1
+    counts = {"implemented": raw_counts["implemented"], "partial": raw_counts["partial"]}
+    if raw_counts["covered"]:
+        counts["covered"] = raw_counts["covered"]
+    counts["missing"] = raw_counts["missing"]
 
     high_missing = any(
         str(r.get("status") or "").lower() == "missing"
@@ -1023,7 +1035,11 @@ def _reconcile_workspace_readiness(snapshot: Dict[str, Any]) -> None:
         for r in requirements
         if isinstance(r, dict)
     )
-    overall = "red" if high_missing else ("yellow" if counts["partial"] or counts["missing"] else "green")
+    overall = (
+        "red" if high_missing
+        else "yellow" if counts["partial"] or counts["missing"] or raw_counts["covered"]
+        else "green"
+    )
     summary = {**counts, "overallStatus": overall}
     snapshot.setdefault("complianceMatrix", {})["summary"] = summary
     readiness = snapshot.setdefault("readinessDashboard", {})
@@ -1031,7 +1047,7 @@ def _reconcile_workspace_readiness(snapshot: Dict[str, Any]) -> None:
     readiness["complianceSummary"] = summary
     readiness["projectionTrustLevel"] = (
         "exploration_only" if high_missing or counts["missing"] else
-        "draft_illustration" if counts["partial"] else "filed_rate_ready"
+        "draft_illustration" if counts["partial"] or raw_counts["covered"] else "filed_rate_ready"
     )
     pmr = snapshot.setdefault("pmrReadiness", {})
     pmr["complianceSummary"] = summary
@@ -1040,9 +1056,11 @@ def _reconcile_workspace_readiness(snapshot: Dict[str, Any]) -> None:
         for message in pmr.get("messages") or []
         if not str(message).lower().startswith("compliance summary:")
     ]
+    covered_segment = f"covered={raw_counts['covered']}, " if raw_counts["covered"] else ""
     messages.append(
         "Compliance summary: "
         f"implemented={counts['implemented']}, partial={counts['partial']}, "
+        f"{covered_segment}"
         f"missing={counts['missing']}, overall status={overall}."
     )
     pmr["messages"] = messages
@@ -1142,24 +1160,79 @@ def _build_ul_projection_view(
             "death_benefit": ("missing_death_benefit_equation", "Death benefit equation missing", "medium",
                               ["policy form", "actuarial memorandum"]),
         }
+        # Gap semantics (Billy, Oct 27, 2026): "missing" means missing
+        # FROM THE DOCUMENTS.  When the caller supplies the workspace's
+        # document coverage (``_documentCoverage`` — analysis,
+        # projection runs, snapshot rebuilds), a missing-equation gap
+        # is emitted ONLY for a mechanic the documents do not cover:
+        #   * covered (an evidenced candidate is held) -> no gap at
+        #     all; the mechanic's approval state lives on the
+        #     suggestions / in-force surfaces, not in the gaps list;
+        #   * stated but not extracted -> a gap naming OUR extraction
+        #     shortcoming, worded distinctly from a document gap;
+        #   * not stated in the documents -> the genuine gap.
+        # A mechanic whose equation IS in force but failed evaluation
+        # or could not be served by its table is not a document gap
+        # either — the projection names it in missingMechanics and
+        # coverageIssues.  Without coverage (the product-level
+        # snapshot), the legacy emission below is preserved unchanged.
+        coverage = (request or {}).get("_documentCoverage")
+        equation_coverage = (coverage or {}).get("equations") or {}
         for missing in projection.get("missingMechanics") or []:
             mechanic = str(missing.get("mechanic") or "")
             gap_id, title, severity, uploads = _GAP_BY_MECHANIC.get(
                 mechanic, (f"missing_{mechanic}_equation", f"{missing.get('label') or mechanic} equation missing", "medium", []),
             )
             label = str(missing.get("label") or mechanic)
-            if missing.get("reason") == "evaluation_failed":
+            reason = missing.get("reason")
+            coverage_state: Optional[str] = None
+            if coverage is not None:
+                if reason != "no_approved_equation":
+                    continue
+                coverage_state = str(
+                    (equation_coverage.get(mechanic) or {}).get("state") or "absent"
+                )
+                if coverage_state == "covered":
+                    continue
+            if reason == "evaluation_failed":
                 why = (
                     f"The approved {label} equation could not be evaluated "
                     f"({missing.get('detail') or 'evaluation failed'}), so the mechanic "
                     "contributed nothing to this projection."
                 )
-            elif missing.get("reason") == "table_coverage":
+            elif reason == "table_coverage":
                 why = (
                     f"The approved {label} equation is in force, but the table "
                     f"it reads cannot serve this scenario "
                     f"({missing.get('detail') or 'table coverage'}), so the mechanic "
                     "contributed nothing to this projection."
+                )
+            elif coverage_state == "stated":
+                evidence = equation_coverage.get(mechanic) or {}
+                where = ""
+                if evidence.get("filename"):
+                    where = f" ({evidence.get('filename')}"
+                    if evidence.get("page"):
+                        where += f", p. {evidence.get('page')}"
+                    where += ")"
+                stem = title[: -len(" missing")] if title.endswith(" missing") else title
+                title = f"{stem} stated in the documents but not extracted"
+                why = (
+                    f"The documents state a {label.lower()} calculation{where}, but "
+                    "extraction could not structure it into an equation, so nothing "
+                    f"is in force and {label.lower()} is not calculated in this "
+                    "projection. Enter the equation, or record a correction for the "
+                    "mechanic, to calculate it."
+                )
+                uploads = []
+            elif coverage_state is not None:
+                stem = title[: -len(" missing")] if title.endswith(" missing") else title
+                title = f"{stem} not stated in the documents"
+                why = (
+                    f"The documents in this workspace do not state a {label.lower()} "
+                    f"calculation, so there is no equation to approve and "
+                    f"{label.lower()} is not calculated in this projection. If the "
+                    "filing should state it, add the document that does."
                 )
             else:
                 why = (
@@ -1167,17 +1240,22 @@ def _build_ul_projection_view(
                     "calculated in this projection. Harvest the filing's stated calculation "
                     "and approve it, or enter the equation, to calculate it."
                 )
-            gap_items.append(
-                {
-                    "id": gap_id,
-                    "title": title,
-                    "severity": severity,
-                    "status": "missing",
-                    "whyItMatters": why,
-                    "suggestedUploads": uploads,
-                    "source": "Projection — missing equation",
-                }
-            )
+            gap_item = {
+                "id": gap_id,
+                "title": title,
+                "severity": severity,
+                "status": "missing",
+                "whyItMatters": why,
+                "suggestedUploads": uploads,
+                "source": "Projection — missing equation",
+            }
+            if coverage_state is not None:
+                gap_item["coverage"] = (
+                    "stated_not_extracted"
+                    if coverage_state == "stated"
+                    else "not_in_documents"
+                )
+            gap_items.append(gap_item)
 
     return projection_snapshot, mechanics_explanation, gap_warnings, gap_notes, gap_items
 
@@ -2142,6 +2220,9 @@ def _apply_active_synthetic_mechanics(snapshot: Dict[str, Any], workspace_id: st
         return snapshot
     request = dict((snapshot.get("illustration") or {}).get("request") or {})
     request["_workspaceExecutableMechanics"] = _executable_mechanics_view(artifact)
+    request["_documentCoverage"] = _document_coverage(
+        artifact, _slices_from_document_maps(snapshot.get("documentMaps") or [])
+    )
     product_code = str((snapshot.get("product") or {}).get("code") or "ICC18 P18PR UL")
     projection, mechanics, warnings, notes, gaps = _build_ul_projection_view(product_code, request)
     if projection is not None:
@@ -3019,8 +3100,17 @@ def api_workspace_analyze(
         mechanics_artifact["holisticReview"] = absence
 
     _report("finalizing")
+    # Gap semantics (Oct 27, 2026): the analysis-time snapshot's gaps
+    # and compliance counts use document coverage — computed AFTER the
+    # holistic review, so a review-found candidate covers its mechanic
+    # exactly as a first-pass candidate does.
+    analysis_coverage = _document_coverage(
+        mechanics_artifact,
+        _slices_from_document_maps(snapshot.get("documentMaps") or []),
+    )
     executable_request = {
-        "_workspaceExecutableMechanics": _executable_mechanics_view(mechanics_artifact)
+        "_workspaceExecutableMechanics": _executable_mechanics_view(mechanics_artifact),
+        "_documentCoverage": analysis_coverage,
     }
     projection, mechanics, warnings, notes, gaps = _build_ul_projection_view(
         "ICC18 P18PR UL", executable_request
@@ -3034,6 +3124,7 @@ def api_workspace_analyze(
     snapshot["gaps"] = {"items": gaps, "warnings": warnings, "notes": notes}
     _annotate_snapshot_gap_slots(snapshot)
     snapshot["executableMechanics"] = mechanics_artifact
+    _apply_document_coverage_to_requirements(snapshot, analysis_coverage)
     _reconcile_workspace_readiness(snapshot)
     snapshot["requirementsCandidates"] = _build_requirements_candidates(snapshot)
     snapshot["productUnderstanding"] = _build_product_understanding(snapshot)
@@ -4798,6 +4889,12 @@ def api_workspace_projection(
     }
     artifact = load_workspace_executable_mechanics(workspace_id) or {}
     request["_workspaceExecutableMechanics"] = _executable_mechanics_view(artifact)
+    request["_documentCoverage"] = _document_coverage(
+        artifact,
+        _slices_from_document_maps(
+            (ws.get("latest_snapshot_json") or {}).get("documentMaps") or []
+        ),
+    )
     selector_issues = _selector_match_issues(request["_workspaceExecutableMechanics"], request)
     # The gate refuses a run whose IN-FORCE tables do not cover the
     # scenario (its numbers would be silently wrong).  A table that

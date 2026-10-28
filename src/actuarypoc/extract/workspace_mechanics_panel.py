@@ -166,6 +166,97 @@ def _requirement_slot(requirement: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+#: The table mechanics whose filed candidates / in-force rows evidence
+#: document coverage for a slot (the artifact's table keys).
+TABLE_MECHANICS: Sequence[str] = ("coi", "surrender", "fees", "nar_factors", "corridor")
+
+
+def document_coverage(
+    artifact: Dict[str, Any], slices: Sequence[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Document coverage for the workspace's mechanics and tables.
+
+    Gap semantics (Billy, Oct 27, 2026): "missing" means missing FROM
+    THE DOCUMENTS.  ``equations`` is the per-mechanic three-state
+    coverage from :func:`workspace_equations.equation_document_coverage`;
+    ``tables`` marks each table mechanic covered when the analysis
+    extracted a filed candidate for it or rows are already in force —
+    either way the documents state the table and we hold the evidence.
+    """
+
+    artifact = artifact or {}
+    tables = {
+        mechanic: bool(
+            (artifact.get("candidates") or {}).get(mechanic)
+            or (artifact.get("usable") or {}).get(mechanic)
+        )
+        for mechanic in TABLE_MECHANICS
+    }
+    return {
+        "equations": _ws_equations.equation_document_coverage(artifact, slices),
+        "tables": tables,
+    }
+
+
+def apply_document_coverage_to_requirements(
+    snapshot: Dict[str, Any], coverage: Dict[str, Any]
+) -> None:
+    """Relabel analysis-time requirement statuses with document semantics.
+
+    Runs at analysis finalization (after the holistic review, so a
+    review-found candidate counts), before readiness counts are
+    reconciled.  A requirement the bare projection snapshot counted
+    "missing" purely because nothing was approved yet is rewritten to
+    the distinct ``covered`` state when the documents cover it — a
+    filed table candidate or an evidenced equation candidate for its
+    slot.  Genuinely uncovered requirements keep "missing": that word
+    now means not covered by the documents.
+    """
+
+    matrix = (snapshot or {}).get("complianceMatrix") or {}
+    requirements = list(matrix.get("requirements") or [])
+    if not requirements:
+        return
+    equations = (coverage or {}).get("equations") or {}
+    tables = (coverage or {}).get("tables") or {}
+    classified = {
+        str(entry.get("id") or ""): entry
+        for entry in ((snapshot.get("requirementsClassification") or {}).get("all") or [])
+        if isinstance(entry, dict)
+    }
+    for requirement in requirements:
+        if str(requirement.get("status") or "").lower() != "missing":
+            continue
+        slot_id = _requirement_slot(requirement)
+        if slot_id is None:
+            continue
+        slot = SLOT_BY_ID.get(slot_id) or {}
+        table_mechanic = slot.get("mechanic")
+        table_covered = bool(table_mechanic and tables.get(str(table_mechanic)))
+        equation_mechanic = SLOT_EQUATION_MECHANIC.get(slot_id)
+        equation_covered = bool(
+            equation_mechanic
+            and (equations.get(str(equation_mechanic)) or {}).get("state") == "covered"
+        )
+        if not (table_covered or equation_covered):
+            continue
+        requirement["status"] = "covered"
+        classification = requirement.setdefault("classification", {})
+        if isinstance(classification, dict):
+            classification["implementationState"] = "covered"
+        requirement["documentCoverage"] = {
+            "covered": True,
+            "basis": (
+                "filed table extracted from the documents"
+                if table_covered
+                else "equation candidate extracted from the documents"
+            ),
+        }
+        entry = classified.get(str(requirement.get("id") or ""))
+        if entry is not None:
+            entry["implementationState"] = "covered"
+
+
 def filing_review_reconciliation(
     snapshot: Dict[str, Any], artifact: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -187,6 +278,7 @@ def filing_review_reconciliation(
     summary = matrix.get("summary") or {}
     missing = int(summary.get("missing") or 0)
     partial = int(summary.get("partial") or 0)
+    covered = int(summary.get("covered") or 0)
     if not summary:
         missing = sum(
             1 for r in requirements
@@ -196,12 +288,16 @@ def filing_review_reconciliation(
             1 for r in requirements
             if (r.get("classification") or {}).get("implementationState") == "partial"
         )
+        covered = sum(
+            1 for r in requirements
+            if (r.get("classification") or {}).get("implementationState") == "covered"
+        )
     gap_items = list(((snapshot.get("gaps") or {}).get("items")) or [])
 
     resolved_requirements: List[Dict[str, Any]] = []
     for requirement in requirements:
         state = (requirement.get("classification") or {}).get("implementationState")
-        if state not in {"not_implemented", "partial"}:
+        if state not in {"not_implemented", "partial", "covered"}:
             continue
         slot_id = _requirement_slot(requirement)
         if slot_id is None or not _slot_now_in_force(artifact, slot_id):
@@ -209,6 +305,7 @@ def filing_review_reconciliation(
         resolved_requirements.append({
             "id": str(requirement.get("id") or ""),
             "name": str(requirement.get("name") or requirement.get("id") or ""),
+            "stateAtAnalysis": state,
         })
 
     resolved_gaps: List[Dict[str, Any]] = []
@@ -260,7 +357,7 @@ def filing_review_reconciliation(
     review_resolved_requirements: List[Dict[str, Any]] = []
     for requirement in requirements:
         state = (requirement.get("classification") or {}).get("implementationState")
-        if state not in {"not_implemented", "partial"}:
+        if state not in {"not_implemented", "partial", "covered"}:
             continue
         if str(requirement.get("id") or "") in resolved_ids:
             continue
@@ -302,6 +399,15 @@ def filing_review_reconciliation(
             counts.append(f"{missing} missing")
         if partial:
             counts.append(f"{partial} partial")
+        # With the gap semantics (Oct 27, 2026) a requirement can have
+        # been "covered" at analysis — stated in the documents, not yet
+        # approved.  Name that count too when a covered requirement is
+        # among the resolved ones, so the clause never claims a
+        # covered requirement was counted missing.
+        if covered and any(
+            item.get("stateAtAnalysis") == "covered" for item in resolved_requirements
+        ):
+            counts.append(f"{covered} covered")
         names = ", ".join(item["name"] for item in resolved_requirements)
         parts.append(f"{' · '.join(counts)} at analysis — now in force: {names}")
     if resolved_gaps:
@@ -327,6 +433,7 @@ def filing_review_reconciliation(
     return {
         "missingAtAnalysis": missing,
         "partialAtAnalysis": partial,
+        "coveredAtAnalysis": covered,
         "openGapsAtAnalysis": len(gap_items),
         "resolvedRequirements": resolved_requirements,
         "resolvedGaps": resolved_gaps,
