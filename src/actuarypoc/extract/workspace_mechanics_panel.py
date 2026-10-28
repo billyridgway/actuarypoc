@@ -221,6 +221,80 @@ def filing_review_reconciliation(
             "title": str(gap.get("title") or gap.get("id") or ""),
         })
 
+    # Review-sourced reconciliation (Billy, Oct 27, 2026, "also
+    # reconciling the compliance header"): the holistic review runs
+    # inside the analysis job, and when its self-checks / re-reads /
+    # reconciliation cases change what the analysis concluded — a
+    # requirement snapshotted as missing whose equation the review
+    # actually FOUND — that is named here too, computed from the
+    # review record, with the same provenance discipline (what was
+    # found, by which check, with rationale).  The snapshot stays
+    # frozen; approval-driven reconciliation above is untouched; a
+    # requirement the review found nothing for stays missing.
+    review: Dict[str, Any] = {}
+    if isinstance(artifact.get("holisticReview"), dict):
+        review = artifact["holisticReview"] or {}
+    elif isinstance(snapshot.get("holisticReview"), dict):
+        review = snapshot["holisticReview"] or {}
+    _review_equation_slot = {
+        "coi_charge": "coi", "surrender_charge": "surrender",
+        "premium_load": "fees", "policy_fees": "fees",
+        "nar_definition": "nar", "death_benefit": "corridor",
+        "crediting": "crediting",
+    }
+    _review_table_slot = {
+        str(slot.get("mechanic")): str(slot.get("id"))
+        for slot in MECHANIC_SLOTS if slot.get("mechanic")
+    }
+    found_by_slot: Dict[str, Dict[str, Any]] = {}
+    for entry in review.get("found") or []:
+        if not isinstance(entry, dict):
+            continue
+        slot_id = entry.get("slot") or _review_equation_slot.get(
+            str(entry.get("mechanic") or "")
+        ) or _review_table_slot.get(str(entry.get("mechanic") or ""))
+        if slot_id and str(slot_id) not in found_by_slot:
+            found_by_slot[str(slot_id)] = entry
+
+    resolved_ids = {item["id"] for item in resolved_requirements}
+    review_resolved_requirements: List[Dict[str, Any]] = []
+    for requirement in requirements:
+        state = (requirement.get("classification") or {}).get("implementationState")
+        if state not in {"not_implemented", "partial"}:
+            continue
+        if str(requirement.get("id") or "") in resolved_ids:
+            continue
+        slot_id = _requirement_slot(requirement)
+        if slot_id is None or slot_id not in found_by_slot:
+            continue
+        entry = found_by_slot[slot_id]
+        review_resolved_requirements.append({
+            "id": str(requirement.get("id") or ""),
+            "name": str(requirement.get("name") or requirement.get("id") or ""),
+            "foundByReview": True,
+            "check": entry.get("check"),
+            "rationale": entry.get("rationale"),
+            "filename": entry.get("filename"),
+            "page": entry.get("page"),
+        })
+
+    resolved_gap_ids = {item["id"] for item in resolved_gaps}
+    review_resolved_gaps: List[Dict[str, Any]] = []
+    for gap in gap_items:
+        if str(gap.get("id") or "") in resolved_gap_ids:
+            continue
+        slot_id = GAP_SLOT_MAP.get(str(gap.get("id") or ""))
+        if slot_id is None or slot_id not in found_by_slot:
+            continue
+        entry = found_by_slot[slot_id]
+        review_resolved_gaps.append({
+            "id": str(gap.get("id") or ""),
+            "title": str(gap.get("title") or gap.get("id") or ""),
+            "foundByReview": True,
+            "check": entry.get("check"),
+            "rationale": entry.get("rationale"),
+        })
+
     parts: List[str] = []
     if resolved_requirements:
         counts = []
@@ -237,12 +311,27 @@ def filing_review_reconciliation(
             + ("s" if len(gap_items) != 1 else "")
             + f" at analysis — now resolved: {titles}"
         )
+    if review_resolved_requirements:
+        names = ", ".join(item["name"] for item in review_resolved_requirements)
+        first = review_resolved_requirements[0]
+        parts.append(
+            f"found by the holistic review ({first.get('check') or 'self-check'}): "
+            f"{names}"
+            + (f" — {first['rationale']}" if first.get("rationale") else "")
+        )
+    if review_resolved_gaps:
+        titles = ", ".join(item["title"] for item in review_resolved_gaps)
+        parts.append(
+            f"open gap at analysis — found by the holistic review: {titles}"
+        )
     return {
         "missingAtAnalysis": missing,
         "partialAtAnalysis": partial,
         "openGapsAtAnalysis": len(gap_items),
         "resolvedRequirements": resolved_requirements,
         "resolvedGaps": resolved_gaps,
+        "reviewResolvedRequirements": review_resolved_requirements,
+        "reviewResolvedGaps": review_resolved_gaps,
         "text": "; ".join(parts) if parts else None,
     }
 

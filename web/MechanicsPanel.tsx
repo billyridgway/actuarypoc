@@ -153,6 +153,29 @@ interface ProposalOption {
     snippet?: string | null;
     sources?: SourceView[];
   } | null;
+  /** Holistic review outcome for this suggestion (Oct 27, 2026):
+   *  verification evidence from the independent re-read, or the
+   *  reconciliation note when the review's ladder settled a
+   *  divergence in this reading's favour. */
+  review?: {
+    status?: string | null;
+    evidence?: string | null;
+    note?: string | null;
+  } | null;
+  /** An UNRESOLVED holistic review flag: the review could not
+   *  reconcile this suggestion, so it is excluded from bulk
+   *  approval and decided individually, with the evidence quoted. */
+  reviewFlag?: {
+    id?: string | null;
+    kind?: string | null;
+    reason?: string | null;
+    evidence?: Array<{
+      filename?: string | null;
+      page?: number | null;
+      snippet?: string | null;
+      rendering?: string | null;
+    }>;
+  } | null;
 }
 
 interface ProposalView {
@@ -192,6 +215,24 @@ interface ProposalView {
     snippet?: string | null;
     sources?: SourceView[];
   } | null;
+  /** Holistic review outcome for this suggestion (Oct 27, 2026). */
+  review?: {
+    status?: string | null;
+    evidence?: string | null;
+    note?: string | null;
+  } | null;
+  /** An UNRESOLVED holistic review flag (excluded from bulk). */
+  reviewFlag?: {
+    id?: string | null;
+    kind?: string | null;
+    reason?: string | null;
+    evidence?: Array<{
+      filename?: string | null;
+      page?: number | null;
+      snippet?: string | null;
+      rendering?: string | null;
+    }>;
+  } | null;
 }
 
 interface EquationRecordView {
@@ -216,6 +257,9 @@ interface BulkItemView {
   candidateId?: string | null;
   label: string;
   reason?: string;
+  /** One-line holistic-review reconciliation note (eligible items). */
+  reviewNote?: string | null;
+  reviewFlagId?: string | null;
 }
 
 interface BulkSummaryView {
@@ -259,6 +303,16 @@ interface PanelPayload {
   /** Pending extraction proposals + the Phase 7 equation state. */
   proposals?: ProposalView[];
   equations?: EquationsView;
+  /** The holistic review record from the last analysis (Oct 27,
+   *  2026): status "ran" with its counts, or "absent" with the plain
+   *  reason it did not run. */
+  holisticReview?: {
+    status?: string | null;
+    reason?: string | null;
+    statement?: string | null;
+    counts?: Record<string, number>;
+    flags?: Array<Record<string, any>>;
+  } | null;
 }
 
 /** One editable row of a banded (piecewise) schedule correction. */
@@ -914,6 +968,22 @@ export const MechanicsPanel: React.FC<{
             Nothing is applied until you confirm it — confirming restates the change below
             exactly as it will take effect.
           </p>
+          {panel.holisticReview?.status === "absent" && (
+            <p className="muted">
+              {panel.holisticReview.statement ||
+                `Holistic review did not run: ${panel.holisticReview.reason ?? "not recorded"}.`}
+            </p>
+          )}
+          {panel.holisticReview?.status === "ran" && (
+            <p className="muted">
+              Holistic review ran before these were offered:{" "}
+              {panel.holisticReview.counts?.verified ?? 0} verified by an independent
+              re-read, {panel.holisticReview.counts?.resolved ?? 0} divergence(s)
+              reconciled, {panel.holisticReview.counts?.flags ?? 0} flagged for
+              individual review. The review approves nothing — each suggestion still
+              needs your confirmation.
+            </p>
+          )}
           <div className="bulk-approve">
             {!bulkSummary ? (
               <>
@@ -942,6 +1012,9 @@ export const MechanicsPanel: React.FC<{
                       <li key={item.proposalId}>
                         {item.kind === "equation" ? "Equation: " : "Filed table: "}
                         {item.label}
+                        {item.reviewNote ? (
+                          <span className="muted"> — {item.reviewNote}</span>
+                        ) : null}
                       </li>
                     ))}
                   </ul>
@@ -1005,6 +1078,31 @@ export const MechanicsPanel: React.FC<{
                   row{proposal.conflict.differingRows === 1 ? "" : "s"} where their
                   coverage overlaps — choose which one governs those rows. Nothing is
                   merged silently.
+                </p>
+              )}
+              {proposal.reviewFlag && (
+                <p className="error">
+                  Holistic review flag — this suggestion needs your individual
+                  review (it is excluded from Approve all uncontested):{" "}
+                  {proposal.reviewFlag.reason}
+                  {(proposal.reviewFlag.evidence ?? []).map((item, index) => (
+                    <span key={index}>
+                      {" "}
+                      [{sourceName(item.filename)}
+                      {item.page != null ? `, p. ${item.page}` : ""}
+                      {item.snippet ? <> — “{item.snippet}”</> : null}]
+                    </span>
+                  ))}
+                </p>
+              )}
+              {!proposal.reviewFlag && proposal.review?.evidence && (
+                <p className="muted">
+                  Review: {proposal.review.evidence}.
+                </p>
+              )}
+              {!proposal.reviewFlag && proposal.review?.note && (
+                <p className="muted">
+                  Review: {proposal.review.note}
                 </p>
               )}
               {proposal.kind === "equation" && proposal.rendering ? (

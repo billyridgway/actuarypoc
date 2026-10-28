@@ -34,6 +34,7 @@ export const ANALYSIS_PHASE_LABELS: Record<string, string> = {
   extracting_mechanics: "Extracting mechanics",
   building_snapshot: "Building the product snapshot",
   extracting_slices: "Extracting document slices",
+  holistic_review: "Holistic review — self-checking the suggestions",
   finalizing: "Finalizing the analysis",
 };
 

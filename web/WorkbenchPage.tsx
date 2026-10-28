@@ -232,6 +232,12 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
               {reconciliationText ? ` — ${reconciliationText}` : ""}
             </span>
           </p>
+          {meta?.holisticReview?.status === "absent" && (
+            <p className="muted">
+              {meta.holisticReview.statement ||
+                `Holistic review did not run: ${meta.holisticReview.reason ?? "not recorded"}.`}
+            </p>
+          )}
           {inputsStale && (
             <div className="workbench__stale" role="status">
               <span>

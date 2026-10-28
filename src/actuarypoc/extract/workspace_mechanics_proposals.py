@@ -584,6 +584,149 @@ def _equation_proposals(
     return proposals
 
 
+def _apply_review_outcomes(
+    artifact: Dict[str, Any], proposals: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Attach the holistic review's outcomes to proposals (Oct 27, 2026).
+
+    The review record lives on the artifact (``holisticReview``).
+    Its outcomes change how a suggestion is PRESENTED, never what it
+    is: a verified suggestion carries its verification evidence; a
+    reconciled case presents ONE suggestion (the winner, with the
+    reconciliation noted — the losing reading stays in the case's
+    provenance, and a proposal for it is not generated); an item
+    with an UNRESOLVED review flag carries the flag, and bulk
+    approval excludes it by name.  No review outcome approves,
+    accepts, or alters a reading's body or rows.
+    """
+
+    review = (artifact or {}).get("holisticReview") or {}
+    if not isinstance(review, dict) or review.get("status") != "ran":
+        return proposals
+    flags = [
+        flag for flag in review.get("flags") or []
+        if isinstance(flag, dict) and flag.get("status") == "unresolved"
+    ]
+    verifications = [
+        item for item in review.get("verifications") or [] if isinstance(item, dict)
+    ]
+    resolved_cases = [
+        case for case in review.get("cases") or []
+        if isinstance(case, dict) and case.get("status") == "resolved"
+    ]
+
+    def flag_for(proposal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        candidate_ids = {str(proposal.get("candidateId") or "")}
+        candidate_ids.update(
+            str(option.get("candidateId") or "")
+            for option in proposal.get("options") or []
+        )
+        for flag in flags:
+            for target in flag.get("targets") or []:
+                if target.get("candidateId") and str(target["candidateId"]) in candidate_ids:
+                    return flag
+                if (
+                    proposal.get("kind") == PROPOSAL_KIND_EQUATION
+                    and target.get("rendering")
+                    and str(target.get("mechanic")) == str(proposal.get("equationMechanic"))
+                    and str(target["rendering"]) == str(proposal.get("rendering"))
+                ):
+                    return flag
+                if (
+                    proposal.get("kind") == PROPOSAL_KIND_EQUATION
+                    and target.get("recordId")
+                    and str(target["recordId"]) == str(proposal.get("equationId"))
+                ):
+                    return flag
+        return None
+
+    def is_loser(proposal: Dict[str, Any], case: Dict[str, Any]) -> bool:
+        if proposal.get("kind") != PROPOSAL_KIND_EQUATION:
+            return False
+        if str(case.get("mechanic")) != str(proposal.get("equationMechanic")):
+            return False
+        loser_renderings = {
+            str(item.get("rendering"))
+            for item in case.get("losingReadings") or []
+            if isinstance(item, dict)
+        }
+        if not loser_renderings:
+            winner_id = case.get("winnerId")
+            loser_renderings = {
+                str(candidate.get("rendering"))
+                for candidate in case.get("candidates") or []
+                if (candidate.get("id") or candidate.get("candidateId")) != winner_id
+            }
+        return str(proposal.get("rendering")) in loser_renderings
+
+    kept: List[Dict[str, Any]] = []
+    for proposal in proposals:
+        if any(is_loser(proposal, case) for case in resolved_cases):
+            continue  # the reconciled winner is the one suggestion
+        flag = flag_for(proposal)
+        if flag is not None:
+            proposal["reviewFlag"] = {
+                "id": flag.get("id"),
+                "caseId": flag.get("caseId"),
+                "kind": flag.get("kind"),
+                "reason": flag.get("reason"),
+                "evidence": flag.get("evidence") or [],
+            }
+        review_note: Dict[str, Any] = {}
+        if proposal.get("kind") == PROPOSAL_KIND_EQUATION:
+            for item in verifications:
+                if (
+                    item.get("targetKind") == "equation"
+                    and str(item.get("mechanic")) == str(proposal.get("equationMechanic"))
+                    and str(item.get("rendering")) == str(proposal.get("rendering"))
+                ):
+                    review_note = {
+                        "status": item.get("status"),
+                        "evidence": item.get("evidence"),
+                    }
+                    break
+            for case in resolved_cases:
+                winner = next(
+                    (c for c in case.get("candidates") or []
+                     if (c.get("id") or c.get("candidateId")) == case.get("winnerId")),
+                    None,
+                )
+                if (
+                    winner is not None
+                    and str(case.get("mechanic")) == str(proposal.get("equationMechanic"))
+                    and str(winner.get("rendering")) == str(proposal.get("rendering"))
+                ):
+                    review_note = {
+                        **review_note,
+                        "status": "reconciled",
+                        "note": (
+                            f"Reconciled by the holistic review "
+                            f"({case.get('ladderStep')}): {case.get('rationale')}"
+                        ),
+                    }
+                    break
+        else:
+            candidate_ids = {str(proposal.get("candidateId") or "")}
+            candidate_ids.update(
+                str(option.get("candidateId") or "")
+                for option in proposal.get("options") or []
+            )
+            for item in verifications:
+                if (
+                    item.get("targetKind") == "filed_table"
+                    and str(item.get("candidateId")) in candidate_ids
+                ):
+                    review_note = {
+                        "status": item.get("status"),
+                        "evidence": item.get("evidence"),
+                    }
+                    break
+        if review_note:
+            proposal["review"] = review_note
+        kept.append(proposal)
+    return kept
+
+
 def generate_proposals(
     artifact: Dict[str, Any],
     slices: Optional[List[Dict[str, Any]]] = None,
@@ -609,7 +752,7 @@ def generate_proposals(
             continue
         seen.add(proposal["id"])
         unique.append(proposal)
-    return unique
+    return _apply_review_outcomes(artifact, unique)
 
 
 # ---------------------------------------------------------------------------
@@ -869,6 +1012,32 @@ def plan_bulk_approval(
     excluded: List[Dict[str, Any]] = []
     for proposal in proposals:
         kind = proposal.get("kind")
+        # Holistic review flags gate bulk approval first: an item
+        # the review could not reconcile is a person's decision,
+        # named here with the flag's reason, whatever else would
+        # have made it eligible.
+        flag = proposal.get("reviewFlag")
+        if flag:
+            if kind in {PROPOSAL_KIND_FILED_TABLE, PROPOSAL_KIND_FILED_TABLE_CHOICE}:
+                flag_item = _bulk_item(
+                    proposal, "filed_table",
+                    str((proposal.get("conflict") or {}).get("candidateId")
+                        or proposal.get("candidateId") or "") or None,
+                )
+            elif kind == PROPOSAL_KIND_EQUATION:
+                flag_item = _bulk_item(proposal, "equation")
+            else:
+                flag_item = _bulk_item(proposal, str(kind or "unknown"))
+            excluded.append({
+                **flag_item,
+                "reason": (
+                    f"unresolved holistic review flag ({flag.get('kind') or 'review'}): "
+                    f"{flag.get('reason') or 'the holistic review could not reconcile this suggestion'}"
+                    " — review it individually"
+                ),
+                "reviewFlagId": flag.get("id"),
+            })
+            continue
         if kind in {PROPOSAL_KIND_FILED_TABLE, PROPOSAL_KIND_FILED_TABLE_CHOICE}:
             conflict = proposal.get("conflict") or {}
             options = list(proposal.get("options") or [])
@@ -922,6 +1091,18 @@ def plan_bulk_approval(
                 **_bulk_item(proposal, str(kind or "unknown")),
                 "reason": "not eligible for bulk approval — decide individually",
             })
+    # Reconciled items are ordinary eligible suggestions; the plan
+    # carries the reconciliation on the item so the summary can note
+    # it in one line.
+    notes = {
+        proposal["id"]: (proposal.get("review") or {}).get("note")
+        for proposal in proposals
+        if (proposal.get("review") or {}).get("note")
+    }
+    for item in eligible:
+        note = notes.get(item["proposalId"])
+        if note:
+            item["reviewNote"] = note
     return {"eligible": eligible, "excluded": excluded}
 
 
@@ -946,12 +1127,22 @@ def bulk_summary(plan: Dict[str, Any]) -> Dict[str, Any]:
             )
             + "."
         )
+    review_notes = [item for item in eligible if item.get("reviewNote")]
+    if review_notes:
+        parts.append(
+            "Reconciled by the holistic review: "
+            + "; ".join(
+                f"{item['label']} — {item['reviewNote']}" for item in review_notes
+            )
+            + "."
+        )
     return {
         "eligibleCount": len(eligible),
         "tableCount": len(tables),
         "equationCount": len(equations),
         "eligible": eligible,
         "excluded": excluded,
+        "reviewNotes": review_notes,
         "confirmBack": " ".join(parts),
     }
 

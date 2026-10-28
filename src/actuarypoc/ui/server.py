@@ -2218,6 +2218,12 @@ def api_get_workspace(workspace_id: str) -> Dict[str, Any]:
     workspace_payload["filingReviewReconciliation"] = _filing_review_reconciliation(
         snapshot, artifact
     )
+    # The holistic review record (ran / absent, stated plainly either
+    # way) travels with the workspace payload beside the
+    # reconciliation it feeds.
+    workspace_payload["holisticReview"] = (
+        artifact.get("holisticReview") or snapshot.get("holisticReview")
+    )
 
     return {
         "workspace": workspace_payload,
@@ -2971,6 +2977,47 @@ def api_workspace_analyze(
         facts.extend(slice_run["appended_facts"])
         snapshot["extractedFacts"] = facts
 
+    # Holistic review pass (Oct 27, 2026): background self-checking
+    # inside the job, after extraction and candidate assembly, before
+    # finalizing.  Suggestions are independently re-read under wider
+    # slicing; divergences are reconciled by the ladder or escalated
+    # as flags with their evidence; nothing is approved.  The review
+    # record persists on the mechanics artifact and the snapshot, and
+    # its absence (disabled / backend too small / a failure here) is
+    # stated plainly — never silent, and never fatal to the analysis.
+    _report("holistic_review")
+    try:
+        from actuarypoc.extract.holistic_review import run_holistic_review
+
+        review_outcome = run_holistic_review(
+            mechanics_artifact,
+            _slices_from_document_maps(snapshot.get("documentMaps") or []),
+            snapshot=snapshot,
+            at=_correction_now(),
+            progress_callback=_progress,
+        )
+        mechanics_artifact = review_outcome["artifact"]
+        snapshot["holisticReview"] = review_outcome["review"]
+    except Exception as exc:  # noqa: BLE001 - absence is stated, not fatal
+        logging.warning("[workspace-analysis] holistic review failed: %s", exc)
+        absence = {
+            "status": "absent",
+            "reason": f"the review pass failed ({type(exc).__name__}: {exc})",
+            "statement": (
+                "Holistic review did not run: the review pass failed "
+                f"({type(exc).__name__}: {exc}). The suggestions below "
+                "carry no independent re-read or reconciliation."
+            ),
+            "ranAt": _correction_now(),
+            "verifications": [],
+            "cases": [],
+            "flags": [],
+            "found": [],
+            "decisionLog": [],
+        }
+        snapshot["holisticReview"] = absence
+        mechanics_artifact["holisticReview"] = absence
+
     _report("finalizing")
     executable_request = {
         "_workspaceExecutableMechanics": _executable_mechanics_view(mechanics_artifact)
@@ -3649,6 +3696,7 @@ def api_get_mechanics_panel(workspace_id: str) -> Dict[str, Any]:
     # carries the workspace's equation state — the in-force equation
     # per mechanic and anything pending, conflicting, or missing.
     panel["proposals"] = _workspace_proposals(workspace_id, artifact)
+    panel["holisticReview"] = artifact.get("holisticReview")
     panel["equations"] = _workspace_equations.equations_view(artifact)
     # Unification revamp: each table slot also states who reads it —
     # the used-by half of the equation<->table linkage — so an
@@ -3984,9 +4032,17 @@ def _load_workspace_slices(workspace_id: str) -> List[Dict[str, Any]]:
     snapshot = ws.get("latest_snapshot_json") or {}
     if not isinstance(snapshot, dict):
         snapshot = {}
+    return _slices_from_document_maps(snapshot.get("documentMaps") or [])
+
+
+def _slices_from_document_maps(
+    document_maps: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Load slices for the given document-map records (best-effort)."""
+
     slices: List[Dict[str, Any]] = []
     client = None
-    for record in snapshot.get("documentMaps") or []:
+    for record in document_maps or []:
         key = (record or {}).get("slicesKey")
         if not key:
             continue
@@ -3997,7 +4053,7 @@ def _load_workspace_slices(workspace_id: str) -> List[Dict[str, Any]]:
             response = client.get_object(get_bucket_name(), key)
             payload = json.loads(response.read().decode("utf-8"))
             slices.extend(payload.get("slices") or [])
-        except Exception:  # noqa: BLE001 - proposals degrade to table-only
+        except Exception:  # noqa: BLE001 - callers degrade to table-only
             continue
         finally:
             if response is not None:
