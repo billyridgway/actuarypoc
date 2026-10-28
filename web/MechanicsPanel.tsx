@@ -260,6 +260,11 @@ interface BulkItemView {
   /** One-line holistic-review reconciliation note (eligible items). */
   reviewNote?: string | null;
   reviewFlagId?: string | null;
+  /** The reading's provenance class (equation items, Oct 28, 2026) —
+   *  a carried-over reading is labeled as one, never passed off as
+   *  a filed one. */
+  provenanceClass?: string | null;
+  provenanceLabel?: string | null;
 }
 
 interface BulkSummaryView {
@@ -268,7 +273,63 @@ interface BulkSummaryView {
   equationCount: number;
   eligible: BulkItemView[];
   excluded: BulkItemView[];
+  reviewNotes?: BulkItemView[];
+  carriedOver?: BulkItemView[];
   confirmBack: string;
+}
+
+/** One reading of a step's equation (product structure, Oct 28, 2026):
+ *  an explicit option with its evidence and provenance class. */
+interface StructureReadingView {
+  key: string;
+  mechanic: string;
+  recordId?: string | null;
+  origin: string;
+  state: "in_effect" | "pending";
+  rendering?: string | null;
+  math?: MathNode | null;
+  timingNote?: string | null;
+  evidence?: {
+    filename?: string | null;
+    page?: number | null;
+    snippet?: string | null;
+  } | null;
+  provenanceClass: string;
+  provenanceLabel: string;
+}
+
+interface StructureStepView {
+  id: string;
+  label: string;
+  blurb: string;
+  equationMechanic: string;
+  equationLabel: string;
+  tableMechanics: string[];
+  slots: SlotView[];
+  state: string;
+  stateLabel: string;
+  options: StructureReadingView[];
+  inEffect?: StructureReadingView | null;
+  coverage: { state?: string | null; filename?: string | null; page?: number | null };
+}
+
+interface StructureView {
+  steps: StructureStepView[];
+  alsoFound: Array<{ mechanic: string; kind: string }>;
+  decisions: Array<{
+    stepId: string;
+    stepLabel: string;
+    kind: string;
+    mechanic: string;
+    text: string;
+  }>;
+  progress: {
+    settled: number;
+    total: number;
+    choicesAwaiting: number;
+    decisionsAwaiting: number;
+    headerText: string;
+  };
 }
 
 interface EquationsView {
@@ -303,6 +364,11 @@ interface PanelPayload {
   /** Pending extraction proposals + the Phase 7 equation state. */
   proposals?: ProposalView[];
   equations?: EquationsView;
+  /** The product structure (Oct 28, 2026): the declared anatomy with
+   *  each step's state, readings, and choices — composed once,
+   *  server-side; this panel and the decisions checklist both render
+   *  from it. */
+  structure?: StructureView;
   /** The holistic review record from the last analysis (Oct 27,
    *  2026): status "ran" with its counts, or "absent" with the plain
    *  reason it did not run. */
@@ -365,6 +431,22 @@ const statusClass = (status: string): string => {
     case "corrected":
       return "basis-tag basis-tag--corrected";
     case "missing":
+      return "basis-tag basis-tag--placeholder";
+    default:
+      return "basis-tag";
+  }
+};
+
+/** Product-structure step states -> tag styling (Oct 28, 2026). */
+const stepStatusClass = (state: string): string => {
+  switch (state) {
+    case "settled":
+      return "basis-tag basis-tag--filed";
+    case "choice":
+    case "carried":
+      return "basis-tag basis-tag--synthetic";
+    case "not_in_documents":
+    case "stated_not_extracted":
       return "basis-tag basis-tag--placeholder";
     default:
       return "basis-tag";
@@ -487,6 +569,10 @@ export const MechanicsPanel: React.FC<{
   // for proposal confirm/dismiss actions.
   const [corrBands, setCorrBands] = React.useState<Record<string, BandRow[]>>({});
   const [busyProposal, setBusyProposal] = React.useState<string | null>(null);
+  /** Product structure: the option key whose inline confirmation is
+   *  open ("Use this reading?") — choosing is the approval act, so it
+   *  keeps the confirm-back discipline. */
+  const [confirmingOption, setConfirmingOption] = React.useState<string | null>(null);
   // Bulk approval ("Approve all uncontested", Oct 27, 2026): the
   // summary the server returned for review, before anything applied.
   const [bulkSummary, setBulkSummary] = React.useState<BulkSummaryView | null>(null);
@@ -842,6 +928,65 @@ export const MechanicsPanel: React.FC<{
     }
   };
 
+  // Product structure: choosing an option IS the approval act.  The
+  // reading usually travels as a pending proposal — confirming it is
+  // the same act as confirming the suggestion — otherwise the pending
+  // record is approved through the equations route.  Either way the
+  // server records the choice in the change history under the
+  // option's own identity, and switching later is the same act.
+  const chooseOption = async (step: StructureStepView, option: StructureReadingView) => {
+    if (option.state === "in_effect") return;
+    const proposal = (panel?.proposals ?? []).find(
+      (p) =>
+        p.kind === "equation" &&
+        p.equationMechanic === step.equationMechanic &&
+        p.rendering === option.rendering,
+    );
+    if (proposal) {
+      setConfirmingOption(null);
+      await postProposal(proposal.id, "confirm");
+      return;
+    }
+    if (!option.recordId) {
+      setError("This reading has no saved record to approve yet.");
+      return;
+    }
+    setBusyProposal(option.recordId);
+    setMessage(null);
+    setError(null);
+    try {
+      const resp = await fetch(
+        `/api/workspaces/${encodeURIComponent(workspaceId)}/equations/${encodeURIComponent(step.equationMechanic)}/approve`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ equationId: option.recordId, confirmed: true }),
+        },
+      );
+      const text = await resp.text();
+      let body: any = null;
+      try {
+        body = JSON.parse(text);
+      } catch {
+        /* keep raw text */
+      }
+      if (!resp.ok) {
+        const detail = body?.detail;
+        throw new Error(
+          (typeof detail === "string" ? detail : detail?.message) || text || `Request failed (HTTP ${resp.status})`,
+        );
+      }
+      setMessage(`Now in effect: ${option.rendering}`);
+      setConfirmingOption(null);
+      await loadPanel();
+      if (onSnapshotReload) onSnapshotReload();
+    } catch (err: any) {
+      setError(err?.message || "Choosing the reading failed.");
+    } finally {
+      setBusyProposal(null);
+    }
+  };
+
   // Bulk approval, step 1: ask the server what WOULD be approved.
   // The unconfirmed call applies nothing — it answers 400 with the
   // summary as its detail, the same confirm-back discipline as a
@@ -960,6 +1105,145 @@ export const MechanicsPanel: React.FC<{
           projection run; no new analysis is needed.
         </div>
       )}
+      {panel?.structure && (
+        <div className="structure-section">
+          <h3>Product structure</h3>
+          <p className="muted">
+            <strong>{panel.structure.progress.headerText}</strong> — the product's
+            anatomy, in the order money flows through it. Each step groups its
+            equation and its tables; where the documents offer more than one
+            reading, the choice is yours and is shown as one.
+          </p>
+          {panel.structure.decisions.length > 0 && (
+            <div className="structure-decisions">
+              <p>
+                <strong>Decisions</strong>
+              </p>
+              <ul>
+                {panel.structure.decisions.map((decision) => (
+                  <li key={`${decision.stepId}-${decision.kind}`}>
+                    <a href={`#structure-step-${decision.stepId}`}>{decision.text}</a>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {panel.structure.steps.map((step) => (
+            <div key={step.id} className="slot-card structure-step" id={`structure-step-${step.id}`}>
+              <h4>
+                {step.label}{" "}
+                <span className={stepStatusClass(step.state)}>{step.stateLabel}</span>
+              </h4>
+              <p className="muted">{step.blurb}</p>
+              {step.state === "not_in_documents" && (
+                <p className="muted">
+                  The documents do not state this calculation — it does not
+                  calculate. Nothing here is missing from anywhere else; the
+                  filing simply does not cover it.
+                </p>
+              )}
+              {step.state === "stated_not_extracted" && (
+                <p className="muted">
+                  The documents state this calculation, but extraction could not
+                  structure it into an equation — that gap is ours, not the
+                  filing's.
+                </p>
+              )}
+              {step.options.length > 0 && (
+                <div className="choice-options" role="radiogroup" aria-label={`${step.label} readings`}>
+                  {step.options.map((option) => {
+                    const isCurrent = option.state === "in_effect";
+                    const confirming = confirmingOption === option.key;
+                    return (
+                      <div key={option.key} className="choice-option structure-option">
+                        <label>
+                          <input
+                            type="radio"
+                            name={`structure-option-${step.id}`}
+                            checked={isCurrent}
+                            disabled={isCurrent || busyProposal !== null}
+                            onChange={() => setConfirmingOption(option.key)}
+                          />{" "}
+                          <strong>{step.equationLabel}</strong>{" "}
+                          <span className="basis-tag">{option.provenanceLabel}</span>{" "}
+                          {isCurrent ? (
+                            <span className="basis-tag basis-tag--filed">In effect</span>
+                          ) : (
+                            <span className="muted">Not in effect</span>
+                          )}
+                        </label>
+                        <EquationDisplay
+                          math={option.math}
+                          rendering={option.rendering}
+                          timingNote={option.timingNote}
+                        />
+                        {option.evidence?.filename ? (
+                          <p className="muted">
+                            Evidence: {sourceName(option.evidence.filename)}
+                            {option.evidence.page != null ? `, p. ${option.evidence.page}` : ""}
+                            {option.evidence.snippet ? <> — “{option.evidence.snippet}”</> : null}
+                          </p>
+                        ) : option.provenanceClass === "carried_over" ? (
+                          <p className="muted">
+                            Evidence: none — this reading was carried over from the
+                            workspace's earlier state; no filed statement stands
+                            behind it.
+                          </p>
+                        ) : null}
+                        {!isCurrent && confirming && (
+                          <p>
+                            <button
+                              type="button"
+                              className="button"
+                              disabled={busyProposal !== null}
+                              onClick={() => void chooseOption(step, option)}
+                            >
+                              {step.inEffect
+                                ? "Confirm — use this reading instead"
+                                : "Confirm — put this reading in effect"}
+                            </button>{" "}
+                            <button
+                              type="button"
+                              className="button button-secondary"
+                              disabled={busyProposal !== null}
+                              onClick={() => setConfirmingOption(null)}
+                            >
+                              Cancel
+                            </button>
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              {step.slots.length > 0 && (
+                <p className="muted">
+                  Tables in this step:{" "}
+                  {step.slots.map((slot, index) => (
+                    <span key={slot.id}>
+                      {index > 0 ? " · " : ""}
+                      <a href={`#slot-${slot.id}`}>{slot.label}</a> ({slot.statusLabel})
+                    </span>
+                  ))}
+                </p>
+              )}
+            </div>
+          ))}
+          {panel.structure.alsoFound.length > 0 && (
+            <div className="slot-card structure-step">
+              <h4>Also found in the documents</h4>
+              <p className="muted">
+                {panel.structure.alsoFound
+                  .map((item) => `${item.mechanic} (${item.kind})`)
+                  .join(" · ")}{" "}
+                — extracted from the documents, but not part of this product
+                type's normal structure. Nothing was forced into the steps above.
+              </p>
+            </div>
+          )}
+        </div>
+      )}
       {panel && (panel.proposals ?? []).length > 0 && (
         <div className="slot-card" id="extraction-proposals">
           <h3>Suggested from the filing</h3>
@@ -1012,6 +1296,12 @@ export const MechanicsPanel: React.FC<{
                       <li key={item.proposalId}>
                         {item.kind === "equation" ? "Equation: " : "Filed table: "}
                         {item.label}
+                        {item.provenanceLabel ? (
+                          <>
+                            {" "}
+                            <span className="basis-tag">{item.provenanceLabel}</span>
+                          </>
+                        ) : null}
                         {item.reviewNote ? (
                           <span className="muted"> — {item.reviewNote}</span>
                         ) : null}

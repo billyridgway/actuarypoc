@@ -38,10 +38,11 @@ import hashlib
 import json
 import re
 from copy import deepcopy
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from actuarypoc.domain import equations as _eq
 from actuarypoc.extract import workspace_equations as _ws_equations
+from actuarypoc.extract import workspace_structure as _ws_structure
 from actuarypoc.extract import workspace_mechanics_corrections as _corrections
 from actuarypoc.extract.workspace_mechanics_panel import (
     SLOT_BY_ID,
@@ -966,6 +967,48 @@ def apply_proposal(
 # ---------------------------------------------------------------------------
 
 
+def _proposal_body(
+    artifact: Dict[str, Any], proposal: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    candidate = proposal.get("candidate") or {}
+    if candidate.get("body") is not None:
+        return candidate["body"]
+    if proposal.get("equationId"):
+        for record in _ws_equations.records(artifact):
+            if str(record.get("id")) == str(proposal["equationId"]):
+                return record.get("body")
+    return None
+
+
+def _proposal_provenance(
+    artifact: Dict[str, Any], proposal: Dict[str, Any]
+) -> Tuple[str, str]:
+    """The provenance class of the reading a proposal would approve."""
+
+    source: Dict[str, Any] = {}
+    if proposal.get("equationId"):
+        for record in _ws_equations.records(artifact):
+            if str(record.get("id")) == str(proposal["equationId"]):
+                source = dict(record.get("source") or {})
+                break
+    elif proposal.get("candidate"):
+        candidate = proposal["candidate"]
+        source = {
+            "kind": "document",
+            "statement": candidate.get("statement"),
+            "filename": candidate.get("filename"),
+            "page": candidate.get("page"),
+            "assist": candidate.get("assist"),
+        }
+    pclass = _ws_structure.provenance_class(source)
+    return pclass, _ws_structure.PROVENANCE_CLASS_LABELS[pclass]
+
+
+def _short_rendering(rendering: Optional[str], limit: int = 110) -> str:
+    text = str(rendering or "an equation")
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
 def _bulk_batch_id(workspace_id: Optional[str], who: str, at: str) -> str:
     canonical = json.dumps(
         {"workspace": workspace_id, "who": who, "at": at}, sort_keys=True
@@ -990,6 +1033,20 @@ def _bulk_item(
     }
 
 
+def _bulk_equation_item(
+    artifact: Dict[str, Any], proposal: Dict[str, Any]
+) -> Dict[str, Any]:
+    """A bulk item for an equation proposal, carrying its provenance
+    class — a carried-over reading is labeled as one in the summary,
+    never passed off as a filed one."""
+
+    item = _bulk_item(proposal, "equation")
+    pclass, plabel = _proposal_provenance(artifact, proposal)
+    item["provenanceClass"] = pclass
+    item["provenanceLabel"] = plabel
+    return item
+
+
 def plan_bulk_approval(
     artifact: Dict[str, Any],
     slices: Optional[List[Dict[str, Any]]] = None,
@@ -1007,6 +1064,20 @@ def plan_bulk_approval(
         if proposal.get("kind") == PROPOSAL_KIND_EQUATION:
             mechanic = str(proposal.get("equationMechanic"))
             readings_per_mechanic[mechanic] = readings_per_mechanic.get(mechanic, 0) + 1
+    # Every reading of each proposed mechanic, unified (records +
+    # harvest): the divergence check below compares BODIES, so an
+    # incumbent reading — in force, pending, or carried over from
+    # pre-doctrine state — that differs from a document-derived
+    # candidate makes the slot a CHOICE, never a bulk item (the
+    # ws-f107485a NAR seam, Oct 28, 2026).
+    readings_by_mechanic: Dict[str, List[Dict[str, Any]]] = {}
+
+    def readings_for(mechanic: str) -> List[Dict[str, Any]]:
+        if mechanic not in readings_by_mechanic:
+            readings_by_mechanic[mechanic] = _ws_structure.readings_for_mechanic(
+                artifact, mechanic, slices or []
+            )
+        return readings_by_mechanic[mechanic]
 
     eligible: List[Dict[str, Any]] = []
     excluded: List[Dict[str, Any]] = []
@@ -1025,7 +1096,7 @@ def plan_bulk_approval(
                         or proposal.get("candidateId") or "") or None,
                 )
             elif kind == PROPOSAL_KIND_EQUATION:
-                flag_item = _bulk_item(proposal, "equation")
+                flag_item = _bulk_equation_item(artifact, proposal)
             else:
                 flag_item = _bulk_item(proposal, str(kind or "unknown"))
             excluded.append({
@@ -1067,25 +1138,63 @@ def plan_bulk_approval(
         elif kind == PROPOSAL_KIND_EQUATION:
             mechanic = str(proposal.get("equationMechanic"))
             label = _eq.MECHANIC_LABELS.get(mechanic, mechanic)
-            rivals = readings_per_mechanic.get(mechanic, 0)
-            if rivals > 1:
+            item = _bulk_equation_item(artifact, proposal)
+            body = _proposal_body(artifact, proposal)
+            divergent = [
+                reading for reading in readings_for(mechanic)
+                if body is not None
+                and json.dumps(reading.get("body") or {}, sort_keys=True, default=str)
+                != json.dumps(body or {}, sort_keys=True, default=str)
+            ]
+            if divergent:
+                other = divergent[0]
+                if other.get("state") == "in_effect":
+                    reason = (
+                        f"two competing readings for {label} — it would "
+                        f"replace the reading already in effect: "
+                        f"{_short_rendering(other.get('rendering'))} "
+                        f"({other.get('provenanceLabel')}); this one: "
+                        f"{_short_rendering(proposal.get('rendering'))} "
+                        f"({item['provenanceLabel']}) — choosing between "
+                        "readings is yours; choose in the product structure"
+                    )
+                else:
+                    reason = (
+                        f"two competing readings for {label} — this one: "
+                        f"{_short_rendering(proposal.get('rendering'))} "
+                        f"({item['provenanceLabel']}); the other: "
+                        f"{_short_rendering(other.get('rendering'))} "
+                        f"({other.get('provenanceLabel')}) — choosing between "
+                        "readings is yours; choose in the product structure"
+                    )
                 excluded.append({
-                    **_bulk_item(proposal, "equation"),
+                    **item,
+                    "reason": reason,
+                    "divergentReading": {
+                        "rendering": other.get("rendering"),
+                        "provenanceClass": other.get("provenanceClass"),
+                        "provenanceLabel": other.get("provenanceLabel"),
+                        "state": other.get("state"),
+                    },
+                })
+            elif readings_per_mechanic.get(mechanic, 0) > 1:
+                excluded.append({
+                    **item,
                     "reason": (
-                        f"one of {rivals} competing readings for {label} — "
-                        "approve the right one individually"
+                        f"one of {readings_per_mechanic[mechanic]} competing "
+                        f"readings for {label} — approve the right one individually"
                     ),
                 })
             elif _ws_equations.in_force(artifact, mechanic) is not None:
                 excluded.append({
-                    **_bulk_item(proposal, "equation"),
+                    **item,
                     "reason": (
                         f"it would replace the {label} equation already in "
                         "force — approve the replacement individually"
                     ),
                 })
             else:
-                eligible.append(_bulk_item(proposal, "equation"))
+                eligible.append(item)
         else:
             excluded.append({
                 **_bulk_item(proposal, str(kind or "unknown")),
@@ -1136,6 +1245,16 @@ def bulk_summary(plan: Dict[str, Any]) -> Dict[str, Any]:
             )
             + "."
         )
+    carried = [
+        item for item in eligible
+        if item.get("provenanceClass") == _ws_structure.PROVENANCE_CARRIED_OVER
+    ]
+    if carried:
+        parts.append(
+            "Carried over — no filed statement behind it: "
+            + "; ".join(item["label"] for item in carried)
+            + "."
+        )
     return {
         "eligibleCount": len(eligible),
         "tableCount": len(tables),
@@ -1143,6 +1262,7 @@ def bulk_summary(plan: Dict[str, Any]) -> Dict[str, Any]:
         "eligible": eligible,
         "excluded": excluded,
         "reviewNotes": review_notes,
+        "carriedOver": carried,
         "confirmBack": " ".join(parts),
     }
 
@@ -1275,6 +1395,28 @@ def apply_bulk_approval(
                 skipped.append({
                     **item,
                     "reason": "became contested during this batch — decide individually",
+                })
+                continue
+            body = _proposal_body(result, proposal)
+            divergent_record = next(
+                (
+                    r for r in _ws_equations.records_for(result, mechanic)
+                    if r.get("body") is not None
+                    and r.get("state") in {"approved", "pending"}
+                    and body is not None
+                    and json.dumps(r["body"], sort_keys=True, default=str)
+                    != json.dumps(body, sort_keys=True, default=str)
+                ),
+                None,
+            )
+            if divergent_record is not None:
+                skipped.append({
+                    **item,
+                    "reason": (
+                        "a different reading for this mechanic stands "
+                        "against it — choosing between readings is yours; "
+                        "decide in the product structure"
+                    ),
                 })
                 continue
             if in_force is not None and str(in_force.get("rendering") or "") != str(

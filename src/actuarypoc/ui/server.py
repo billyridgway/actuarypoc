@@ -70,6 +70,7 @@ from actuarypoc.domain.projection_ledger import build_projection_ledger, build_r
 from actuarypoc.domain import equations as _equations
 from actuarypoc.extract import workspace_equations as _workspace_equations
 from actuarypoc.extract import workspace_linkage as _workspace_linkage
+from actuarypoc.extract import workspace_structure as _workspace_structure
 from actuarypoc.domain.requirements_classification import (
     Applicability as ReqApplicability,
     Evidence as ReqEvidence,
@@ -1133,6 +1134,21 @@ def _build_ul_projection_view(
             "rateTables": projection.get("rateTables"),
             "reconciliation": projection.get("reconciliation"),
         }
+        # Product structure (Oct 28, 2026): every run records the
+        # chosen option per structure step — which definition it used,
+        # by record identity — so a ledger can always name the
+        # definitions behind its numbers (above all the definitional
+        # choices, e.g. which net-amount-at-risk definition governed).
+        _view_equations = (
+            ((request or {}).get("_workspaceExecutableMechanics") or {}).get("_equations")
+            or {}
+        )
+        if _view_equations:
+            _chosen = _workspace_structure.chosen_options_from_in_force(_view_equations)
+            projection_snapshot["definitionsUsed"] = _chosen
+            projection_snapshot["definitionsLine"] = (
+                _workspace_structure.definitions_line(_chosen)
+            )
 
         me = illustration.get("mechanicsExplanation")
         if isinstance(me, dict):
@@ -3772,6 +3788,7 @@ def api_get_mechanics_panel(workspace_id: str) -> Dict[str, Any]:
     panel = _build_mechanics_panel(
         artifact, snapshot=snapshot, gaps=gaps, changes=changes, workspace=ws,
         correction_requests=correction_requests,
+        slices=_load_workspace_slices(workspace_id),
     )
     # Phase 3: each slot advertises the correction variants it supports
     # (structured pickers for "This should be…"); free text is always

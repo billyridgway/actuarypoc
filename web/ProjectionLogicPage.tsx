@@ -386,7 +386,7 @@ export const ProjectionResultsSection: React.FC<{ ws: ProjectionWorkspace }> = (
               projection view — numbers first, each row expandable to its
               derivation, rate tables in force attached — with the chart
               demoted below it, closed by default. */}
-          <ProjectionLedger ledger={illustration?.ledger} rateTables={illustration?.rateTables} fallbackRows={rows} />
+          <ProjectionLedger ledger={illustration?.ledger} rateTables={illustration?.rateTables} fallbackRows={rows} definitionsLine={illustration?.definitionsLine} />
           <details className="logic-results__chart-details">
             <summary>Chart (secondary view)</summary>
             <ProjectionChart rows={rows} />

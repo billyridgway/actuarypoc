@@ -2360,7 +2360,7 @@ export const ProductWorkspacePage: React.FC<{
                 <h3>Projected values</h3>
                 {/* Phase 1 (show the math): the auditable ledger is the
                     primary view; the chart is secondary. */}
-                <ProjectionLedger ledger={illustration.ledger} rateTables={illustration.rateTables} fallbackRows={illustration.rows} />
+                <ProjectionLedger ledger={illustration.ledger} rateTables={illustration.rateTables} fallbackRows={illustration.rows} definitionsLine={(illustration as any).definitionsLine} />
                 <ProjectionChart rows={illustration.rows} />
                 <p>
                   <button type="button" className="button button-secondary" onClick={downloadProjectionCsv}>

@@ -28,6 +28,9 @@ interface ProjectionLedgerProps {
   ledger?: any;
   rateTables?: any;
   fallbackRows?: any[];
+  /** The run record's stamp of the chosen option per product-structure
+   *  step (Oct 28, 2026): the definitions this run used, named. */
+  definitionsLine?: string | null;
 }
 
 const formatRate = (value: any): string => {
@@ -283,7 +286,7 @@ const RateTablesInForce: React.FC<{ rateTables?: any; classification?: any }> = 
   );
 };
 
-export const ProjectionLedger: React.FC<ProjectionLedgerProps> = ({ ledger, rateTables, fallbackRows }) => {
+export const ProjectionLedger: React.FC<ProjectionLedgerProps> = ({ ledger, rateTables, fallbackRows, definitionsLine }) => {
   const [expandedYear, setExpandedYear] = React.useState<number | null>(null);
   const ledgerRows: any[] = Array.isArray(ledger?.rows) ? ledger.rows : [];
   const hasLedger = ledgerRows.length > 0;
@@ -323,6 +326,9 @@ export const ProjectionLedger: React.FC<ProjectionLedgerProps> = ({ ledger, rate
 
   return (
     <div className="projection-ledger-view">
+      {definitionsLine ? (
+        <p className="muted projection-definitions">{definitionsLine}</p>
+      ) : null}
       <div className="table-scroll projection-ledger">
         <table className="kv-table">
           <thead>

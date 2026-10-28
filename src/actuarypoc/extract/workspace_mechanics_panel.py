@@ -36,6 +36,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import uuid
 
 from actuarypoc.extract import workspace_equations as _ws_equations
+from actuarypoc.extract import workspace_structure as _ws_structure
 from actuarypoc.extract.workspace_ul_mechanics import (
     _name,
     _parse_row,
@@ -737,6 +738,7 @@ def build_mechanics_panel(
     changes: Optional[List[Dict[str, Any]]] = None,
     workspace: Optional[Dict[str, Any]] = None,
     correction_requests: Optional[List[Dict[str, Any]]] = None,
+    slices: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Assemble the full panel payload for one workspace."""
 
@@ -748,11 +750,20 @@ def build_mechanics_panel(
         if isinstance(record, dict)
     ]
     corrections.sort(key=lambda record: str(record.get("at") or ""), reverse=True)
+    slot_views = [
+        build_slot_view(artifact, slot, snapshot) for slot in MECHANIC_SLOTS
+    ]
     return {
         "workspaceId": workspace.get("id"),
-        "slots": [
-            build_slot_view(artifact, slot, snapshot) for slot in MECHANIC_SLOTS
-        ],
+        "slots": slot_views,
+        # The product structure (Oct 28, 2026): the declared anatomy
+        # of the product type with every step's state, readings, and
+        # choices composed ONCE, here — the structure view and the
+        # decisions checklist in the client derive from this, never
+        # from a second composition.
+        "structure": _ws_structure.build_structure(
+            artifact, slices or [], slot_views=slot_views
+        ),
         "gaps": annotate_gap_items(list(gaps or [])),
         "changeLog": list(reversed(list(changes or [])))[:50],
         "corrections": corrections,

@@ -2078,3 +2078,13 @@ details > summary {
 .bulk-approve li {
   margin: 0.15rem 0;
 }
+
+/* Product structure (Oct 28, 2026): steps in the product's anatomy,
+   the decisions checklist derived from the same composition, and the
+   run record's definitions line on the ledger. */
+.structure-section { margin-bottom: 1rem; }
+.structure-decisions { margin: 0.5rem 0 1rem; }
+.structure-decisions ul { margin: 0.25rem 0 0; padding-left: 1.25rem; }
+.structure-step { margin-top: 1rem; }
+.structure-option { text-align: left; }
+.projection-definitions { margin: 0 0 0.75rem; }
