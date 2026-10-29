@@ -276,7 +276,14 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
             {scenarioField("sex", "Sex", "select")}
             {scenarioField("risk_class", "Risk class", "select")}
             {scenarioField("tobacco_status", "Tobacco status", "select")}
-            {"policy_fee" in ws.values && scenarioField("policy_fee", "Policy fee (annual)", "number")}
+            {/* No "Policy fee (annual)" input (removed Oct 29, 2026):
+                a scenario-entered fee never entered the math — since
+                Phase 7 fees come only from the approved policy fees
+                equation — so the form carries exactly the inputs that
+                drive the run. The value is no longer seeded into the
+                form state either (see initialGraphInputs in
+                ProjectionLogicPage.tsx), which also retires the
+                calculation graph's editor for it. */}
           </div>
           <div className="workbench__scenario-actions">
             <span className={`logic-workspace__run-state${ws.dirty || !ws.selectorReady || inputsStale ? " is-dirty" : ""}`}>

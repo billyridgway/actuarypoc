@@ -73,6 +73,35 @@ def test_user_policy_fee_assumption_is_applied_and_remains_provisional(monkeypat
     assert any("user-entered scenario assumption" in warning for warning in result["warnings"])
 
 
+def test_stray_scenario_policy_fee_produces_an_identical_projection(monkeypatch) -> None:
+    """The scenario form no longer collects a policy fee (removed
+    Oct 29, 2026 — it never entered the math), but the server still
+    accepts policyFeeAnnual from other callers (validation packs,
+    saved scenarios). This pins the contract that acceptance rests
+    on: a request carrying a stray value computes exactly the
+    projection that the same request without it computes — the whole
+    projection (rows, ledger, metrics, rate tables) is identical;
+    only the display surfaces (recorded inputs, the not-applied
+    assumption note, the echoed request) may mention the value."""
+    monkeypatch.setattr(server, "get_product_review", lambda product_code: None)
+
+    base_request = {
+        "age": 45,
+        "faceAmount": 100_000,
+        "premiumMode": "ANNUAL",
+        "modalPremium": 3_000,
+    }
+    without_fee = server.build_ul_illustration_for_product(
+        "ICC18 P18PR UL", dict(base_request)
+    )
+    with_fee = server.build_ul_illustration_for_product(
+        "ICC18 P18PR UL", {**base_request, "policyFeeAnnual": 125.50}
+    )
+
+    assert with_fee["projection"] == without_fee["projection"]
+    assert all(row["policyFee"] == 0.0 for row in with_fee["projection"]["rows"])
+
+
 def test_workspace_evidence_replaces_generic_citation(monkeypatch) -> None:
     snapshot = server.build_product_workspace_snapshot("ICC18 P18PR UL")
     documents = [

@@ -17,8 +17,6 @@ interface ProjectionLogicPageProps {
 const initialGraphInputs = (snapshot: any) => {
   const request = snapshot?.illustration?.request || {};
   const firstRow = snapshot?.illustration?.rows?.[0] || {};
-  const inputs = Array.isArray(snapshot?.illustration?.inputs) ? snapshot.illustration.inputs : [];
-  const policyFee = inputs.find((input: any) => input?.id === "policy_fee");
   const values: Record<string, string | number> = {
     issue_age: Number(request.age ?? 45),
     face_amount: Number(request.faceAmount ?? 100000),
@@ -28,9 +26,14 @@ const initialGraphInputs = (snapshot: any) => {
     risk_class: String(request.riskClass ?? ""),
     tobacco_status: String(request.tobaccoStatus ?? ""),
   };
-  if (["missing", "not_available", "scenario_assumption"].includes(String(policyFee?.status || "").toLowerCase())) {
-    values.policy_fee = request.policyFeeAnnual ?? (policyFee?.status === "scenario_assumption" ? policyFee?.value : "");
-  }
+  // No policy_fee value is seeded (removed Oct 29, 2026): since
+  // Phase 7 a scenario-entered policy fee is display-only — fees are
+  // calculated only by an approved policy fees equation — so the
+  // scenario form no longer collects it, the run no longer sends it,
+  // and the calculation graph no longer offers an editor for it. The
+  // server still accepts policyFeeAnnual from other callers
+  // (validation packs, saved scenarios) and records it as a
+  // not-applied assumption; it can never reach the ledger.
   return values;
 };
 
@@ -100,8 +103,6 @@ export const useProjectionWorkspace = (
     const issueAge = Number(values.issue_age);
     const faceAmount = Number(values.face_amount);
     const modalPremium = Number(values.premium);
-    const policyFeeText = String(values.policy_fee ?? "").trim();
-    const policyFeeAnnual = policyFeeText === "" ? undefined : Number(policyFeeText);
     if (!selectorReady) {
       setError(`Complete ${missingSelectors.join(", ")} before running the projection so the correct filed tables can be selected.`);
       return;
@@ -116,10 +117,6 @@ export const useProjectionWorkspace = (
     }
     if (!Number.isFinite(modalPremium) || modalPremium <= 0) {
       setError("Modal premium must be greater than $0.");
-      return;
-    }
-    if (policyFeeAnnual !== undefined && (!Number.isFinite(policyFeeAnnual) || policyFeeAnnual < 0)) {
-      setError("Annual policy/admin fee must be $0 or greater.");
       return;
     }
     setRunning(true);
@@ -138,7 +135,6 @@ export const useProjectionWorkspace = (
           sex: String(values.sex || ""),
           riskClass: String(values.risk_class || ""),
           tobaccoStatus: String(values.tobacco_status || ""),
-          policyFeeAnnual,
           allowSelectorFallback,
         }),
       });
