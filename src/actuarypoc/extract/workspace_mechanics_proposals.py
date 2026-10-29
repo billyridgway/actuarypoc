@@ -585,6 +585,48 @@ def _equation_proposals(
     return proposals
 
 
+def _case_loser_renderings(case: Dict[str, Any]) -> set:
+    """The renderings a resolved review case withdrew, if any.
+
+    Losers are what the case itself names: its ``losingReadings``,
+    the candidates behind its ``loserIds``, or — for a reconciled
+    rivalry, where a winner was picked — every candidate but the
+    winner.  A case resolved WITHOUT a winner (a joint re-read that
+    let the reading stand, a framing determination, a slice
+    relation) withdraws nothing.  Deriving losers from a missing
+    winner once withdrew the very reading such a case upheld — the
+    death-benefit reading whose Confirm then silently did nothing
+    (Billy, Oct 28, 2026).
+    """
+
+    candidates = [
+        candidate for candidate in case.get("candidates") or []
+        if isinstance(candidate, dict)
+    ]
+    renderings = {
+        str(item.get("rendering"))
+        for item in case.get("losingReadings") or []
+        if isinstance(item, dict) and item.get("rendering")
+    }
+    loser_ids = {str(item) for item in case.get("loserIds") or [] if item}
+    if loser_ids:
+        renderings.update(
+            str(candidate.get("rendering"))
+            for candidate in candidates
+            if str(candidate.get("id") or candidate.get("candidateId") or "") in loser_ids
+            and candidate.get("rendering")
+        )
+    winner_id = case.get("winnerId")
+    if winner_id:
+        renderings.update(
+            str(candidate.get("rendering"))
+            for candidate in candidates
+            if (candidate.get("id") or candidate.get("candidateId")) != winner_id
+            and candidate.get("rendering")
+        )
+    return renderings
+
+
 def _apply_review_outcomes(
     artifact: Dict[str, Any], proposals: List[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
@@ -646,19 +688,7 @@ def _apply_review_outcomes(
             return False
         if str(case.get("mechanic")) != str(proposal.get("equationMechanic")):
             return False
-        loser_renderings = {
-            str(item.get("rendering"))
-            for item in case.get("losingReadings") or []
-            if isinstance(item, dict)
-        }
-        if not loser_renderings:
-            winner_id = case.get("winnerId")
-            loser_renderings = {
-                str(candidate.get("rendering"))
-                for candidate in case.get("candidates") or []
-                if (candidate.get("id") or candidate.get("candidateId")) != winner_id
-            }
-        return str(proposal.get("rendering")) in loser_renderings
+        return str(proposal.get("rendering")) in _case_loser_renderings(case)
 
     kept: List[Dict[str, Any]] = []
     for proposal in proposals:
@@ -754,6 +784,96 @@ def generate_proposals(
         seen.add(proposal["id"])
         unique.append(proposal)
     return _apply_review_outcomes(artifact, unique)
+
+
+def annotate_structure_confirmability(
+    structure: Dict[str, Any],
+    proposals: List[Dict[str, Any]],
+    artifact: Dict[str, Any],
+) -> None:
+    """Mark structure readings whose Confirm cannot act, and say why.
+
+    The structure composes readings from records + the harvest; the
+    proposal layer is what makes a reading actionable (that, or a
+    saved record to approve).  Where neither exists, the card must
+    not offer a Confirm that silently does nothing (Billy, Oct 28,
+    2026): the reading carries ``confirmBlockedReason`` instead, and
+    the client renders the reason where the button would be.  The
+    reasons are the honest ones — a dismissed suggestion, a reading
+    the review reconciled away, the NAR definition that is set by
+    its factor table — never a generic dead end.
+    """
+
+    artifact = artifact or {}
+    review = artifact.get("holisticReview") or {}
+    resolved_cases = [
+        case for case in review.get("cases") or []
+        if isinstance(case, dict) and case.get("status") == "resolved"
+    ] if isinstance(review, dict) else []
+    dismissed = {
+        str(item.get("id"))
+        for item in artifact.get("dismissedProposals") or []
+        if isinstance(item, dict)
+    }
+    factor_rows = list((artifact.get("usable") or {}).get("nar_factors") or [])
+    nar_factor_in_effect = any(
+        isinstance(row.get("factor"), (int, float)) and float(row.get("factor") or 1.0) > 1.0
+        for row in factor_rows if isinstance(row, dict)
+    )
+    equation_proposals = [
+        proposal for proposal in proposals or []
+        if isinstance(proposal, dict) and proposal.get("kind") == PROPOSAL_KIND_EQUATION
+    ]
+
+    def blocked_reason(step: Dict[str, Any], option: Dict[str, Any]) -> Optional[str]:
+        mechanic = str(step.get("equationMechanic") or option.get("mechanic") or "")
+        rendering = str(option.get("rendering") or "")
+        if option.get("recordId"):
+            return None
+        if any(
+            str(proposal.get("equationMechanic")) == mechanic
+            and str(proposal.get("rendering") or "") == rendering
+            for proposal in equation_proposals
+        ):
+            return None
+        would_be_id = _proposal_id(PROPOSAL_KIND_EQUATION, {
+            "mechanic": mechanic, "rendering": rendering, "equationId": None,
+        })
+        if would_be_id in dismissed:
+            return (
+                "You dismissed this suggestion, so it is not offered "
+                "for approval again."
+            )
+        for case in resolved_cases:
+            if str(case.get("mechanic")) != mechanic:
+                continue
+            if rendering in _case_loser_renderings(case):
+                return (
+                    "The holistic review reconciled this reading "
+                    "against the reading that stands; it stays in the "
+                    "record but is not offered for approval."
+                )
+        if mechanic == "nar_definition" and not nar_factor_in_effect:
+            return (
+                "This definition is set by the NAR factor table in "
+                "this step: accepting the table puts the definition "
+                "in effect, and its form is chosen on the table's "
+                "card (Change the net amount at risk definition)."
+            )
+        return (
+            "This reading cannot be put in effect yet — it has no "
+            "saved record and no pending proposal."
+        )
+
+    for step in (structure or {}).get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        for option in step.get("options") or []:
+            if not isinstance(option, dict) or option.get("state") != "pending":
+                continue
+            reason = blocked_reason(step, option)
+            if reason:
+                option["confirmBlockedReason"] = reason
 
 
 # ---------------------------------------------------------------------------

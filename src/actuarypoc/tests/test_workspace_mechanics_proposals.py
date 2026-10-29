@@ -531,3 +531,204 @@ def test_acceptance_second_product_onboarded_via_proposals():
     assert "account value" in first["surrender"]["equation"]["rendering"]
     assert projection["mechanicsExecution"]["policy_fees"]["applied"] is True
     assert projection["mechanicsExecution"]["coi_charge"]["applied"] is True
+
+
+# ---------------------------------------------------------------------------
+# Review-outcome loser derivation — the silent Confirm (Oct 28, 2026)
+# ---------------------------------------------------------------------------
+# Billy's live workspace ws-05f7a2eb: the holistic review resolved a
+# framing_loss case on the death-benefit reading via a joint re-read
+# ("the reading stands") with NO winner recorded and no
+# losingReadings.  The outcome pass derived losers as "every
+# candidate but the winner", which — winnerless — named the upheld
+# reading itself a loser and withdrew its only proposal.  The
+# structure still offered the reading, so its Confirm silently did
+# nothing.  A winnerless resolution must withdraw nothing.
+
+DEATH_BENEFIT_TEXT = (
+    "Option A: Death Benefit = Face amount. The death benefit will "
+    "never be less than the amount required to qualify this policy "
+    "as life insurance under the tax code corridor."
+)
+
+
+def _death_benefit_case(**overrides) -> dict:
+    from actuarypoc.domain import equations as _equations
+    from actuarypoc.extract import workspace_equations as _ws_equations
+
+    rendering = _equations.render_equation(
+        _ws_equations.death_benefit_body(), "death_benefit"
+    )
+    case = {
+        "id": "case-dbfix",
+        "kind": "framing_loss",
+        "mechanic": "death_benefit",
+        "status": "resolved",
+        "ladderStep": "joint_reread",
+        "rationale": "Re-read with both documents together, the reading stands.",
+        "winnerId": None,
+        "loserIds": [],
+        "candidates": [{
+            "id": "rd-death-1",
+            "candidateId": None,
+            "kind": "equation",
+            "origin": "harvest",
+            "rendering": rendering,
+            "filename": "meridian-ul.pdf",
+            "page": 4,
+            "statement": "Option A: Death Benefit = Face amount",
+        }],
+    }
+    case.update(overrides)
+    return case
+
+
+def _death_benefit_proposals(case) -> list:
+    artifact = _empty_artifact()
+    if case is not None:
+        artifact["holisticReview"] = {
+            "status": "ran", "flags": [], "verifications": [], "cases": [case],
+        }
+    return proposals.generate_proposals(artifact, [_slice(DEATH_BENEFIT_TEXT)])
+
+
+def test_winnerless_resolved_case_keeps_the_reading_it_upheld():
+    found = _death_benefit_proposals(_death_benefit_case())
+    death_benefit = [
+        p for p in found
+        if p["kind"] == "equation" and p["equationMechanic"] == "death_benefit"
+    ]
+    assert len(death_benefit) == 1
+
+
+def test_resolved_case_with_a_winner_still_withdraws_the_loser():
+    case = _death_benefit_case(
+        winnerId="rd-other",
+        candidates=[
+            {
+                "id": "rd-other", "candidateId": None, "kind": "equation",
+                "origin": "harvest", "rendering": "a rival reading",
+                "filename": "meridian-ul.pdf", "page": 4, "statement": "x",
+            },
+            _death_benefit_case()["candidates"][0],
+        ],
+    )
+    found = _death_benefit_proposals(case)
+    assert [
+        p for p in found
+        if p["kind"] == "equation" and p["equationMechanic"] == "death_benefit"
+    ] == []
+
+
+def test_resolved_case_loser_ids_are_honored_without_a_winner():
+    case = _death_benefit_case(loserIds=["rd-death-1"])
+    found = _death_benefit_proposals(case)
+    assert [
+        p for p in found
+        if p["kind"] == "equation" and p["equationMechanic"] == "death_benefit"
+    ] == []
+
+
+# ---------------------------------------------------------------------------
+# Structure confirmability annotation (Oct 28, 2026)
+# ---------------------------------------------------------------------------
+# A reading with neither a pending proposal nor a saved record
+# cannot be confirmed; the annotation names why on the reading
+# itself so its card explains instead of offering a dead Confirm.
+
+def _annotate(structure, found, artifact):
+    proposals.annotate_structure_confirmability(structure, found, artifact)
+    return {
+        option["key"]: option.get("confirmBlockedReason")
+        for step in structure["steps"]
+        for option in step["options"]
+    }
+
+
+def test_annotation_leaves_a_confirmable_reading_unmarked():
+    from actuarypoc.extract import workspace_structure as _structure
+
+    artifact = _empty_artifact()
+    artifact["holisticReview"] = {
+        "status": "ran", "flags": [], "verifications": [],
+        "cases": [_death_benefit_case()],
+    }
+    slices = [_slice(DEATH_BENEFIT_TEXT)]
+    found = proposals.generate_proposals(artifact, slices)
+    structure = _structure.build_structure(artifact, slices)
+    reasons = _annotate(structure, found, artifact)
+    death_benefit = [
+        step for step in structure["steps"] if step["id"] == "death_benefit"
+    ][0]
+    assert len(death_benefit["options"]) == 1
+    assert reasons[death_benefit["options"][0]["key"]] is None
+
+
+def test_annotation_explains_the_gated_nar_reading():
+    from actuarypoc.extract import workspace_structure as _structure
+
+    artifact = _empty_artifact()
+    slices = [_slice(NAR_TEXT, page=5)]
+    found = proposals.generate_proposals(artifact, slices)
+    structure = _structure.build_structure(artifact, slices)
+    reasons = _annotate(structure, found, artifact)
+    nar = [step for step in structure["steps"] if step["id"] == "nar"][0]
+    assert len(nar["options"]) == 1
+    reason = reasons[nar["options"][0]["key"]]
+    assert reason is not None
+    assert "NAR factor table" in reason
+
+
+def test_annotation_explains_a_reconciled_loser():
+    structure = {"steps": [{
+        "id": "death_benefit",
+        "equationMechanic": "death_benefit",
+        "options": [{
+            "key": "death_benefit-x",
+            "mechanic": "death_benefit",
+            "state": "pending",
+            "recordId": None,
+            "rendering": "the losing reading",
+        }],
+    }]}
+    artifact = {
+        "usable": {},
+        "dismissedProposals": [],
+        "holisticReview": {"cases": [{
+            "mechanic": "death_benefit",
+            "status": "resolved",
+            "winnerId": "rd-winner",
+            "losingReadings": [{"rendering": "the losing reading"}],
+        }]},
+    }
+    proposals.annotate_structure_confirmability(structure, [], artifact)
+    reason = structure["steps"][0]["options"][0].get("confirmBlockedReason")
+    assert reason is not None
+    assert "reconciled" in reason
+
+
+def test_annotation_explains_a_dismissed_reading():
+    rendering = "the dismissed reading"
+    dismissed_id = proposals._proposal_id("equation", {
+        "mechanic": "death_benefit", "rendering": rendering, "equationId": None,
+    })
+    structure = {"steps": [{
+        "id": "death_benefit",
+        "equationMechanic": "death_benefit",
+        "options": [{
+            "key": "death_benefit-y",
+            "mechanic": "death_benefit",
+            "state": "pending",
+            "recordId": None,
+            "rendering": rendering,
+        }],
+    }]}
+    artifact = {
+        "usable": {},
+        "dismissedProposals": [{"id": dismissed_id}],
+        "holisticReview": {"cases": []},
+    }
+    proposals.annotate_structure_confirmability(structure, [], artifact)
+    reason = structure["steps"][0]["options"][0].get("confirmBlockedReason")
+    assert reason is not None
+    assert "dismissed" in reason

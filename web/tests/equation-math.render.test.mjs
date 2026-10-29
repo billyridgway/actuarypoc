@@ -312,6 +312,63 @@ check("in-effect option card: no radio to press, no confirm", () => {
   expectAbsent(html, ['type="radio"', "Confirm —"]);
 });
 
+// --- The silent Confirm (Oct 28, 2026) ----------------------------
+// Billy's death-benefit card: a single harvested reading, NO saved
+// record (recordId null) — its only approval path is the pending
+// proposal the server attaches.  When the proposal exists the card
+// offers its direct confirm as usual; when the server says the
+// reading cannot be confirmed (confirmBlockedReason), the card must
+// show the reason INSTEAD of a button that does nothing, and a
+// failed confirm must render its error inside the card.
+const deathBenefitOption = (overrides = {}) => ({
+  key: "death_benefit-harvest",
+  mechanic: "death_benefit",
+  recordId: null,
+  origin: "harvest",
+  state: "pending",
+  rendering: live.death_benefit.rendering,
+  math: live.death_benefit.math,
+  timingNote: null,
+  evidence: {
+    filename: "ICC18 P18PRUL.pdf",
+    page: 4,
+    snippet: "Death Benefit is the greater of",
+  },
+  provenanceClass: "from_filing",
+  provenanceLabel: "From the filing",
+  ...overrides,
+});
+check("death-benefit single-option card (harvest, no record): direct confirm renders", () => {
+  const html = renderOptionCard({
+    option: deathBenefitOption(),
+    singleOption: true,
+  });
+  expectTokens(html, ["Confirm — put this reading in effect", "From the filing"]);
+  expectAbsent(html, ['type="radio"']);
+});
+check("blocked single-option card: the reason shows, no dead confirm button", () => {
+  const html = renderOptionCard({
+    option: deathBenefitOption({
+      confirmBlockedReason:
+        "This definition is set by the NAR factor table in this step: accepting the table puts the definition in effect.",
+    }),
+    singleOption: true,
+  });
+  expectTokens(html, ["set by the NAR factor table in this step"]);
+  expectAbsent(html, ["Confirm — put this reading in effect", "Confirm — use this reading instead"]);
+});
+check("option card with a failed confirm: the error renders inside the card", () => {
+  const html = renderOptionCard({
+    option: deathBenefitOption(),
+    singleOption: true,
+    error: "This reading has no saved record to approve yet — nothing was applied.",
+  });
+  expectTokens(html, [
+    "This reading has no saved record to approve yet — nothing was applied.",
+    'class="error"',
+  ]);
+});
+
 // --- Proposal cards in the steps (Oct 28, 2026) -------------------
 // The radio rule covers the proposals too: a one-slice table
 // proposal shows its summary with Confirm and apply / Dismiss and

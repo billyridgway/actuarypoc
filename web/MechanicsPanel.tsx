@@ -299,6 +299,11 @@ interface StructureReadingView {
   } | null;
   provenanceClass: string;
   provenanceLabel: string;
+  /** Set by the server when this reading cannot be confirmed (no
+   *  proposal, no saved record): the card shows this reason where
+   *  the Confirm button would be, instead of offering a press that
+   *  silently does nothing. */
+  confirmBlockedReason?: string | null;
 }
 
 interface StructureStepView {
@@ -558,6 +563,8 @@ export const StructureOptionCard: React.FC<{
   singleOption: boolean;
   confirming: boolean;
   busy: boolean;
+  /** A failed confirm for THIS card, rendered inside it. */
+  error?: string | null;
   onSelect: () => void;
   onConfirm: () => void;
   onCancel: () => void;
@@ -571,6 +578,7 @@ export const StructureOptionCard: React.FC<{
   singleOption,
   confirming,
   busy,
+  error,
   onSelect,
   onConfirm,
   onCancel,
@@ -644,7 +652,11 @@ export const StructureOptionCard: React.FC<{
       {proposal && !isCurrent ? (
         <p className="muted">{proposal.confirmBack}</p>
       ) : null}
-      {!isCurrent && (singleOption || confirming) && (
+      {error && !isCurrent ? <p className="error">{error}</p> : null}
+      {!isCurrent && option.confirmBlockedReason ? (
+        <p className="muted">{option.confirmBlockedReason}</p>
+      ) : null}
+      {!isCurrent && !option.confirmBlockedReason && (singleOption || confirming) && (
         <p>
           <button
             type="button"
@@ -861,6 +873,14 @@ export const MechanicsPanel: React.FC<{
    *  open ("Use this reading?") — choosing is the approval act, so it
    *  keeps the confirm-back discipline. */
   const [confirmingOption, setConfirmingOption] = React.useState<string | null>(null);
+  /** A failed confirm for one structure option, shown ON that
+   *  option's card.  The panel banner alone is not enough: it sits
+   *  at the top of a long panel, and a press that only lit it read
+   *  as "nothing happened" (Oct 28, 2026). */
+  const [optionError, setOptionError] = React.useState<{
+    key: string;
+    message: string;
+  } | null>(null);
   // Bulk approval ("Approve all uncontested", Oct 27, 2026): the
   // summary the server returned for review, before anything applied.
   const [bulkSummary, setBulkSummary] = React.useState<BulkSummaryView | null>(null);
@@ -1164,14 +1184,19 @@ export const MechanicsPanel: React.FC<{
   // Phase 4: extraction proposals. Confirming sends confirmed: true —
   // the server refuses anything less and returns the restated change;
   // dismissing persists so the proposal does not come back.
+  // Resolves to the failure message, or null on success.  Callers
+  // acting for a specific card pass reportOnCard so the failure is
+  // shown on that card (where the person's eyes are) rather than
+  // only in the panel banner at the top of a long page.
   const postProposal = async (
     proposalId: string,
     action: "confirm" | "dismiss",
     candidateId?: string,
-  ) => {
+    reportOnCard?: boolean,
+  ): Promise<string | null> => {
     setBusyProposal(proposalId);
     setMessage(null);
-    setError(null);
+    if (!reportOnCard) setError(null);
     try {
       const resp = await fetch(
         `/api/workspaces/${encodeURIComponent(workspaceId)}/mechanics-panel/proposals/${encodeURIComponent(proposalId)}/${action}`,
@@ -1205,8 +1230,11 @@ export const MechanicsPanel: React.FC<{
       );
       await loadPanel();
       if (action === "confirm" && onSnapshotReload) onSnapshotReload();
+      return null;
     } catch (err: any) {
-      setError(err?.message || "Proposal action failed.");
+      const failure = err?.message || "Proposal action failed.";
+      if (!reportOnCard) setError(failure);
+      return failure;
     } finally {
       setBusyProposal(null);
     }
@@ -1226,13 +1254,24 @@ export const MechanicsPanel: React.FC<{
         p.equationMechanic === step.equationMechanic &&
         p.rendering === option.rendering,
     );
+    setOptionError(null);
     if (proposal) {
       setConfirmingOption(null);
-      await postProposal(proposal.id, "confirm");
+      const failure = await postProposal(proposal.id, "confirm", undefined, true);
+      if (failure) setOptionError({ key: option.key, message: failure });
       return;
     }
     if (!option.recordId) {
-      setError("This reading has no saved record to approve yet.");
+      // No approval path exists for this reading.  Say so on the
+      // card itself, with the server's reason when it gave one —
+      // a press that only lit the panel banner read as "nothing
+      // happened" (Oct 28, 2026).
+      setOptionError({
+        key: option.key,
+        message:
+          option.confirmBlockedReason ||
+          "This reading has no saved record to approve yet — nothing was applied.",
+      });
       return;
     }
     setBusyProposal(option.recordId);
@@ -1265,7 +1304,10 @@ export const MechanicsPanel: React.FC<{
       await loadPanel();
       if (onSnapshotReload) onSnapshotReload();
     } catch (err: any) {
-      setError(err?.message || "Choosing the reading failed.");
+      setOptionError({
+        key: option.key,
+        message: err?.message || "Choosing the reading failed — nothing was applied.",
+      });
     } finally {
       setBusyProposal(null);
     }
@@ -1634,6 +1676,11 @@ export const MechanicsPanel: React.FC<{
                       singleOption={step.options.length === 1}
                       confirming={confirmingOption === option.key}
                       busy={busyProposal !== null}
+                      error={
+                        optionError?.key === option.key
+                          ? optionError.message
+                          : null
+                      }
                       onSelect={() => setConfirmingOption(option.key)}
                       onConfirm={() => void chooseOption(step, option)}
                       onCancel={() => setConfirmingOption(null)}
