@@ -373,20 +373,18 @@ export const ProjectionResultsSection: React.FC<{ ws: ProjectionWorkspace }> = (
               </span>
             </div>
           )}
-          {illustration?.selectorIntegrity && (
-            <div className={`logic-results__selector-integrity ${illustration.selectorIntegrity.passed ? "is-passed" : "is-fallback"}`}>
-              <strong>{illustration.selectorIntegrity.passed ? "Filed classification matched" : "Projection used authorized selector fallback"}</strong>
-              <span>
-                Sex: {illustration.selectorIntegrity.scenario?.sex} · Risk class: {illustration.selectorIntegrity.scenario?.riskClass} · Tobacco status: {illustration.selectorIntegrity.scenario?.tobaccoStatus}
-              </span>
-              {!illustration.selectorIntegrity.passed && <span>{illustration.selectorIntegrity.issues?.map((issue: any) => issue.mechanic.replaceAll("_", " ")).join(", ")} did not have an exact match.</span>}
-            </div>
-          )}
+          {/* Declutter (Oct 28, 2026): the "Filed classification
+              matched" box is gone — it merely restated the scenario
+              inputs (sex / risk class / tobacco) rendered directly
+              above the results.  A run that used an authorized
+              selector fallback is still disclosed, by the page-level
+              selector-fallback alert, which names the mechanics and
+              the affected years. */}
           {/* Phase 1 (show the math): the auditable ledger is the primary
               projection view — numbers first, each row expandable to its
               derivation, rate tables in force attached — with the chart
               demoted below it, closed by default. */}
-          <ProjectionLedger ledger={illustration?.ledger} rateTables={illustration?.rateTables} fallbackRows={rows} definitionsLine={illustration?.definitionsLine} />
+          <ProjectionLedger ledger={illustration?.ledger} rateTables={illustration?.rateTables} fallbackRows={rows} definitionsUsed={illustration?.definitionsUsed} />
           <details className="logic-results__chart-details">
             <summary>Chart (secondary view)</summary>
             <ProjectionChart rows={rows} />

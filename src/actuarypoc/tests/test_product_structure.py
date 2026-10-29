@@ -370,6 +370,12 @@ def test_choosing_the_form_definition_records_history_and_stamps_runs() -> None:
     assert nar["equationId"] == filed["id"]
     assert nar["provenanceClass"] == "filed_definition"
     assert nar["stepId"] == "nar"
+    # The compact-summary identity (Oct 28, 2026 declutter): the step,
+    # the reading's short name, and its provenance class — enough for
+    # the Ledger to name which reading ran without the prose wall.
+    assert nar["stepLabel"] == "Net amount at risk"
+    assert nar["equationLabel"] == "Net amount at risk definition"
+    assert nar["provenanceLabel"] == "Filed definition"
     assert "Net amount at risk" in structure.definitions_line(chosen)
 
     # The projection view stamps the same choice onto the run record.
@@ -400,4 +406,7 @@ def test_choosing_the_form_definition_records_history_and_stamps_runs() -> None:
     stamped = {c["mechanic"]: c for c in snapshot["definitionsUsed"]}
     assert stamped["nar_definition"]["equationId"] == filed["id"]
     assert stamped["nar_definition"]["provenanceClass"] == "filed_definition"
+    assert stamped["nar_definition"]["equationLabel"] == (
+        "Net amount at risk definition"
+    )
     assert "Net amount at risk" in snapshot["definitionsLine"]

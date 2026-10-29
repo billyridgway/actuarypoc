@@ -557,6 +557,10 @@ def chosen_options_from_in_force(
             "stepId": step["id"],
             "stepLabel": step["label"],
             "mechanic": mechanic,
+            # The reading's short name, as the step's option cards head
+            # it — so a consumer (the Ledger's definitions summary) can
+            # name WHICH reading ran without reproducing its prose.
+            "equationLabel": _eq.MECHANIC_LABELS.get(mechanic, mechanic),
             "equationId": view["recordId"],
             "rendering": view["rendering"],
             "provenanceClass": view["provenanceClass"],

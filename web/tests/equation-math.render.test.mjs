@@ -550,6 +550,147 @@ check("styles stack structure option cards at narrow widths", () => {
   }
 });
 
+// --- The Ledger definitions summary (declutter, Oct 28, 2026) ----
+// Billy, after accepting everything and running a projection: the
+// Ledger still carried "some duplication and potentially unnecessary
+// extra information" — all seven in-effect definitions rendered as
+// one run-on prose paragraph (the policy-fees entry alone ~80 words
+// of nested conditionals), plus a "Filed classification matched" box
+// restating the scenario inputs directly above it.  The summary is
+// now one compact row per settled step — step, the reading's short
+// name, its provenance class — fed by the run record's
+// definitionsUsed stamp; the stamp's entries still CARRY the prose
+// rendering (record data), and the Ledger must never render it.
+// Rates in force keeps its typeset "Equation in force" blocks: that
+// is the audit view, not duplication.
+const ledgerBundlePath = join(buildDir, "ProjectionLedger.cjs");
+buildSync({
+  entryPoints: [join(webDir, "ProjectionLedger.tsx")],
+  bundle: true,
+  platform: "node",
+  format: "cjs",
+  external: ["react", "react-dom", "react-dom/server"],
+  outfile: ledgerBundlePath,
+  logLevel: "silent",
+});
+const { ProjectionLedger } = require(ledgerBundlePath);
+const logicBundlePath = join(buildDir, "ProjectionLogicPage.cjs");
+buildSync({
+  entryPoints: [join(webDir, "ProjectionLogicPage.tsx")],
+  bundle: true,
+  platform: "node",
+  format: "cjs",
+  external: ["react", "react-dom", "react-dom/server"],
+  outfile: logicBundlePath,
+  logLevel: "silent",
+});
+const { ProjectionResultsSection } = require(logicBundlePath);
+const logicSource = readFileSync(join(webDir, "ProjectionLogicPage.tsx"), "utf8");
+const ledgerSource = readFileSync(join(webDir, "ProjectionLedger.tsx"), "utf8");
+const workspacePageSource = readFileSync(
+  join(webDir, "ProductWorkspacePage.tsx"),
+  "utf8",
+);
+
+// The settled state of the canonical Promise UL run with the FILED
+// NAR definition chosen — the shape the live gate reproduces.  Each
+// entry carries its full prose `rendering` from the live fixture,
+// exactly as the run record ships it.
+const definitionsFixture = [
+  { stepId: "premium", stepLabel: "Premium & loads", mechanic: "premium_load", equationLabel: "Premium load", provenanceClass: "from_filing", provenanceLabel: "From the filing" },
+  { stepId: "fees", stepLabel: "Policy fees", mechanic: "policy_fees", equationLabel: "Policy and admin fees", provenanceClass: "from_filing", provenanceLabel: "From the filing" },
+  { stepId: "crediting", stepLabel: "Interest crediting", mechanic: "crediting", equationLabel: "Interest crediting", provenanceClass: "from_filing", provenanceLabel: "From the filing" },
+  { stepId: "death_benefit", stepLabel: "Death benefit & corridor", mechanic: "death_benefit", equationLabel: "Death benefit", provenanceClass: "derived", provenanceLabel: "Derived" },
+  { stepId: "nar", stepLabel: "Net amount at risk", mechanic: "nar_definition", equationLabel: "Net amount at risk definition", provenanceClass: "filed_definition", provenanceLabel: "Filed definition" },
+  { stepId: "coi", stepLabel: "COI charges", mechanic: "coi_charge", equationLabel: "COI charge", provenanceClass: "derived", provenanceLabel: "Derived" },
+  { stepId: "surrender", stepLabel: "Surrender & exit", mechanic: "surrender_charge", equationLabel: "Surrender charge", provenanceClass: "derived", provenanceLabel: "Derived" },
+].map((entry) => ({ ...entry, rendering: live[entry.mechanic].rendering }));
+
+const ledgerRowFixture = {
+  year: 1, attainedAge: 45, beginningValue: 0, premium: 3000,
+  premiumLoad: 300, policyFee: 90, coiCharge: 120, interestCredited: 45,
+  endingValue: 2535, surrenderCharge: 0, surrenderValue: 2535,
+  deathBenefit: 100000, netAmountAtRisk: 97465, components: null,
+};
+const rateTablesFixture = {
+  coi: {
+    status: "filed", rowCount: 1,
+    rows: [{ duration: 1, attained_age: 45, sex: "M", risk_class: "Standard", tobacco_status: "Tobacco", rate: 0.1468, rate_unit: "per_1000_monthly" }],
+    equation: { math: live.coi_charge.math, rendering: live.coi_charge.rendering, timingNote: live.coi_charge.timingNote, approvedBy: "workspace_user" },
+  },
+  surrender: {
+    status: "filed", rowCount: 1,
+    rows: [{ duration: 1, charge: 17.9413, charge_unit: "per_1000_face" }],
+    equation: { math: live.surrender_charge.math, rendering: live.surrender_charge.rendering, timingNote: null, approvedBy: "workspace_user" },
+  },
+};
+const renderLedger = () =>
+  renderToString(
+    React.createElement(ProjectionLedger, {
+      ledger: { rows: [ledgerRowFixture] },
+      rateTables: rateTablesFixture,
+      fallbackRows: [],
+      definitionsUsed: definitionsFixture,
+    }),
+  );
+
+check("ledger definitions summary: one compact row per settled step", () => {
+  const html = renderLedger();
+  const rows = html.split("projection-definitions-summary__row").length - 1;
+  if (rows !== 7) {
+    throw new Error(`expected 7 summary rows, found ${rows}`);
+  }
+  expectTokens(html, [
+    "Definitions in effect",
+    "Premium &amp; loads", "Policy fees", "Interest crediting",
+    "Death benefit &amp; corridor", "Net amount at risk",
+    "Net amount at risk definition", "Filed definition",
+    "From the filing", "Derived", "Surrender &amp; exit",
+  ]);
+});
+check("ledger definitions summary: the formula prose never renders", () => {
+  const html = renderLedger();
+  expectAbsent(html, [
+    // The policy-fees prose wall (~80 words of nested conditionals).
+    "the sum over the fee schedule rows in force of",
+    "whether a premium is due this month",
+    "excluding rows matching",
+    // The other definitions' prose bodies.
+    "the greater of (the death benefit / the NAR factor",
+    "the corridor table percentage for this duration",
+    "the fee schedule amount for this duration and attained age (fee unit: percent_premium)",
+    // The old one-line wall's joined form.
+    "Definitions in effect —",
+  ]);
+});
+check("rates in force keeps its typeset Equation in force blocks", () => {
+  const html = renderLedger();
+  expectTokens(html, ["Rates in force", "Equation in force:", "equation-math"]);
+});
+check("results section: no Filed classification matched box", () => {
+  const row = { year: 1, attainedAge: 45, cashValue: 100, surrenderValue: 90, openingPolicyValue: 0, annualPremium: 3000 };
+  const ws = {
+    illustration: {
+      ledger: null, rateTables: null, definitionsUsed: definitionsFixture,
+      selectorIntegrity: { passed: true, scenario: { sex: "M", riskClass: "Standard", tobaccoStatus: "Tobacco" } },
+    },
+    rows: [row],
+    metrics: { maximumYear: 30, finalCashValue: 100, finalSurrenderValue: 90, finalNetAmountAtRisk: 50 },
+    reconciliation: { passed: true, checkCount: 90, maxResidual: 0, failures: [], failedYears: [] },
+    downloadProjectionCsv: () => {},
+  };
+  const html = renderToString(React.createElement(ProjectionResultsSection, { ws }));
+  expectAbsent(html, ["Filed classification matched"]);
+  // The decluttered summary is wired through this section too.
+  expectTokens(html, ["Definitions in effect", "Filed definition"]);
+});
+check("results section: Projection ledger reconciled still renders", () => {
+  expectTokens(logicSource, ["Projection ledger reconciled"]);
+});
+check("the frontend no longer consumes the definitions prose line", () => {
+  expectAbsent(ledgerSource + logicSource + workspacePageSource, ["definitionsLine"]);
+});
+
 rmSync(buildDir, { recursive: true, force: true });
 if (failures > 0) {
   console.log(`\n${failures} check(s) failed`);

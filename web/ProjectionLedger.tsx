@@ -24,13 +24,30 @@ const formatCurrency = (value: any): string => {
 // the snapshot; older snapshots without a ledger fall back to the raw
 // projection rows (amounts only, no derivations).
 
+/** One entry of the run record's definitionsUsed stamp: the chosen
+ *  option for one product-structure step, by identity.  The Ledger
+ *  renders these as a COMPACT summary (declutter, Oct 28, 2026) —
+ *  step, the reading's short name, its provenance class — never the
+ *  entry's `rendering`: the full prose of all seven definitions as
+ *  one run-on paragraph duplicated the steps and the Rates-in-force
+ *  equations and buried the one thing the summary is for, telling
+ *  the reader WHICH reading produced the numbers. */
+export interface LedgerDefinitionEntry {
+  stepId?: string;
+  stepLabel?: string;
+  mechanic?: string;
+  equationLabel?: string;
+  provenanceClass?: string;
+  provenanceLabel?: string;
+}
+
 interface ProjectionLedgerProps {
   ledger?: any;
   rateTables?: any;
   fallbackRows?: any[];
   /** The run record's stamp of the chosen option per product-structure
    *  step (Oct 28, 2026): the definitions this run used, named. */
-  definitionsLine?: string | null;
+  definitionsUsed?: LedgerDefinitionEntry[] | null;
 }
 
 const formatRate = (value: any): string => {
@@ -286,7 +303,7 @@ const RateTablesInForce: React.FC<{ rateTables?: any; classification?: any }> = 
   );
 };
 
-export const ProjectionLedger: React.FC<ProjectionLedgerProps> = ({ ledger, rateTables, fallbackRows, definitionsLine }) => {
+export const ProjectionLedger: React.FC<ProjectionLedgerProps> = ({ ledger, rateTables, fallbackRows, definitionsUsed }) => {
   const [expandedYear, setExpandedYear] = React.useState<number | null>(null);
   const ledgerRows: any[] = Array.isArray(ledger?.rows) ? ledger.rows : [];
   const hasLedger = ledgerRows.length > 0;
@@ -326,8 +343,22 @@ export const ProjectionLedger: React.FC<ProjectionLedgerProps> = ({ ledger, rate
 
   return (
     <div className="projection-ledger-view">
-      {definitionsLine ? (
-        <p className="muted projection-definitions">{definitionsLine}</p>
+      {definitionsUsed && definitionsUsed.length > 0 ? (
+        <div className="projection-definitions-summary">
+          <h4>Definitions in effect</h4>
+          <ul>
+            {definitionsUsed.map((definition, index) => (
+              <li
+                className="projection-definitions-summary__row"
+                key={definition.stepId ?? definition.mechanic ?? index}
+              >
+                <strong>{definition.stepLabel}</strong>
+                <span>{definition.equationLabel}</span>
+                <span className="basis-tag">{definition.provenanceLabel}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
       ) : null}
       <div className="table-scroll projection-ledger">
         <table className="kv-table">

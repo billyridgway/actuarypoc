@@ -2108,6 +2108,22 @@ details > summary {
 .structure-option { text-align: left; }
 .projection-definitions { margin: 0 0 0.75rem; }
 
+/* The Ledger's definitions summary (declutter, Oct 28, 2026): one
+   compact row per settled step — step, the reading's short name, its
+   provenance class — replacing the run-on prose paragraph. */
+.projection-definitions-summary { margin: 0 0 0.75rem; }
+.projection-definitions-summary h4 { margin: 0 0 0.35rem; }
+.projection-definitions-summary ul { list-style: none; margin: 0; padding: 0; }
+.projection-definitions-summary__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.3rem 0.6rem;
+  padding: 0.2rem 0;
+  border-bottom: 1px solid var(--border);
+}
+.projection-definitions-summary__row:last-child { border-bottom: none; }
+
 /* A flex child must be allowed to shrink below its content's
    intrinsic width, or a wide formula forces the whole option card
    (and the page) wider than the viewport. */

@@ -62,7 +62,17 @@ history under the option's identity; switching later is the same act.
 
 Projection runs stamp the chosen option per step into the run record
 (`definitionsUsed` / `definitionsLine` on the projection view), and
-the ledger names the definitions a run used.
+the ledger names the definitions a run used. Since the Oct 28, 2026
+declutter, the Ledger renders that stamp as a compact summary — one
+row per settled step: the step, the reading's short name
+(`equationLabel`, the name the step's option cards head it with),
+and its provenance class — instead of the `definitionsLine` prose
+paragraph, which restated all seven formulas run-on and duplicated
+the steps and the Rates-in-force equations. The stamp itself is
+unchanged; only its Ledger rendering shrank. The same pass removed
+the Ledger's "Filed classification matched" box, which merely
+restated the scenario inputs rendered above the results (a fallback
+run is still disclosed by the page-level selector-fallback alert).
 
 ## The bulk seam fix
 
