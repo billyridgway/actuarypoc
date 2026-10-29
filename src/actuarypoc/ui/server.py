@@ -2229,6 +2229,16 @@ def _apply_active_synthetic_mechanics(snapshot: Dict[str, Any], workspace_id: st
     workspace-edited mechanics are active."""
 
     artifact = load_workspace_executable_mechanics(workspace_id) or {}
+    # The executableMechanics field is a read model of the stored
+    # artifact, not of the analysis that froze this snapshot: serve
+    # the current artifact whenever one exists (Oct 29, 2026).  An
+    # equation-only approval changes nothing but the artifact's
+    # equation records, so gating this field on the rebuild triggers
+    # below left an approved reading looking unapproved until some
+    # unrelated table acceptance, edit, or correction happened by.
+    # The heavier illustration rebuild stays gated exactly as before.
+    if artifact:
+        snapshot["executableMechanics"] = artifact
     if not (
         (artifact.get("synthetic") or {})
         or (artifact.get("reviews") or {})

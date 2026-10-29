@@ -679,3 +679,87 @@ def test_carry_over_transplants_synthetic_and_reports_vanished() -> None:
     assert len(artifact["usable"]["surrender"]) == 1
     assert artifact["status"]["surrender"] == "synthetic_scenario"
     assert any("cand-coi-nt" in note for note in outcome["notes"])
+
+
+# ---------------------------------------------------------------------------
+# Stale snapshot read model (Oct 29, 2026 defect): GET /api/workspaces
+# served snapshot["executableMechanics"] from the analysis-time frozen
+# snapshot, refreshed only when the artifact carried synthetic
+# mechanics, reviews, workspace edits, or corrections.  An
+# equation-only approval — the reading door — changes only the
+# artifact's equation records, so the guard never tripped and the
+# snapshot kept showing the reading as not in force indefinitely,
+# even though the stored artifact (and every projection) was right.
+# The GET composition must serve the currently stored artifact for
+# that one field whenever an artifact exists; the heavier
+# illustration rebuild stays gated exactly as before.
+# ---------------------------------------------------------------------------
+
+
+def _record_states(executable_mechanics: dict) -> dict:
+    return {
+        record["id"]: record["state"]
+        for record in executable_mechanics.get("equations") or []
+    }
+
+
+def test_equation_only_approval_is_served_by_workspace_get(client: TestClient) -> None:
+    workspace_id = _workspace_with_document()
+    body = _analyze(client, workspace_id)
+
+    # The analysis-time snapshot froze the two harvested readings as
+    # pending — that freeze is the baseline the GET must move past.
+    frozen = _record_states(body["snapshot"]["executableMechanics"])
+    assert frozen["eq-fixture-death-benefit"] == "pending"
+    assert frozen["eq-fixture-nar-definition"] == "pending"
+
+    # The reading door ONLY: confirm the two equation proposals.  No
+    # table acceptance, no workspace edit, no correction.
+    _confirm_equation_proposals(client, workspace_id)
+
+    # The stored artifact approved both records instantly, and the
+    # approval touched nothing the old snapshot rebuild was gated
+    # on — which is exactly why the stale read model never noticed.
+    artifact = workspace_store.load_workspace_executable_mechanics(workspace_id)
+    stored = _record_states(artifact)
+    assert stored["eq-fixture-death-benefit"] == "approved"
+    assert stored["eq-fixture-nar-definition"] == "approved"
+    assert not (
+        artifact.get("synthetic")
+        or artifact.get("reviews")
+        or artifact.get("workspaceEdits")
+        or artifact.get("corrections")
+    )
+
+    # The workspace GET serves the CURRENT artifact for the
+    # executableMechanics field: both readings in force.
+    body = client.get(f"/api/workspaces/{workspace_id}").json()
+    served = _record_states(body["snapshot"]["executableMechanics"])
+    assert served["eq-fixture-death-benefit"] == "approved"
+    assert served["eq-fixture-nar-definition"] == "approved"
+
+
+def test_table_acceptance_is_served_by_workspace_get_as_before(
+    client: TestClient,
+) -> None:
+    # The table door writes reviews, which always tripped the old
+    # rebuild gate; its served state must be exactly what it was.
+    workspace_id = _workspace_with_document()
+    _analyze(client, workspace_id)
+    _confirm_candidate(client, workspace_id, "cand-coi-tob")
+
+    body = client.get(f"/api/workspaces/{workspace_id}").json()
+    served = body["snapshot"]["executableMechanics"]
+    candidates = {c["id"]: c["reviewStatus"] for c in served["candidates"]["coi"]}
+    assert candidates["cand-coi-tob"] == "accepted"
+    assert served["usable"]["coi"], "the accepted slice's rows are served usable"
+
+
+def test_workspace_get_without_artifact_gains_no_executable_mechanics(
+    client: TestClient,
+) -> None:
+    # No stored artifact (never analyzed): the GET must not invent
+    # the field — the snapshot is served as stored.
+    ws = workspace_store.create_workspace()
+    body = client.get(f"/api/workspaces/{ws['id']}").json()
+    assert "executableMechanics" not in (body.get("snapshot") or {})
