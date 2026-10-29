@@ -152,22 +152,30 @@ def test_timing_proposal_with_page_evidence():
     assert "arrears" in timing[0]["evidence"]["snippet"]
 
 
-def test_nar_proposal_requires_a_factor_in_force():
+def test_nar_proposal_is_offered_without_a_factor_in_force():
+    # The filed NAR definition is an ordinary equation proposal: it
+    # is offered whether or not a factor table is in force.  Nothing
+    # calculates without an approved equation, so "the readings agree
+    # at factor 1.0" never made the proposal a no-op — skipping it
+    # (the pre-Oct-29 behaviour) left the definition's card with no
+    # Confirm at all (Billy, Oct 29, 2026).
     artifact = _empty_artifact()
     slices = [_slice(NAR_TEXT, page=5)]
-    # No factor in force: the prose matches the default the loop already
-    # applies with a factor of 1.0 — nothing to propose.
-    assert proposals.generate_proposals(artifact, slices) == []
-    artifact["usable"]["nar_factors"] = [
-        {"duration": None, "sex": None, "factor": 1.05,
-         "provenance": {"filename": "meridian-ul.pdf", "sourceType": "filed_pdf"}}
-    ]
     found = proposals.generate_proposals(artifact, slices)
     assert len(found) == 1
     assert found[0]["kind"] == "equation"
     assert found[0]["equationMechanic"] == "nar_definition"
     assert "death benefit − the account value" in found[0]["rendering"]
     assert found[0]["evidence"]["page"] == 5
+    # A factor in force changes nothing: still exactly one proposal
+    # for the same reading.
+    artifact["usable"]["nar_factors"] = [
+        {"duration": None, "sex": None, "factor": 1.05,
+         "provenance": {"filename": "meridian-ul.pdf", "sourceType": "filed_pdf"}}
+    ]
+    found = proposals.generate_proposals(artifact, slices)
+    assert len(found) == 1
+    assert found[0]["equationMechanic"] == "nar_definition"
 
 
 def test_surrender_proposal_needs_both_percent_and_grading():
@@ -475,7 +483,10 @@ def test_acceptance_second_product_onboarded_via_proposals():
     manual_corrections = 0
     confirmed = 0
 
-    # Round 1: the four filed tables + the COI timing the prose states.
+    # Round 1: the four filed tables + the COI timing and the NAR
+    # definition the prose states.  The definition is proposed
+    # alongside its factor table, not after it — it never waited on
+    # the table (Oct 29, 2026).
     pending = proposals.generate_proposals(artifact, slices)
     kinds = {(p["kind"], p["mechanic"]) for p in pending}
     assert ("filed_table_choice", "coi") in kinds
@@ -486,6 +497,10 @@ def test_acceptance_second_product_onboarded_via_proposals():
         p["kind"] == "equation" and p["equationMechanic"] == "coi_charge"
         for p in pending
     )
+    assert any(
+        p["kind"] == "equation" and p["equationMechanic"] == "nar_definition"
+        for p in pending
+    )
     for proposal in pending:
         outcome = proposals.apply_proposal(
             artifact, proposal, workspace_id="ws-b", who="eddy", at="2026-10-25T00:00:00Z"
@@ -493,15 +508,9 @@ def test_acceptance_second_product_onboarded_via_proposals():
         artifact = outcome["artifact"]
         confirmed += 1
 
-    # Round 2: with the 1.05 factor now in force, the filing's NAR
-    # prose becomes an equation proposal.
-    pending = proposals.generate_proposals(artifact, slices)
-    assert len(pending) == 1 and pending[0]["equationMechanic"] == "nar_definition"
-    outcome = proposals.apply_proposal(
-        artifact, pending[0], workspace_id="ws-b", who="eddy", at="2026-10-25T00:00:00Z"
-    )
-    artifact = outcome["artifact"]
-    confirmed += 1
+    # Round 2: nothing remains — every statement the specimen makes
+    # was proposed and confirmed in round 1.
+    assert proposals.generate_proposals(artifact, slices) == []
 
     assert confirmed == 6
     assert manual_corrections == 0
@@ -664,7 +673,12 @@ def test_annotation_leaves_a_confirmable_reading_unmarked():
     assert reasons[death_benefit["options"][0]["key"]] is None
 
 
-def test_annotation_explains_the_gated_nar_reading():
+def test_annotation_leaves_the_filed_nar_reading_confirmable():
+    # The filed NAR definition confirms on its own card like every
+    # other reading: it carries a proposal, so the annotation leaves
+    # it unmarked.  (Before Oct 29, 2026 the proposal was skipped and
+    # the card instead carried a note claiming the factor table set
+    # the definition — a coupling that no longer exists.)
     from actuarypoc.extract import workspace_structure as _structure
 
     artifact = _empty_artifact()
@@ -674,9 +688,7 @@ def test_annotation_explains_the_gated_nar_reading():
     reasons = _annotate(structure, found, artifact)
     nar = [step for step in structure["steps"] if step["id"] == "nar"][0]
     assert len(nar["options"]) == 1
-    reason = reasons[nar["options"][0]["key"]]
-    assert reason is not None
-    assert "NAR factor table" in reason
+    assert reasons[nar["options"][0]["key"]] is None
 
 
 def test_annotation_explains_a_reconciled_loser():
@@ -732,6 +744,50 @@ def test_annotation_explains_a_dismissed_reading():
     reason = structure["steps"][0]["options"][0].get("confirmBlockedReason")
     assert reason is not None
     assert "dismissed" in reason
+
+
+def test_nar_factor_table_proposal_describes_the_table_not_the_definition():
+    # A table proposal narrates the TABLE's own transition — what
+    # was in force for the table, and the filed table that replaces
+    # or extends it.  It must not narrate the NAR definition's state:
+    # the definition is a separate mechanic, chosen on its own card
+    # (Billy, Oct 29, 2026: "the data seems to have a different
+    # equation than the equation above it").
+    artifact = _empty_artifact()
+    artifact["candidates"]["nar_factors"].append(_candidate("nar_factors", "cand-nar-1", [
+        {"duration": None, "sex": None, "factor": 1.05,
+         "provenance": {"filename": "meridian-ul.pdf", "page": 6, "sourceType": "filed_pdf",
+                        "reviewStatus": "review_required"}},
+    ], page=6, heading="Net Amount at Risk Factor"))
+    found = proposals.generate_proposals(artifact, [])
+    table = [
+        p for p in found
+        if p["kind"] == "filed_table_choice" and p.get("mechanic") == "nar_factors"
+    ]
+    assert len(table) == 1
+    summary = table[0]["confirmBack"]
+    assert "nothing was in force before" in summary
+    assert "the filed table of 1 rows" in summary
+    assert "net amount at risk =" not in summary
+    assert "factor of 1.0 is used" not in summary
+    assert "death benefit" not in summary
+
+
+def test_bulk_plan_includes_the_filed_nar_definition():
+    # On a doctrine-born workspace the filed NAR definition is an
+    # ordinary uncontested single reading: the bulk dry-run lists it
+    # as eligible, like every other mechanic's single reading.
+    artifact = _empty_artifact()
+    slices = [_slice(NAR_TEXT, page=5)]
+    plan = proposals.plan_bulk_approval(artifact, slices)
+    eligible = {
+        (item["kind"], item["mechanic"]) for item in plan["eligible"]
+    }
+    assert ("equation", "nar_definition") in eligible
+    excluded = {
+        (item["kind"], item["mechanic"]) for item in plan["excluded"]
+    }
+    assert ("equation", "nar_definition") not in excluded
 
 
 # ---------------------------------------------------------------------------

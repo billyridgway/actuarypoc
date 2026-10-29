@@ -85,6 +85,15 @@ SURRENDER_BASES = ("percent_account_value", "percent_face", "flat_amount")
 # names the equation mechanic it resolves into (``equationMechanic``):
 # applying the correction creates that mechanic's approved equation
 # through the workspace_equations approval machinery.
+#
+# The nar slot carries NO variant: its definition is a text-stated
+# mechanic whose form is chosen among the readings on the equation
+# card (a recorded approval), never by a switch on the factor table's
+# card.  A "change the NAR definition" variant once lived here; it
+# coupled the definition to the table's presence, suppressed the
+# definition's own equation proposal, and left its card explaining
+# that the table decided — retired Oct 29, 2026 (Billy: "the code was
+# skipping the equation proposal for this one mechanic").
 VARIANTS_BY_SLOT: Dict[str, List[Dict[str, Any]]] = {
     "surrender": [
         {
@@ -112,14 +121,6 @@ VARIANTS_BY_SLOT: Dict[str, List[Dict[str, Any]]] = {
             "label": "Set banded COI rates by policy duration",
             "params": ["bands"],
             "equationMechanic": "coi_charge",
-        },
-    ],
-    "nar": [
-        {
-            "id": "nar_definition",
-            "label": "Change the net amount at risk definition",
-            "params": ["definition"],
-            "equationMechanic": "nar_definition",
         },
     ],
 }
@@ -239,23 +240,6 @@ def describe_current(artifact: Dict[str, Any], slot: Dict[str, Any]) -> Dict[str
             "description": f"COI {_TIMING_PHRASES[timing]}",
             "rows": deepcopy(rows),
         }
-    if slot.get("id") == "nar":
-        settings = executable_settings(artifact)
-        definition = settings.get("narDefinition") or "factor_adjusted"
-        factor = rows[0].get("factor") if rows else 1.0
-        if definition == "unadjusted":
-            description = "net amount at risk = death benefit − account value (no NAR factor applied)"
-        elif rows:
-            description = (
-                f"net amount at risk = death benefit ÷ {factor} (the NAR factor in force) "
-                "− account value"
-            )
-        else:
-            description = (
-                "net amount at risk = death benefit − account value "
-                "(no NAR factor table in force; a factor of 1.0 is used)"
-            )
-        return {"status": status, "description": description, "rows": deepcopy(rows)}
     if not rows:
         if mechanic == "surrender":
             return {
@@ -884,12 +868,6 @@ def suggest_variant(slot: Dict[str, Any], text: str) -> Optional[Dict[str, Any]]
             return {"variant": "coi_timing", "params": {"timing": "beginning"}}
         if "middle of" in lowered or "mid-month" in lowered or "mid month" in lowered:
             return {"variant": "coi_timing", "params": {"timing": "middle"}}
-        return None
-    if slot_id == "nar":
-        if "no factor" in lowered or "without the factor" in lowered or "ignore the factor" in lowered:
-            return {"variant": "nar_definition", "params": {"definition": "unadjusted"}}
-        if "with the factor" in lowered or "divide by the factor" in lowered or "÷" in lowered:
-            return {"variant": "nar_definition", "params": {"definition": "factor_adjusted"}}
         return None
     return None
 

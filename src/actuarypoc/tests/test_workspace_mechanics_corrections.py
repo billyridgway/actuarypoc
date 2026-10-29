@@ -17,8 +17,9 @@ Covers the plan's Phase 3 exit flows at API level:
   dropped or silently applied.
 
 Plus precedence (corrections beat workspace edits, synthetic tables and
-placeholders), the NAR-definition correction, conservative free-text
-suggestions, and survival of corrections across an analysis re-run.
+placeholders), the NAR definition chosen as a reading (its table-side
+correction variant is retired), conservative free-text suggestions, and
+survival of corrections across an analysis re-run.
 """
 
 import io
@@ -245,9 +246,12 @@ def test_suggest_variant_is_conservative() -> None:
         "variant": "coi_timing", "params": {"timing": "end"},
     }
     nar = panel.SLOT_BY_ID["nar"]
-    assert corrections.suggest_variant(nar, "use the death benefit with no factor") == {
-        "variant": "nar_definition", "params": {"definition": "unadjusted"},
-    }
+    # The NAR slot carries no definitional switch: a note about the
+    # factor maps to no variant and is captured as a note.  The
+    # definition itself is chosen among the readings on its own card
+    # (the variant was retired Oct 29, 2026).
+    assert corrections.suggest_variant(nar, "use the death benefit with no factor") is None
+    assert corrections.variants_for_slot(nar) == []
 
 
 # ---------------------------------------------------------------------------
@@ -529,7 +533,14 @@ def test_middle_timing_and_correction_supersession(store: FakeMinio) -> None:
     assert "middle of each month" in component["formula"]
 
 
-def test_nar_definition_correction_changes_coi_and_keeps_filed_factor(store: FakeMinio) -> None:
+def test_choosing_the_unadjusted_nar_reading_changes_coi_and_keeps_filed_factor(store: FakeMinio) -> None:
+    # The NAR definition is chosen among the readings on its own
+    # card — approving the filed (unadjusted) reading is the act.
+    # There is no "change the definition" correction on the factor
+    # table's card anymore (retired Oct 29, 2026): the table stays in
+    # force as data, and the chosen reading simply does not read it.
+    from actuarypoc.extract import workspace_equations as _ws_eq
+
     artifact = _artifact_with_filed_coi()
     artifact["usable"]["nar_factors"] = [{
         "factor": 1.05,
@@ -544,12 +555,23 @@ def test_nar_definition_correction_changes_coi_and_keeps_filed_factor(store: Fak
     baseline = _projection(workspace_id)["illustration"]
     baseline_coi = baseline["ledger"]["rows"][0]["coiCharge"]
 
-    server.api_apply_mechanics_correction(
-        workspace_id, "nar",
-        server.MechanicsCorrectionRequest(
-            variant="nar_definition", params={"definition": "unadjusted"},
-            who="eddy", confirmed=True,
-        ),
+    outcome = _ws_eq.approve_harvest_candidate(
+        workspace_store.load_workspace_executable_mechanics(workspace_id),
+        {
+            "mechanic": "nar_definition",
+            "body": _ws_eq.nar_body("unadjusted"),
+            "timing": None,
+            "statement": (
+                "Net Amount at Risk – is the difference between the "
+                "Death Benefit and the Policy Value."
+            ),
+            "filename": "filing.pdf",
+            "page": 4,
+        },
+        who="eddy", at="2026-10-25T00:00:00Z",
+    )
+    workspace_store.store_workspace_executable_mechanics(
+        workspace_id, outcome["artifact"]
     )
 
     projection = _projection(workspace_id)["illustration"]
@@ -559,11 +581,20 @@ def test_nar_definition_correction_changes_coi_and_keeps_filed_factor(store: Fak
     assert corrected_coi > baseline_coi
 
     component = _ledger_component(projection, "coi")
-    assert component["basis"] == "corrected"
     inputs = {item["label"]: item["value"] for item in component["inputs"]}
     assert inputs["NAR factor"] == pytest.approx(1.0)
     assert inputs["Filed NAR factor (not applied)"] == pytest.approx(1.05)
     assert "not applied" in component["formula"]
+
+    # The retired variant can no longer be applied, either.
+    with pytest.raises(HTTPException):
+        server.api_apply_mechanics_correction(
+            workspace_id, "nar",
+            server.MechanicsCorrectionRequest(
+                variant="nar_definition", params={"definition": "unadjusted"},
+                who="eddy", confirmed=True,
+            ),
+        )
 
 
 # ---------------------------------------------------------------------------

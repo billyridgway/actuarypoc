@@ -350,12 +350,30 @@ check("blocked single-option card: the reason shows, no dead confirm button", ()
   const html = renderOptionCard({
     option: deathBenefitOption({
       confirmBlockedReason:
-        "This definition is set by the NAR factor table in this step: accepting the table puts the definition in effect.",
+        "The holistic review reconciled this reading against the reading that stands; it stays in the record but is not offered for approval.",
     }),
     singleOption: true,
   });
-  expectTokens(html, ["set by the NAR factor table in this step"]);
+  expectTokens(html, ["reconciled this reading against the reading that stands"]);
   expectAbsent(html, ["Confirm — put this reading in effect", "Confirm — use this reading instead"]);
+});
+// The NAR coupling (Oct 29, 2026): the filed NAR definition arrived
+// as a harvest candidate with NO saved record — the exact shape the
+// factor-table coupling used to block with a note claiming the
+// table set the definition.  The server no longer stamps that
+// reason (the definition has its own equation proposal), so the
+// card renders its working direct Confirm and the note is absent.
+check("filed NAR definition card (harvest, no record): working confirm, no table-coupling note", () => {
+  const html = renderOptionCard({
+    option: narOption({ recordId: null }),
+    singleOption: true,
+  });
+  expectTokens(html, ["Confirm — put this reading in effect", "Filed definition"]);
+  expectAbsent(html, [
+    "set by the NAR factor table",
+    "Change the net amount at risk definition",
+    'type="radio"',
+  ]);
 });
 check("option card with a failed confirm: the error renders inside the card", () => {
   const html = renderOptionCard({

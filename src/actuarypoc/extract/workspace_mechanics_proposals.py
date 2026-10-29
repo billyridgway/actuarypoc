@@ -528,18 +528,6 @@ def _equation_proposals(
         mechanic = str(candidate.get("mechanic") or "")
         body = candidate.get("body")
         timing = candidate.get("timing")
-        if mechanic == "nar_definition" and body is not None:
-            # Proposing "death benefit − account value" when no NAR
-            # factor above 1.0 is in force proposes a no-op (the two
-            # readings agree at factor 1.0) — the harvest record keeps
-            # the statement; no actionable proposal is generated.
-            factor_rows = list((artifact.get("usable") or {}).get("nar_factors") or [])
-            factors = [
-                float(r.get("factor") or 1.0) for r in factor_rows
-                if isinstance(r.get("factor"), (int, float))
-            ]
-            if not any(factor > 1.0 for factor in factors):
-                continue
         if body is None and mechanic == "coi_charge" and timing:
             # A timing-only statement attaches to the COI body from the
             # table in force (or the in-force equation's body, or the
@@ -800,8 +788,7 @@ def annotate_structure_confirmability(
     2026): the reading carries ``confirmBlockedReason`` instead, and
     the client renders the reason where the button would be.  The
     reasons are the honest ones — a dismissed suggestion, a reading
-    the review reconciled away, the NAR definition that is set by
-    its factor table — never a generic dead end.
+    the review reconciled away — never a generic dead end.
     """
 
     artifact = artifact or {}
@@ -815,11 +802,6 @@ def annotate_structure_confirmability(
         for item in artifact.get("dismissedProposals") or []
         if isinstance(item, dict)
     }
-    factor_rows = list((artifact.get("usable") or {}).get("nar_factors") or [])
-    nar_factor_in_effect = any(
-        isinstance(row.get("factor"), (int, float)) and float(row.get("factor") or 1.0) > 1.0
-        for row in factor_rows if isinstance(row, dict)
-    )
     equation_proposals = [
         proposal for proposal in proposals or []
         if isinstance(proposal, dict) and proposal.get("kind") == PROPOSAL_KIND_EQUATION
@@ -853,13 +835,6 @@ def annotate_structure_confirmability(
                     "against the reading that stands; it stays in the "
                     "record but is not offered for approval."
                 )
-        if mechanic == "nar_definition" and not nar_factor_in_effect:
-            return (
-                "This definition is set by the NAR factor table in "
-                "this step: accepting the table puts the definition "
-                "in effect, and its form is chosen on the table's "
-                "card (Change the net amount at risk definition)."
-            )
         return (
             "This reading cannot be put in effect yet — it has no "
             "saved record and no pending proposal."
