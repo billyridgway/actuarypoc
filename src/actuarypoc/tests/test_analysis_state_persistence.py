@@ -25,7 +25,9 @@ from copy import deepcopy
 import pytest
 from fastapi.testclient import TestClient
 
+from actuarypoc.domain import equations as _eq
 from actuarypoc.extract import slice_pipeline
+from actuarypoc.extract import workspace_equations as _ws_eq
 from actuarypoc.storage import workspace_store
 from actuarypoc.ui import server
 
@@ -150,6 +152,46 @@ def _extracted_artifact() -> dict:
             mechanic: "filed_evidence_review_required"
             for mechanic in ("coi", "surrender", "fees", "nar_factors", "corridor")
         },
+        # The same documents state the death benefit and the NAR
+        # definition in text, so a real extraction also harvests
+        # these two readings as pending records.  They are NOT table
+        # transcriptions: since Oct 28, 2026 they take effect only
+        # when a person confirms them — accepting the corridor or
+        # NAR factor table no longer approves them as a side effect.
+        "equations": [
+            _ws_eq.new_record(
+                mechanic="death_benefit",
+                body=_ws_eq.death_benefit_body(),
+                state="pending",
+                source={
+                    "kind": "document",
+                    "statement": (
+                        "Death Benefit is the greater of the Face Amount "
+                        "and the corridor percentage of the Account Value."
+                    ),
+                    "filename": "specimen-base.pdf",
+                    "page": 6,
+                },
+                at="2026-10-27T00:00:00Z",
+                record_id="eq-fixture-death-benefit",
+            ),
+            _ws_eq.new_record(
+                mechanic="nar_definition",
+                body=_eq.nar_body("unadjusted"),
+                state="pending",
+                source={
+                    "kind": "document",
+                    "statement": (
+                        "Net Amount at Risk is the Death Benefit less "
+                        "the Account Value."
+                    ),
+                    "filename": "specimen-base.pdf",
+                    "page": 5,
+                },
+                at="2026-10-27T00:00:00Z",
+                record_id="eq-fixture-nar-definition",
+            ),
+        ],
     }
 
 
@@ -242,6 +284,16 @@ def _accept(client: TestClient, workspace_id: str, mechanic: str, candidate_id: 
     return resp.json()
 
 
+def _confirm_equation_proposals(client: TestClient, workspace_id: str) -> None:
+    """Confirm the harvested death-benefit and NAR-definition
+    readings — the person's own acts, which a table acceptance no
+    longer performs as a side effect (Oct 28, 2026)."""
+    panel = _panel(client, workspace_id)
+    for proposal in panel["proposals"]:
+        if proposal.get("kind") == "equation":
+            _confirm(client, workspace_id, proposal["id"])
+
+
 def _projection(client: TestClient, workspace_id: str, tobacco: str, **overrides) -> dict:
     payload = {
         "issueAge": 45,
@@ -282,11 +334,15 @@ def test_confirmed_choice_survives_reanalysis(client: TestClient) -> None:
     ] or [proposal.get("candidateId")]
     assert "cand-coi-tob" in option_ids
     _confirm(client, workspace_id, proposal["id"], "cand-coi-tob")
-    # The remaining tables the transcribed equations read, accepted
-    # through the slot-card path (Billy's flow accepted them all).
+    # The remaining tables, accepted through the slot-card path
+    # (Billy's flow accepted them all) — and the two text-stated
+    # readings confirmed as their own acts: a table acceptance no
+    # longer puts the death benefit or the NAR definition in effect
+    # as a side effect (Oct 28, 2026).
     _accept(client, workspace_id, "surrender", "cand-sur")
     _accept(client, workspace_id, "corridor", "cand-cor")
     _accept(client, workspace_id, "nar_factors", "cand-nar")
+    _confirm_equation_proposals(client, workspace_id)
 
     # In force everywhere before the re-run.
     panel = _panel(client, workspace_id)
@@ -336,6 +392,7 @@ def _accept_all_tables(client: TestClient, workspace_id: str) -> None:
     _accept(client, workspace_id, "surrender", "cand-sur")
     _accept(client, workspace_id, "corridor", "cand-cor")
     _accept(client, workspace_id, "nar_factors", "cand-nar")
+    _confirm_equation_proposals(client, workspace_id)
 
 
 def test_both_coi_slices_union_and_each_scenario_computes(client: TestClient) -> None:
@@ -404,6 +461,7 @@ def test_conflicting_slice_refuses_then_the_users_choice_governs(
     _accept(client, workspace_id, "surrender", "cand-sur")
     _accept(client, workspace_id, "corridor", "cand-cor")
     _accept(client, workspace_id, "nar_factors", "cand-nar")
+    _confirm_equation_proposals(client, workspace_id)
     before = _projection(client, workspace_id, "Tobacco")["rows"][0]["coiCharge"]
     assert before > 0
 

@@ -712,7 +712,7 @@ def transcribe_tables_as_approved(
     """
 
     before_ids = {str(r.get("id")) for r in records(artifact)}
-    outcome = materialize_legacy_equations(artifact, at=at)
+    outcome = materialize_legacy_equations(artifact, at=at, transcribe_only=True)
     result = outcome["artifact"]
     transcribed: List[Dict[str, Any]] = []
     for record in records(result):
@@ -750,15 +750,33 @@ def materialize_legacy_equations(
     *,
     at: str,
     specimen: bool = False,
+    transcribe_only: bool = False,
 ) -> Dict[str, Any]:
     """Materialize pre-doctrine in-force state as equation artifacts.
 
     Returns {"artifact", "changed", "notes"}.  Never touches a mechanic
     that already has any equation record — what a human (or a harvest)
     already said stands.
+
+    Two modes, kept apart on purpose (Oct 28, 2026):
+
+    - Migration (the default): a ONE-TIME conversion of genuinely
+      pre-doctrine state.  Once an artifact carries
+      ``equationsMigratedAt`` it is never migrated again — an artifact
+      produced by analysis is stamped at birth, so tables that arrive
+      later through acceptance can never re-arm this derivation.
+    - Transcription (``transcribe_only=True``): what a table
+      ACCEPTANCE puts in force — only the accepted tables' own
+      arithmetic, each body built from the rows and their stated
+      unit (coi_charge, surrender_charge, policy_fees, premium_load).
+      The death benefit and the NAR definition are never transcribed:
+      their formulas come from the documents' text, and they take
+      effect only when a person confirms the harvested reading.
     """
 
     result = deepcopy(artifact or {})
+    if not transcribe_only and result.get("equationsMigratedAt"):
+        return {"artifact": result, "changed": False, "notes": []}
     notes: List[str] = []
     usable = result.get("usable") or {}
     kind = "specimen" if specimen else "pre_doctrine_migration"
@@ -841,25 +859,35 @@ def materialize_legacy_equations(
                     f"COI charge: no equation transcription for rate unit {unit!r}; "
                     "left missing for an actuary to author."
                 )
-        add(
-            "nar_definition",
-            nar_body(nar_definition if nar_definition in {"factor_adjusted", "unadjusted"} else "factor_adjusted"),
-            migration_note(
-                f"the net amount at risk definition in force ({nar_definition}); "
-                "the filed factor applies from the NAR factor table when one is in force."
-            ),
-            table_source_type=dominant_source_type(nar_rows),
-        )
-        add(
-            "death_benefit",
-            death_benefit_body(),
-            migration_note(
-                "the death benefit in force — the greater of the face amount "
-                "and the corridor percentage times the account value."
-            ),
-            table_source_type=dominant_source_type(corridor_rows),
-        )
-    else:
+        if not transcribe_only:
+            # Migration only — never on a table acceptance.  The
+            # death benefit and the NAR definition are stated in the
+            # documents' TEXT, not transcribed from any table's rows;
+            # when this migration still carried them into the
+            # acceptance path, accepting the NAR factor table
+            # silently put the legacy factor-adjusted reading in
+            # effect, unchosen (Oct 28, 2026).  In a doctrine-era
+            # workspace they take effect only when a person confirms
+            # the harvested reading (or an actuary authors one).
+            add(
+                "nar_definition",
+                nar_body(nar_definition if nar_definition in {"factor_adjusted", "unadjusted"} else "factor_adjusted"),
+                migration_note(
+                    f"the net amount at risk definition in force ({nar_definition}); "
+                    "the filed factor applies from the NAR factor table when one is in force."
+                ),
+                table_source_type=dominant_source_type(nar_rows),
+            )
+            add(
+                "death_benefit",
+                death_benefit_body(),
+                migration_note(
+                    "the death benefit in force — the greater of the face amount "
+                    "and the corridor percentage times the account value."
+                ),
+                table_source_type=dominant_source_type(corridor_rows),
+            )
+    elif not transcribe_only:
         if nar_rows:
             add(
                 "nar_definition",
@@ -909,7 +937,7 @@ def materialize_legacy_equations(
             ),
         )
 
-    if notes:
+    if notes and not transcribe_only:
         add(
             "crediting",
             crediting_body(),

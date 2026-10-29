@@ -2973,6 +2973,14 @@ def api_workspace_analyze(
     mechanics_artifact = _workspace_equations.materialize_legacy_equations(
         mechanics_artifact, at=_correction_now(), specimen=True
     )["artifact"]
+    # An artifact produced by analysis is born under the doctrine:
+    # stamp the migration marker so the load-time migration never
+    # re-derives approvals for it later.  Tables that arrive through
+    # acceptance transcribe their own equations at accept time; the
+    # death benefit and the NAR definition take effect only through
+    # a person's confirmation (Oct 28, 2026).
+    if not mechanics_artifact.get("equationsMigratedAt"):
+        mechanics_artifact["equationsMigratedAt"] = _correction_now()
     mechanics_artifact["workspaceId"] = workspace_id
     mechanics_artifact["objectKey"] = _commit_mechanics_artifact(
         workspace_id, mechanics_artifact

@@ -200,15 +200,23 @@ def test_record_view_with_unstructurable_body_has_no_math() -> None:
 
 def test_plan_makes_every_clean_slice_eligible() -> None:
     plan = plan_bulk_approval(_extracted_artifact(), [])
-    eligible_ids = {item["candidateId"] for item in plan["eligible"]}
+    eligible_ids = {
+        item["candidateId"] for item in plan["eligible"] if item.get("candidateId")
+    }
     assert eligible_ids == {
         "cand-coi-tob", "cand-coi-nt", "cand-sur", "cand-cor", "cand-nar",
     }
+    # The two text-stated readings ride the same batch as their own
+    # equation items (Oct 28, 2026): approved as equations in the
+    # batch, never transcribed from the tables they read.
+    assert {
+        item["mechanic"] for item in plan["eligible"] if item["kind"] == "equation"
+    } == {"death_benefit", "nar_definition"}
     assert plan["excluded"] == []
     summary = bulk_summary(plan)
-    assert summary["eligibleCount"] == 5
+    assert summary["eligibleCount"] == 7
     assert summary["tableCount"] == 5
-    assert summary["equationCount"] == 0
+    assert summary["equationCount"] == 2
 
 
 def test_plan_excludes_competing_readings_by_name() -> None:
@@ -273,8 +281,8 @@ def test_apply_approves_the_clean_set_and_tags_the_batch() -> None:
     outcome = apply_bulk_approval(
         artifact, [], workspace_id="ws-test", who="workspace_user", at=AT
     )
-    assert len(outcome["applied"]) == 5
-    assert len(outcome["changes"]) == 5
+    assert len(outcome["applied"]) == 7
+    assert len(outcome["changes"]) == 7
     assert all(c["batchId"] == outcome["batchId"] for c in outcome["changes"])
     assert all(c["bulkApproval"] is True for c in outcome["changes"])
     updated = outcome["artifact"]
@@ -333,18 +341,18 @@ def test_unconfirmed_bulk_call_summarises_and_changes_nothing(
     workspace_id = _workspace_with_document()
     _analyze(client, workspace_id)
     before = _panel(client, workspace_id)
-    assert len(before["proposals"]) == 5
+    assert len(before["proposals"]) == 7
 
     resp = _approve_all(client, workspace_id)
     assert resp.status_code == 400, resp.text
     detail = resp.json()["detail"]
     assert detail["code"] == "confirmation_required"
-    assert detail["summary"]["eligibleCount"] == 5
+    assert detail["summary"]["eligibleCount"] == 7
     assert detail["summary"]["tableCount"] == 5
     assert "Approve all uncontested" in detail["confirmBack"]
 
     after = _panel(client, workspace_id)
-    assert len(after["proposals"]) == 5
+    assert len(after["proposals"]) == 7
     assert _history(client, workspace_id) == []
 
 
@@ -358,10 +366,10 @@ def test_confirmed_bulk_call_applies_and_records_the_batch(
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["applied"] is True
-    assert body["summary"]["appliedCount"] == 5
+    assert body["summary"]["appliedCount"] == 7
 
     changes = _history(client, workspace_id)
-    assert len(changes) == 5
+    assert len(changes) == 7
     assert all(c.get("batchId") == body["batchId"] for c in changes)
     assert all(c.get("bulkApproval") is True for c in changes)
 
@@ -461,7 +469,9 @@ def test_apply_delivers_the_promised_reading_not_the_transcribed_one() -> None:
     }]
     plan = plan_bulk_approval(artifact, slices)
     eligible_eq = [i for i in plan["eligible"] if i["kind"] == "equation"]
-    assert [i["mechanic"] for i in eligible_eq] == ["premium_load"]
+    assert {i["mechanic"] for i in eligible_eq} == {
+        "premium_load", "death_benefit", "nar_definition",
+    }
 
     outcome = apply_bulk_approval(
         artifact, slices, workspace_id="ws-test", who="workspace_user", at=AT

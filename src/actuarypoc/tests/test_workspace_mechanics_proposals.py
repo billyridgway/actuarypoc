@@ -732,3 +732,82 @@ def test_annotation_explains_a_dismissed_reading():
     reason = structure["steps"][0]["options"][0].get("confirmBlockedReason")
     assert reason is not None
     assert "dismissed" in reason
+
+
+# ---------------------------------------------------------------------------
+# Table acceptance never approves the text-stated readings (Oct 28, 2026)
+# ---------------------------------------------------------------------------
+# Billy's ws-05f7a2eb: accepting the corridor table put the death
+# benefit in effect, and accepting the NAR factor table put the
+# legacy FACTOR-ADJUSTED definition in effect — neither was chosen;
+# both formulas come from the documents' text, not from the tables'
+# rows.  Transcription (the acceptance path) covers only the tables'
+# own arithmetic; the legacy migration that converts pre-doctrine
+# state stays, but it is one-shot and never re-arms.
+
+def _usable_row(**fields) -> dict:
+    row = dict(fields)
+    row.setdefault("duration", 1)
+    row.setdefault("sex", None)
+    row.setdefault("risk_class", None)
+    row.setdefault("tobacco_status", None)
+    row["provenance"] = {"filename": "meridian-ul.pdf", "sourceType": "filed_pdf"}
+    return row
+
+
+def test_table_acceptance_transcribes_only_the_tables_own_arithmetic():
+    from actuarypoc.extract import workspace_equations as _ws_eq
+
+    artifact = _empty_artifact()
+    artifact["usable"]["coi"] = [
+        _usable_row(rate=0.19, rate_unit="per_1000_monthly")
+    ]
+    artifact["usable"]["corridor"] = [_usable_row(percentage=2.5)]
+    artifact["usable"]["nar_factors"] = [_usable_row(factor=1.05)]
+    outcome = _ws_eq.transcribe_tables_as_approved(artifact, who="eddy", at="t")
+    transcribed = {r["mechanic"] for r in outcome["transcribed"]}
+    assert transcribed == {"coi_charge"}
+    recorded = {r["mechanic"] for r in _ws_eq.records(outcome["artifact"])}
+    assert "death_benefit" not in recorded
+    assert "nar_definition" not in recorded
+
+
+def test_accepting_corridor_or_nar_factors_alone_approves_no_equation():
+    from actuarypoc.extract import workspace_equations as _ws_eq
+
+    for mechanic, row in (
+        ("corridor", _usable_row(percentage=2.5)),
+        ("nar_factors", _usable_row(factor=1.05)),
+    ):
+        artifact = _empty_artifact()
+        artifact["usable"][mechanic] = [row]
+        outcome = _ws_eq.transcribe_tables_as_approved(artifact, who="eddy", at="t")
+        assert outcome["transcribed"] == []
+        assert _ws_eq.records(outcome["artifact"]) == []
+
+
+def test_legacy_migration_is_one_shot_and_never_rearms():
+    from actuarypoc.extract import workspace_equations as _ws_eq
+
+    artifact = _empty_artifact()
+    artifact["usable"]["corridor"] = [_usable_row(percentage=2.5)]
+    first = _ws_eq.materialize_legacy_equations(artifact, at="t1")
+    assert first["changed"] is True
+    assert first["artifact"].get("equationsMigratedAt") == "t1"
+    # A table arriving later (through acceptance, whose artifact is
+    # already stamped) must not re-derive approvals on the next load.
+    first["artifact"]["usable"]["nar_factors"] = [_usable_row(factor=1.05)]
+    second = _ws_eq.materialize_legacy_equations(first["artifact"], at="t2")
+    assert second["changed"] is False
+    assert _ws_eq.in_force(second["artifact"], "nar_definition") is None
+
+
+def test_stamped_artifact_is_never_rederived():
+    from actuarypoc.extract import workspace_equations as _ws_eq
+
+    artifact = _empty_artifact()
+    artifact["equationsMigratedAt"] = "t0"
+    artifact["usable"]["corridor"] = [_usable_row(percentage=2.5)]
+    outcome = _ws_eq.materialize_legacy_equations(artifact, at="t1")
+    assert outcome["changed"] is False
+    assert _ws_eq.records(outcome["artifact"]) == []
