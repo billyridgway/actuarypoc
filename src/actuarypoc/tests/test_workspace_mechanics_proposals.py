@@ -791,6 +791,145 @@ def test_bulk_plan_includes_the_filed_nar_definition():
 
 
 # ---------------------------------------------------------------------------
+# The unified table+equation act (Oct 29, 2026)
+# ---------------------------------------------------------------------------
+# Billy approves tables without seeing the formula they carry: the
+# transcription equation appeared in the step only AFTER he
+# confirmed.  A transcription mechanic's slice card now shows the
+# typeset equation BEFORE confirmation — computed by running the
+# acceptance itself on a copy, so the previewed body is the body
+# acceptance installs — and one confirm covers both.  Tables that
+# carry no transcription (NAR factor, corridor) show no equation.
+
+def _coi_candidate(candidate_id: str, tobacco=None, rate: float = 0.19) -> dict:
+    return _candidate("coi", candidate_id, [
+        {"duration": d, "attained_age": None, "sex": None, "risk_class": None,
+         "tobacco_status": tobacco, "rate": rate, "rate_unit": "per_1000_monthly",
+         "provenance": {"filename": "meridian-ul.pdf", "page": 4, "sourceType": "filed_pdf",
+                        "reviewStatus": "review_required"}}
+        for d in range(1, 31)
+    ], page=4, heading="Monthly Cost of Insurance Rates")
+
+
+def _table_proposal(artifact: dict, mechanic: str) -> dict:
+    found = proposals.generate_proposals(artifact, [])
+    matches = [
+        p for p in found
+        if p["kind"] == "filed_table_choice" and p.get("mechanic") == mechanic
+    ]
+    assert len(matches) == 1
+    return matches[0]
+
+
+def test_coi_table_proposal_previews_the_transcription_it_installs():
+    from actuarypoc.extract import workspace_equations as _ws_eq
+
+    artifact = _empty_artifact()
+    artifact["candidates"]["coi"].append(_coi_candidate("cand-coi-1"))
+    proposal = _table_proposal(artifact, "coi")
+    option = proposal["options"][0]
+    previews = option.get("equationPreviews") or []
+    assert len(previews) == 1
+    preview = previews[0]
+    assert preview["mechanic"] == "coi_charge"
+    assert preview["state"] == "will_put_in_effect"
+    assert preview["math"] is not None
+    assert "beginning of each month" in (preview["timingNote"] or "")
+    assert "puts the COI charge equation in effect" in option["confirmBack"]
+
+    outcome = proposals.apply_proposal(
+        artifact, proposal, workspace_id="ws-preview", who="eddy",
+        at="2026-10-29T00:00:00Z", option_candidate_id="cand-coi-1",
+    )
+    installed = _ws_eq.in_force(outcome["artifact"], "coi_charge")
+    assert installed is not None
+    # The previewed body is the installed body, exactly.
+    assert installed["body"] == preview["body"]
+    assert installed.get("timing") == "beginning"
+
+
+def test_second_coi_slice_shows_the_equation_as_already_in_effect():
+    artifact = _empty_artifact()
+    artifact["candidates"]["coi"].append(_coi_candidate("cand-coi-1"))
+    proposal = _table_proposal(artifact, "coi")
+    outcome = proposals.apply_proposal(
+        artifact, proposal, workspace_id="ws-preview", who="eddy",
+        at="2026-10-29T00:00:00Z", option_candidate_id="cand-coi-1",
+    )
+    artifact = outcome["artifact"]
+    artifact["candidates"]["coi"].append(
+        _coi_candidate("cand-coi-2", tobacco="Tobacco", rate=0.21)
+    )
+    option = _table_proposal(artifact, "coi")["options"][0]
+    previews = option.get("equationPreviews") or []
+    assert [(p["mechanic"], p["state"]) for p in previews] == [
+        ("coi_charge", "already_in_effect")
+    ]
+    assert "already in effect" in option["confirmBack"]
+
+
+def test_nar_factor_table_proposal_carries_no_equation_preview():
+    artifact = _empty_artifact()
+    artifact["candidates"]["nar_factors"].append(_candidate("nar_factors", "cand-nar-1", [
+        {"duration": None, "sex": None, "factor": 1.05,
+         "provenance": {"filename": "meridian-ul.pdf", "page": 6, "sourceType": "filed_pdf",
+                        "reviewStatus": "review_required"}},
+    ], page=6, heading="Net Amount at Risk Factor"))
+    option = _table_proposal(artifact, "nar_factors")["options"][0]
+    assert not option.get("equationPreviews")
+    assert not option.get("equationNote")
+    assert "equation in effect" not in option["confirmBack"]
+
+
+def test_fees_table_proposal_never_promises_the_harvested_reading():
+    # A pending harvested policy_fees reading stands in the step:
+    # accepting the fees table must not preview a transcription as
+    # if it would substitute for that reading (the Oct 27 ordering
+    # doctrine).  The card says the reading is decided in the step;
+    # the premium_load transcription — which has no record and IS
+    # what this acceptance installs — is still previewed honestly.
+    from actuarypoc.extract import workspace_equations as _ws_eq
+
+    artifact = _empty_artifact()
+    added = _ws_eq.add_harvest_candidates(artifact, [{
+        "mechanic": "policy_fees", "body": _ws_eq.policy_fees_body(),
+        "timing": None,
+        "statement": "An Administrative Charge is deducted monthly.",
+        "filename": "memo.pdf", "page": 2,
+    }], at="2026-10-29T00:00:00Z")
+    artifact = added["artifact"]
+    artifact["candidates"]["fees"].append(_candidate("fees", "cand-fees-1", [
+        {"component": "policy_fee", "duration": None, "premium_mode": None,
+         "amount": 240.0, "fee_unit": "annual_fixed",
+         "provenance": {"filename": "meridian-ul.pdf", "page": 7, "sourceType": "filed_pdf",
+                        "reviewStatus": "review_required"}},
+    ], page=7, heading="Policy and Administrative Fees"))
+    option = _table_proposal(artifact, "fees")["options"][0]
+    previews = {
+        p["mechanic"]: p["state"] for p in option.get("equationPreviews") or []
+    }
+    assert previews.get("policy_fees") is None
+    assert previews.get("premium_load") == "will_put_in_effect"
+    note = option.get("equationNote") or ""
+    assert "Policy and admin fees" in note
+    assert "decided by its own reading" in note
+
+
+def test_bulk_summary_names_the_equation_a_table_item_carries():
+    artifact = _empty_artifact()
+    artifact["candidates"]["coi"].append(_coi_candidate("cand-coi-1"))
+    artifact["candidates"]["nar_factors"].append(_candidate("nar_factors", "cand-nar-1", [
+        {"duration": None, "sex": None, "factor": 1.05,
+         "provenance": {"filename": "meridian-ul.pdf", "page": 6, "sourceType": "filed_pdf",
+                        "reviewStatus": "review_required"}},
+    ], page=6, heading="Net Amount at Risk Factor"))
+    plan = proposals.plan_bulk_approval(artifact, [])
+    labels = {item["mechanic"]: item["label"] for item in plan["eligible"]}
+    assert labels["coi"].endswith("and its equation")
+    assert "equation" not in labels["nar_factors"]
+
+
+# ---------------------------------------------------------------------------
 # Table acceptance never approves the text-stated readings (Oct 28, 2026)
 # ---------------------------------------------------------------------------
 # Billy's ws-05f7a2eb: accepting the corridor table put the death

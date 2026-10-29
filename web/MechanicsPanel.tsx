@@ -134,6 +134,18 @@ interface CorrectionVariant {
   equationMechanic?: string;
 }
 
+interface EquationPreview {
+  mechanic: string;
+  label: string;
+  /** will_put_in_effect: confirming this slice installs this
+   *  transcription; already_in_effect: an earlier slice's acceptance
+   *  already installed it — this act adds coverage only. */
+  state: "will_put_in_effect" | "already_in_effect";
+  rendering?: string | null;
+  math?: MathNode | null;
+  timingNote?: string | null;
+}
+
 interface ProposalOption {
   candidateId: string;
   filename?: string | null;
@@ -146,6 +158,16 @@ interface ProposalOption {
   selectors?: Record<string, any[]>;
   inForce?: boolean;
   confirmBack: string;
+  /** The unified table+equation act (Oct 29, 2026): for a
+   *  transcription mechanic, the equation(s) this slice's acceptance
+   *  carries — previewed before confirmation, typeset, exactly the
+   *  body acceptance installs.  Absent for tables that carry no
+   *  equation (NAR factor, corridor) and for conflict choices. */
+  equationPreviews?: EquationPreview[] | null;
+  /** Plain statement when one of this table's equations is decided
+   *  by its own reading instead — the card never promises a
+   *  substitution acceptance will not perform. */
+  equationNote?: string | null;
   evidence?: {
     filename?: string | null;
     page?: number | null;
@@ -801,6 +823,23 @@ export const ProposalCard: React.FC<{
               {option.confirmBack ? (
                 <p className="muted">{option.confirmBack}</p>
               ) : null}
+              {(option.equationPreviews ?? []).map((preview) => (
+                <div key={preview.mechanic} className="proposal-equation">
+                  <p className="muted">
+                    {preview.state === "will_put_in_effect"
+                      ? `${preview.label} — the equation this table carries; confirming puts it in effect:`
+                      : `${preview.label} — the equation this table carries, already in effect:`}
+                  </p>
+                  <EquationDisplay
+                    math={preview.math}
+                    rendering={preview.rendering}
+                    timingNote={preview.timingNote}
+                  />
+                </div>
+              ))}
+              {option.equationNote ? (
+                <p className="muted">{option.equationNote}</p>
+              ) : null}
               <button
                 type="button"
                 className="button"
@@ -809,7 +848,11 @@ export const ProposalCard: React.FC<{
               >
                 {options.length > 1 && option.inForce
                   ? "Confirm — keep this version in force"
-                  : "Confirm and apply"}
+                  : (option.equationPreviews ?? []).some(
+                        (p) => p.state === "will_put_in_effect",
+                      )
+                    ? "Accept this table and its equation"
+                    : "Confirm and apply"}
               </button>
             </div>
           );

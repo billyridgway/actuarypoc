@@ -164,6 +164,106 @@ def _proposal_id(kind: str, payload: Dict[str, Any]) -> str:
 # Proposal generation — filed table candidates
 # ---------------------------------------------------------------------------
 
+#: The equation mechanics whose equations a table's acceptance can
+#: carry — the table's own transcription, nothing else.  Accepting a
+#: table puts its transcription in effect only when the mechanic
+#: carries no equation record yet (transcribe_tables_as_approved
+#: leaves recorded mechanics alone).  The NAR factor and corridor
+#: tables carry NO equation: their mechanics' formulas come from the
+#: documents' text and are chosen as readings, never transcribed
+#: (the Oct 28–29 severance — this map is where it is enforced for
+#: previews).
+_TABLE_EQUATION_MECHANICS: Dict[str, List[str]] = {
+    "coi": ["coi_charge"],
+    "surrender": ["surrender_charge"],
+    "fees": ["policy_fees", "premium_load"],
+    "nar_factors": [],
+    "corridor": [],
+}
+
+
+def _equation_preview_entry(record: Dict[str, Any], state: str) -> Dict[str, Any]:
+    mechanic = str(record.get("mechanic") or "")
+    body = record.get("body")
+    timing = record.get("timing")
+    return {
+        "mechanic": mechanic,
+        "label": _eq.MECHANIC_LABELS.get(mechanic, mechanic),
+        "state": state,  # "will_put_in_effect" | "already_in_effect"
+        "body": body,
+        "rendering": (
+            _eq.render_with_timing(body, timing)
+            if mechanic == "coi_charge" and timing
+            else _eq.render_equation(body, mechanic)
+        ),
+        "math": _eq.render_math_tree(body, mechanic) if body is not None else None,
+        "timingNote": _eq.timing_sentence(timing),
+    }
+
+
+def _equation_previews_for_acceptance(
+    artifact: Dict[str, Any], mechanic: str, candidate_id: str
+) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """What confirming THIS table candidate does to the equations.
+
+    Computed by running the acceptance itself — candidate acceptance
+    + transcription — on a deep copy, so the previewed body is the
+    body acceptance installs, by construction, not by a parallel
+    builder that could drift.  Returns (previews, note): a preview
+    per equation this acceptance would put in effect, plus one per
+    transcription of this table already in effect; the note states
+    plainly when one of this table's equations is instead decided by
+    its own reading (a harvested or actuary record stands, and table
+    acceptance never displaces it).
+    """
+
+    eq_mechanics = _TABLE_EQUATION_MECHANICS.get(mechanic) or []
+    if not eq_mechanics:
+        return [], None
+    before_ids = {str(r.get("id")) for r in _ws_equations.records(artifact)}
+    try:
+        simulated = accept_filed_mechanic(
+            deepcopy(artifact), mechanic,
+            candidate_id=candidate_id, reviewed_by="preview", resolve_conflict=False,
+        )
+        simulated = _ws_equations.transcribe_tables_as_approved(
+            simulated, who="preview", at=""
+        )["artifact"]
+    except ValueError:
+        # A candidate the acceptance itself would refuse (a gapped
+        # schedule, a failed validation) gets no preview — the
+        # confirm attempt surfaces the refusal, as it did before
+        # previews existed.  A preview must never take the panel down.
+        return [], None
+    previews: List[Dict[str, Any]] = []
+    covered = set()
+    for record in _ws_equations.records(simulated):
+        if str(record.get("id")) in before_ids:
+            continue
+        previews.append(_equation_preview_entry(record, "will_put_in_effect"))
+        covered.add(str(record.get("mechanic") or ""))
+    notes: List[str] = []
+    for eq_mechanic in eq_mechanics:
+        if eq_mechanic in covered:
+            continue
+        label = _eq.MECHANIC_LABELS.get(eq_mechanic, eq_mechanic)
+        current = _ws_equations.in_force(artifact, eq_mechanic)
+        if current is not None and (current.get("source") or {}).get("tableSourceType"):
+            previews.append(_equation_preview_entry(current, "already_in_effect"))
+        elif current is not None:
+            notes.append(
+                f"The {label} equation in effect in this step reads this "
+                "table — accepting adds this version's rows to the table "
+                "in force."
+            )
+        elif _ws_equations.records_for(artifact, eq_mechanic):
+            notes.append(
+                f"The {label} equation is decided by its own reading in "
+                "this step — accepting this table adds the data it reads "
+                "and puts no equation in effect."
+            )
+    return previews, " ".join(notes) or None
+
 
 def _filed_table_proposals(artifact: Dict[str, Any]) -> List[Dict[str, Any]]:
     """One proposal per PENDING filed candidate — slices, not versions.
@@ -263,7 +363,21 @@ def _filed_table_proposals(artifact: Dict[str, Any]) -> List[Dict[str, Any]]:
                 })
                 differing_total += len(conf)
             if not conflicts:
-                option["confirmBack"] = (
+                # The unified act (Billy, Oct 29, 2026): for a
+                # transcription mechanic the card shows, BEFORE
+                # confirmation, the equation this acceptance puts in
+                # effect — computed by simulating the acceptance with
+                # the very builders it runs — and the confirm-back
+                # says so.  No equation may arrive as an unannounced
+                # after-effect of accepting data.
+                previews, equation_note = _equation_previews_for_acceptance(
+                    artifact, str(mechanic), candidate_id
+                )
+                if previews:
+                    option["equationPreviews"] = previews
+                if equation_note:
+                    option["equationNote"] = equation_note
+                confirm_back = (
                     f"{slot['label']}: {_was_clause(was['description'])}; now the filed table"
                     f" of {candidate.get('rowCount')} rows"
                     + (
@@ -275,6 +389,25 @@ def _filed_table_proposals(artifact: Dict[str, Any]) -> List[Dict[str, Any]]:
                     + ", accepted on your confirmation. It adds its coverage to"
                     " the table in force — versions already accepted stay in force."
                 )
+                will = [p for p in previews if p["state"] == "will_put_in_effect"]
+                already = [p for p in previews if p["state"] == "already_in_effect"]
+                if will:
+                    names = " and ".join(p["label"] for p in will)
+                    noun = "equation" if len(will) == 1 else "equations"
+                    confirm_back += (
+                        f" Confirming also puts the {names} {noun} in "
+                        f"effect — the {noun} this table carries, shown "
+                        "on this card."
+                    )
+                if already:
+                    names = " and ".join(p["label"] for p in already)
+                    noun = "equation" if len(already) == 1 else "equations"
+                    verb = "is" if len(already) == 1 else "are"
+                    confirm_back += (
+                        f" The {names} {noun} this table carries {verb} "
+                        "already in effect, shown on this card."
+                    )
+                option["confirmBack"] = confirm_back
                 proposals.append({
                     "id": _proposal_id(PROPOSAL_KIND_FILED_TABLE_CHOICE, {
                         "slot": slot["id"], "candidateId": candidate_id,
@@ -1229,7 +1362,20 @@ def plan_bulk_approval(
                     str(options[0]["candidateId"]) if options
                     else str(proposal.get("candidateId") or "")
                 )
-                eligible.append(_bulk_item(proposal, "filed_table", candidate_id))
+                item = _bulk_item(proposal, "filed_table", candidate_id)
+                chosen = next(
+                    (o for o in options if str(o.get("candidateId") or "") == candidate_id),
+                    options[0] if options else None,
+                )
+                if chosen and any(
+                    p.get("state") == "will_put_in_effect"
+                    for p in chosen.get("equationPreviews") or []
+                ):
+                    # The bulk summary names what the act does: for a
+                    # transcription mechanic the item is the table AND
+                    # the equation it carries, never the table alone.
+                    item["label"] = f"{item['label']} and its equation"
+                eligible.append(item)
         elif kind == PROPOSAL_KIND_EQUATION:
             mechanic = str(proposal.get("equationMechanic"))
             label = _eq.MECHANIC_LABELS.get(mechanic, mechanic)

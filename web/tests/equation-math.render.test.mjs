@@ -438,6 +438,102 @@ check("one-slice table proposal: summary and direct confirm, no radio", () => {
   ]);
   expectAbsent(html, ['type="radio"']);
 });
+// --- The unified table+equation act (Oct 29, 2026) ----------------
+// A transcription mechanic's slice card shows the equation the
+// acceptance carries — typeset, BEFORE confirmation — and the one
+// button names both halves of the act.  A later slice shows the
+// equation as already in effect and its button goes back to plain
+// coverage wording.  A table that carries no equation (the NAR
+// factor table) shows no equation block and no unified wording.
+const coiPreview = (state) => ({
+  mechanic: "coi_charge",
+  label: "COI charge",
+  state,
+  rendering: live.coi_charge.rendering,
+  math: live.coi_charge.math,
+  timingNote: "The COI charge is deducted at the beginning of each month, before interest is credited.",
+});
+check("coi slice card: typeset equation preview + unified confirm, pre-acceptance", () => {
+  const option = sliceOption({
+    confirmBack:
+      "COI schedule: nothing was in force before; now the filed table of 121 rows from ICC18 S18PRUL.pdf, p. 6, accepted on your confirmation. It adds its coverage to the table in force — versions already accepted stay in force. Confirming also puts the COI charge equation in effect — the equation this table carries, shown on this card.",
+    equationPreviews: [coiPreview("will_put_in_effect")],
+  });
+  const html = renderProposalCard({
+    id: "prop-4",
+    kind: "filed_table_choice",
+    slot: "coi",
+    mechanic: "coi",
+    label: "Accept the filed COI schedule table from ICC18 S18PRUL.pdf (p. 6)",
+    confirmBack: option.confirmBack,
+    candidateId: "cand-1",
+    options: [option],
+    optionDiffs: [],
+    evidence: option.evidence,
+  });
+  expectTokens(html, [
+    "Accept this table and its equation",
+    "the equation this table carries; confirming puts it in effect",
+    "equation-math",
+    "puts the COI charge equation in effect",
+  ]);
+  expectAbsent(html, ["Confirm and apply", 'type="radio"']);
+});
+check("later coi slice card: equation shown as already in effect, plain confirm", () => {
+  const option = sliceOption({
+    candidateId: "cand-2",
+    filename: "ICC18 S18PRUL Nicotine.pdf",
+    equationPreviews: [coiPreview("already_in_effect")],
+  });
+  const html = renderProposalCard({
+    id: "prop-5",
+    kind: "filed_table_choice",
+    slot: "coi",
+    mechanic: "coi",
+    label: "Accept the filed COI schedule table from ICC18 S18PRUL Nicotine.pdf (p. 4)",
+    confirmBack: option.confirmBack,
+    candidateId: "cand-2",
+    options: [option],
+    optionDiffs: [],
+    evidence: option.evidence,
+  });
+  expectTokens(html, [
+    "the equation this table carries, already in effect",
+    "Confirm and apply",
+  ]);
+  expectAbsent(html, ["Accept this table and its equation"]);
+});
+check("nar factor slice card: no equation block, no unified wording", () => {
+  const option = sliceOption({
+    candidateId: "cand-3",
+    filename: "ICC18 S18PRUL Nicotine.pdf",
+    page: 2,
+    rowCount: 1,
+    coverageText: "1 row",
+    selectors: {},
+    confirmBack:
+      "Net amount at risk (NAR) factor: nothing was in force before; now the filed table of 1 rows from ICC18 S18PRUL Nicotine.pdf, p. 2, accepted on your confirmation. It adds its coverage to the table in force — versions already accepted stay in force.",
+    evidence: { filename: "ICC18 S18PRUL Nicotine.pdf", page: 2, snippet: "Net Amount at Risk Factor" },
+  });
+  const html = renderProposalCard({
+    id: "prop-6",
+    kind: "filed_table_choice",
+    slot: "nar",
+    mechanic: "nar_factors",
+    label: "Accept the filed net amount at risk (nar) factor table from ICC18 S18PRUL Nicotine.pdf (p. 2)",
+    confirmBack: option.confirmBack,
+    candidateId: "cand-3",
+    options: [option],
+    optionDiffs: [],
+    evidence: option.evidence,
+  });
+  expectTokens(html, ["Confirm and apply", "Dismiss"]);
+  expectAbsent(html, [
+    "equation-math",
+    "Accept this table and its equation",
+    "the equation this table carries",
+  ]);
+});
 check("conflict proposal: each version has its own confirm, no radio", () => {
   const incumbent = sliceOption({
     candidateId: "cand-0",
