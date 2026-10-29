@@ -795,11 +795,14 @@ def test_bulk_plan_includes_the_filed_nar_definition():
 # ---------------------------------------------------------------------------
 # Billy approves tables without seeing the formula they carry: the
 # transcription equation appeared in the step only AFTER he
-# confirmed.  A transcription mechanic's slice card now shows the
-# typeset equation BEFORE confirmation — computed by running the
-# acceptance itself on a copy, so the previewed body is the body
-# acceptance installs — and one confirm covers both.  Tables that
-# carry no transcription (NAR factor, corridor) show no equation.
+# confirmed.  The unified act (Oct 29, 2026) previewed it on every
+# slice card; the step-level treatment (same day, later) renders it
+# ONCE at step level instead — Billy's run-detail PDF showed the
+# fees equation repeated on all four slice cards.  Slice cards keep
+# their per-slice facts, a confirm that names the act, and a boolean
+# for which wording applies; the typeset equation + note live on the
+# step (annotate_structure_table_equations).  Tables that carry no
+# transcription (NAR factor, corridor) show no equation anywhere.
 
 def _coi_candidate(candidate_id: str, tobacco=None, rate: float = 0.19) -> dict:
     return _candidate("coi", candidate_id, [
@@ -821,6 +824,26 @@ def _table_proposal(artifact: dict, mechanic: str) -> dict:
     return matches[0]
 
 
+def _composed_step(artifact: dict, slices: list, step_id: str):
+    """The panel route's composition: structure + proposals + the
+    step-level equation annotation, in the server's order."""
+    from actuarypoc.extract import workspace_structure as _structure
+
+    view = _structure.build_structure(artifact, slices)
+    found = proposals.generate_proposals(artifact, slices)
+    proposals.annotate_structure_table_equations(view, found, artifact)
+    step = next(s for s in view["steps"] if s["id"] == step_id)
+    return step, found
+
+
+def _step_entries(step: dict) -> list:
+    return [
+        entry
+        for block in step.get("tableEquations") or []
+        for entry in block["entries"]
+    ]
+
+
 def test_coi_table_proposal_previews_the_transcription_it_installs():
     from actuarypoc.extract import workspace_equations as _ws_eq
 
@@ -828,14 +851,24 @@ def test_coi_table_proposal_previews_the_transcription_it_installs():
     artifact["candidates"]["coi"].append(_coi_candidate("cand-coi-1"))
     proposal = _table_proposal(artifact, "coi")
     option = proposal["options"][0]
-    previews = option.get("equationPreviews") or []
-    assert len(previews) == 1
-    preview = previews[0]
+    # The card itself carries no equation any more — only the act's
+    # wording and the boolean that selects it.
+    assert not option.get("equationPreviews")
+    assert not option.get("equationNote")
+    assert option.get("putsEquationInEffect") is True
+    assert "puts the COI charge equation in effect" in option["confirmBack"]
+    assert "shown in this step" in option["confirmBack"]
+
+    # The step carries the preview — the same simulation the card
+    # used to run, so the previewed body is still the installed body.
+    step, _found = _composed_step(artifact, [], "coi")
+    entries = _step_entries(step)
+    assert len(entries) == 1
+    preview = entries[0]
     assert preview["mechanic"] == "coi_charge"
     assert preview["state"] == "will_put_in_effect"
     assert preview["math"] is not None
     assert "beginning of each month" in (preview["timingNote"] or "")
-    assert "puts the COI charge equation in effect" in option["confirmBack"]
 
     outcome = proposals.apply_proposal(
         artifact, proposal, workspace_id="ws-preview", who="eddy",
@@ -861,11 +894,15 @@ def test_second_coi_slice_shows_the_equation_as_already_in_effect():
         _coi_candidate("cand-coi-2", tobacco="Tobacco", rate=0.21)
     )
     option = _table_proposal(artifact, "coi")["options"][0]
-    previews = option.get("equationPreviews") or []
-    assert [(p["mechanic"], p["state"]) for p in previews] == [
+    # A later slice adds coverage only: its card never claims to put
+    # the equation in effect again; the step shows it as in effect.
+    assert not option.get("equationPreviews")
+    assert option.get("putsEquationInEffect") is False
+    assert "already in effect" in option["confirmBack"]
+    step, _found = _composed_step(artifact, [], "coi")
+    assert [(e["mechanic"], e["state"]) for e in _step_entries(step)] == [
         ("coi_charge", "already_in_effect")
     ]
-    assert "already in effect" in option["confirmBack"]
 
 
 def test_nar_factor_table_proposal_carries_no_equation_preview():
@@ -878,16 +915,153 @@ def test_nar_factor_table_proposal_carries_no_equation_preview():
     option = _table_proposal(artifact, "nar_factors")["options"][0]
     assert not option.get("equationPreviews")
     assert not option.get("equationNote")
+    assert not option.get("putsEquationInEffect")
     assert "equation in effect" not in option["confirmBack"]
+    step, _found = _composed_step(artifact, [], "nar")
+    assert not step.get("tableEquations")
 
 
-def test_fees_table_proposal_never_promises_the_harvested_reading():
-    # A pending harvested policy_fees reading stands in the step:
-    # accepting the fees table must not preview a transcription as
-    # if it would substitute for that reading (the Oct 27 ordering
-    # doctrine).  The card says the reading is decided in the step;
-    # the premium_load transcription — which has no record and IS
-    # what this acceptance installs — is still previewed honestly.
+# ---------------------------------------------------------------------------
+# The dual-source merge (Oct 29, 2026): policy_fees reaches the same
+# body by two routes — the memo's prose statement (harvest) and the
+# transcription of the filed fee schedule.  Canonically EQUAL bodies
+# are ONE reading with two citations: one item, one approval act
+# through either door, both sources in the change history.  DIFFERENT
+# bodies stay a named choice — the table door never settles a reading
+# it does not state (the Oct 27 ordering doctrine, preserved).
+
+ADMIN_SLICE_TEXT = (
+    "Administrative Charge An Administrative Charge is deducted at the "
+    "beginning of each policy month until the Insured's Attained Age 121."
+)
+PREMIUM_SLICE_TEXT = (
+    "Premium Expense Charge A Premium Expense Charge is applied to each "
+    "premium. The Premium Expense Charge is currently set at 10% for new "
+    "issues."
+)
+_FEES_ROW = {
+    "component": "policy_fee", "duration": None, "premium_mode": None,
+    "amount": 240.0, "fee_unit": "annual_fixed",
+    "provenance": {"filename": "meridian-ul.pdf", "page": 7,
+                   "sourceType": "filed_pdf",
+                   "reviewStatus": "review_required"},
+}
+
+
+def _fees_candidate(candidate_id: str = "cand-fees-1", *, page: int = 7) -> dict:
+    return _candidate("fees", candidate_id, [dict(_FEES_ROW)], page=page,
+                      heading="Policy and Administrative Fees")
+
+
+def _fees_slices() -> list:
+    return [_slice(ADMIN_SLICE_TEXT, page=2, filename="memo.pdf")]
+
+
+def test_fees_dual_source_reading_merges_into_one_item():
+    artifact = _empty_artifact()
+    artifact["candidates"]["fees"].append(_fees_candidate())
+    slices = _fees_slices()
+    found = proposals.generate_proposals(artifact, slices)
+    eq_props = [
+        p for p in found
+        if p["kind"] == "equation" and p.get("equationMechanic") == "policy_fees"
+    ]
+    assert len(eq_props) == 1
+    merged = eq_props[0]
+    # Both citations ride on the ONE item: the prose evidence on the
+    # proposal, the filed-table sources alongside it.
+    assert merged["evidence"]["filename"] == "memo.pdf"
+    info = merged.get("alsoFiledAsTable") or {}
+    assert info.get("tableMechanic") == "fees"
+    assert any(s["filename"] == "meridian-ul.pdf" for s in info.get("sources") or [])
+    table_props = [p for p in found if p.get("mechanic") == "fees"]
+    assert (table_props[0].get("mergedEquation") or {}).get("mechanic") == "policy_fees"
+    # No slice card repeats the equation.
+    for p in found:
+        for option in p.get("options") or []:
+            assert not option.get("equationPreviews")
+            assert not option.get("equationNote")
+    step, _found = _composed_step(artifact, slices, "fees")
+    # The merged reading renders as the step's option, both citations
+    # stamped on it; the step block previews only premium_load's
+    # transcription — the one equation with no prose door here.
+    merged_options = [o for o in step["options"] if o.get("alsoFiledAsTable")]
+    assert len(merged_options) == 1
+    assert [e["mechanic"] for e in _step_entries(step)] == ["premium_load"]
+
+
+def test_merged_fees_equation_settles_via_the_reading_door():
+    from actuarypoc.extract import workspace_equations as _ws_eq
+
+    artifact = _empty_artifact()
+    artifact["candidates"]["fees"].append(_fees_candidate())
+    slices = _fees_slices()
+    found = proposals.generate_proposals(artifact, slices)
+    eq_prop = next(
+        p for p in found
+        if p["kind"] == "equation" and p.get("equationMechanic") == "policy_fees"
+    )
+    outcome = proposals.apply_proposal(
+        artifact, eq_prop, workspace_id="ws-merge", who="eddy",
+        at="2026-10-29T00:00:00Z",
+    )
+    in_force = _ws_eq.in_force(outcome["artifact"], "policy_fees")
+    assert in_force is not None
+    assert in_force["body"] == _ws_eq.policy_fees_body()
+    change = outcome["change"]
+    assert change["mergedSources"]["equation"]["filename"] == "memo.pdf"
+    assert any(
+        s["filename"] == "meridian-ul.pdf"
+        for s in change["mergedSources"]["table"]["sources"]
+    )
+    # The other door resolves to the same state: no lingering
+    # equation item for policy_fees, and the slice's confirm-back no
+    # longer names it (the acceptance still carries premium_load's
+    # transcription here — it has no prose reading in this fixture).
+    found_after = proposals.generate_proposals(outcome["artifact"], slices)
+    assert not [
+        p for p in found_after
+        if p["kind"] == "equation" and p.get("equationMechanic") == "policy_fees"
+    ]
+    option_after = [
+        p for p in found_after if p.get("mechanic") == "fees"
+    ][0]["options"][0]
+    assert "Policy and admin fees equation" not in option_after["confirmBack"]
+    assert "Premium load" in option_after["confirmBack"]
+
+
+def test_merged_fees_equation_settles_via_the_table_door():
+    from actuarypoc.extract import workspace_equations as _ws_eq
+
+    artifact = _empty_artifact()
+    artifact["candidates"]["fees"].append(_fees_candidate())
+    slices = _fees_slices()
+    found = proposals.generate_proposals(artifact, slices)
+    table_prop = next(p for p in found if p.get("mechanic") == "fees")
+    outcome = proposals.apply_proposal(
+        artifact, table_prop, workspace_id="ws-merge", who="eddy",
+        at="2026-10-29T00:00:00Z", option_candidate_id="cand-fees-1",
+    )
+    in_force = _ws_eq.in_force(outcome["artifact"], "policy_fees")
+    assert in_force is not None
+    assert in_force["body"] == _ws_eq.policy_fees_body()
+    change = outcome["change"]
+    assert change["mergedSources"]["table"]["filename"] == "meridian-ul.pdf"
+    assert change["mergedSources"]["equation"]["filename"] == "memo.pdf"
+    assert "also settles the Policy and admin fees equation" in change["summary"]
+    # The reading door resolves too: nothing pending for policy_fees.
+    found_after = proposals.generate_proposals(outcome["artifact"], slices)
+    assert not [
+        p for p in found_after
+        if p["kind"] == "equation" and p.get("equationMechanic") == "policy_fees"
+    ]
+
+
+def test_merged_fees_pending_record_settles_via_the_table_door():
+    # The record-first shape: a harvested policy_fees RECORD already
+    # stands pending when the slice is accepted.  The acceptance
+    # settles THAT record — approved in place, never duplicated by a
+    # transcription beside it.
     from actuarypoc.extract import workspace_equations as _ws_eq
 
     artifact = _empty_artifact()
@@ -898,21 +1072,132 @@ def test_fees_table_proposal_never_promises_the_harvested_reading():
         "filename": "memo.pdf", "page": 2,
     }], at="2026-10-29T00:00:00Z")
     artifact = added["artifact"]
-    artifact["candidates"]["fees"].append(_candidate("fees", "cand-fees-1", [
-        {"component": "policy_fee", "duration": None, "premium_mode": None,
-         "amount": 240.0, "fee_unit": "annual_fixed",
-         "provenance": {"filename": "meridian-ul.pdf", "page": 7, "sourceType": "filed_pdf",
-                        "reviewStatus": "review_required"}},
-    ], page=7, heading="Policy and Administrative Fees"))
-    option = _table_proposal(artifact, "fees")["options"][0]
-    previews = {
-        p["mechanic"]: p["state"] for p in option.get("equationPreviews") or []
-    }
-    assert previews.get("policy_fees") is None
-    assert previews.get("premium_load") == "will_put_in_effect"
-    note = option.get("equationNote") or ""
-    assert "Policy and admin fees" in note
-    assert "decided by its own reading" in note
+    artifact["candidates"]["fees"].append(_fees_candidate())
+    before = _ws_eq.records_for(artifact, "policy_fees")
+    assert len(before) == 1 and before[0]["state"] == "pending"
+    proposal = _table_proposal(artifact, "fees")
+    outcome = proposals.apply_proposal(
+        artifact, proposal, workspace_id="ws-merge", who="eddy",
+        at="2026-10-29T00:00:00Z", option_candidate_id="cand-fees-1",
+    )
+    records = _ws_eq.records_for(outcome["artifact"], "policy_fees")
+    assert len(records) == 1
+    assert records[0]["id"] == before[0]["id"]
+    assert records[0]["state"] == "approved"
+    assert (records[0].get("source") or {}).get("settledByTableAcceptance") is True
+    assert _ws_eq.in_force(outcome["artifact"], "policy_fees") is not None
+    assert outcome["change"].get("mergedSources")
+
+
+def test_differing_fees_reading_is_a_choice_not_a_merge():
+    from actuarypoc.extract import workspace_equations as _ws_eq
+    from actuarypoc.extract import workspace_structure as _structure
+
+    artifact = _empty_artifact()
+    added = _ws_eq.add_harvest_candidates(artifact, [{
+        "mechanic": "policy_fees",
+        "body": {"mul": [{"qty": "account_value"}, {"const": 0.01}]},
+        "timing": None,
+        "statement": "Policy fees are 1% of the account value.",
+        "filename": "memo.pdf", "page": 2,
+    }], at="2026-10-29T00:00:00Z")
+    artifact = added["artifact"]
+    artifact["candidates"]["fees"].append(_fees_candidate())
+    slices = _fees_slices()
+    found = proposals.generate_proposals(artifact, slices)
+    # No merge anywhere: the bodies differ, so no door claims the other.
+    assert not any(p.get("alsoFiledAsTable") for p in found)
+    assert not any(p.get("mergedEquation") for p in found)
+    view = _structure.build_structure(artifact, slices)
+    proposals.annotate_structure_table_equations(view, found, artifact)
+    step = next(s for s in view["steps"] if s["id"] == "fees")
+    assert step["state"] == "choice"
+    # The step states plainly that the fees equation is decided by
+    # its own reading — the cross-disclosure, once, at step level.
+    notes = " ".join(
+        block.get("note") or "" for block in step.get("tableEquations") or []
+    )
+    assert "Policy and admin fees" in notes
+    assert "decided by its own reading" in notes
+    # Accepting the table does NOT settle the different reading.
+    table_prop = next(p for p in found if p.get("mechanic") == "fees")
+    outcome = proposals.apply_proposal(
+        artifact, table_prop, workspace_id="ws-choice", who="eddy",
+        at="2026-10-29T00:00:00Z", option_candidate_id="cand-fees-1",
+    )
+    assert _ws_eq.in_force(outcome["artifact"], "policy_fees") is None
+    records = _ws_eq.records_for(outcome["artifact"], "policy_fees")
+    assert len(records) == 1 and records[0]["state"] == "pending"
+
+
+def test_step_equation_composed_once_with_multiple_pending_slices():
+    artifact = _empty_artifact()
+    artifact["candidates"]["coi"].append(_coi_candidate("cand-coi-1"))
+    artifact["candidates"]["coi"].append(
+        _coi_candidate("cand-coi-2", tobacco="Tobacco", rate=0.21)
+    )
+    artifact["candidates"]["fees"].append(_fees_candidate("cand-fees-1"))
+    artifact["candidates"]["fees"].append(_fees_candidate("cand-fees-2", page=8))
+    slices = _fees_slices()
+    found = proposals.generate_proposals(artifact, slices)
+    # Two pending slices per table, and still: no slice option
+    # anywhere carries an equation or a note.
+    for p in found:
+        for option in p.get("options") or []:
+            assert not option.get("equationPreviews")
+            assert not option.get("equationNote")
+    step_coi, _ = _composed_step(artifact, slices, "coi")
+    assert [
+        (e["mechanic"], e["state"]) for e in _step_entries(step_coi)
+    ] == [("coi_charge", "will_put_in_effect")]
+    step_fees, _ = _composed_step(artifact, slices, "fees")
+    # policy_fees is merged into the step's reading item; only the
+    # premium-load transcription is previewed, once.
+    assert [e["mechanic"] for e in _step_entries(step_fees)] == ["premium_load"]
+
+
+def test_bulk_counts_the_merged_fees_equation_once():
+    from actuarypoc.extract import workspace_equations as _ws_eq
+
+    artifact = _empty_artifact()
+    artifact["candidates"]["fees"].append(_fees_candidate())
+    artifact["candidates"]["coi"].append(_coi_candidate("cand-coi-1"))
+    slices = _fees_slices() + [
+        _slice(PREMIUM_SLICE_TEXT, page=2, filename="memo.pdf")
+    ]
+    plan = proposals.plan_bulk_approval(artifact, slices)
+    fees_eq_items = [
+        i for i in plan["eligible"]
+        if i["kind"] == "equation" and i["mechanic"] == "policy_fees"
+    ]
+    assert len(fees_eq_items) == 1  # the merged item, counted once
+    fees_table_items = [
+        i for i in plan["eligible"]
+        if i["kind"] == "filed_table" and i["mechanic"] == "fees"
+    ]
+    assert len(fees_table_items) == 1
+    # The equation is named by its own item (and premium_load by
+    # its) — the fees table item does not claim an equation again.
+    assert not fees_table_items[0]["label"].endswith("and its equation")
+    coi_items = [
+        i for i in plan["eligible"]
+        if i["kind"] == "filed_table" and i["mechanic"] == "coi"
+    ]
+    assert coi_items[0]["label"].endswith("and its equation")
+    outcome = proposals.apply_bulk_approval(
+        artifact, slices, workspace_id="ws-bulk", who="eddy",
+        at="2026-10-29T00:00:00Z",
+    )
+    assert len(outcome["applied"]) == len(plan["eligible"])
+    assert not outcome["skipped"]
+    in_force = _ws_eq.in_force(outcome["artifact"], "policy_fees")
+    assert in_force is not None
+    assert in_force["body"] == _ws_eq.policy_fees_body()
+    premium = _ws_eq.in_force(outcome["artifact"], "premium_load")
+    assert premium is not None
+    # The harvested reading the summary promised — never the
+    # transcription — is what the batch put in effect.
+    assert premium["body"] == {"mul": [{"qty": "premium_due"}, {"const": 0.1}]}
 
 
 def test_bulk_summary_names_the_equation_a_table_item_carries():

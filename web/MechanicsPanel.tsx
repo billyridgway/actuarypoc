@@ -134,16 +134,37 @@ interface CorrectionVariant {
   equationMechanic?: string;
 }
 
+/** One equation a step's filed table carries (step-level treatment,
+ *  Oct 29, 2026): composed once per step by the server, rendered in
+ *  the step's equation area — never repeated on slice cards. */
 interface EquationPreview {
   mechanic: string;
   label: string;
-  /** will_put_in_effect: confirming this slice installs this
-   *  transcription; already_in_effect: an earlier slice's acceptance
-   *  already installed it — this act adds coverage only. */
+  /** will_put_in_effect: confirming a slice in this step installs
+   *  this transcription; already_in_effect: an earlier slice's
+   *  acceptance already installed it — later acts add coverage only. */
   state: "will_put_in_effect" | "already_in_effect";
   rendering?: string | null;
   math?: MathNode | null;
   timingNote?: string | null;
+}
+
+/** The table half of a merged dual-source reading: this equation is
+ *  also filed as the named table, whose transcription states the
+ *  identical body — one reading, two citations, either door settles
+ *  it (Oct 29, 2026). */
+interface MergedTableInfo {
+  tableMechanic: string;
+  slotLabel: string;
+  sources?: SourceView[];
+}
+
+/** A step's table-carried equation block: the transcription previews
+ *  plus the step's cross-disclosure note, rendered once. */
+interface StepTableEquationsView {
+  tableMechanic: string;
+  entries: EquationPreview[];
+  note?: string | null;
 }
 
 interface ProposalOption {
@@ -158,16 +179,14 @@ interface ProposalOption {
   selectors?: Record<string, any[]>;
   inForce?: boolean;
   confirmBack: string;
-  /** The unified table+equation act (Oct 29, 2026): for a
-   *  transcription mechanic, the equation(s) this slice's acceptance
-   *  carries — previewed before confirmation, typeset, exactly the
-   *  body acceptance installs.  Absent for tables that carry no
-   *  equation (NAR factor, corridor) and for conflict choices. */
-  equationPreviews?: EquationPreview[] | null;
-  /** Plain statement when one of this table's equations is decided
-   *  by its own reading instead — the card never promises a
-   *  substitution acceptance will not perform. */
-  equationNote?: string | null;
+  /** The unified table+equation act (Oct 29, 2026): true when
+   *  confirming this slice also puts the equation its table carries
+   *  in effect (the button names both halves of the act).  The
+   *  equation itself renders once, at step level — never on the
+   *  card.  Absent/false for tables that carry no equation (NAR
+   *  factor, corridor), for conflict choices, and for later slices
+   *  whose equation is already in effect. */
+  putsEquationInEffect?: boolean;
   evidence?: {
     filename?: string | null;
     page?: number | null;
@@ -233,6 +252,12 @@ interface ProposalView {
    *  typeset form — the prose rendering then stands alone. */
   math?: MathNode | null;
   timingNote?: string | null;
+  /** Merged dual-source reading (equation proposals): the same body
+   *  is also filed as this table — the card shows both citations. */
+  alsoFiledAsTable?: MergedTableInfo | null;
+  /** Merged dual-source reading (filed-table proposals): accepting
+   *  a slice also settles this equation reading. */
+  mergedEquation?: { mechanic: string } | null;
   evidence?: {
     filename?: string | null;
     page?: number | null;
@@ -321,6 +346,10 @@ interface StructureReadingView {
   } | null;
   provenanceClass: string;
   provenanceLabel: string;
+  /** Merged dual-source reading: this reading is also filed as the
+   *  named table — the card carries both citations, and accepting a
+   *  slice of that table settles this same reading. */
+  alsoFiledAsTable?: MergedTableInfo | null;
   /** Set by the server when this reading cannot be confirmed (no
    *  proposal, no saved record): the card shows this reason where
    *  the Confirm button would be, instead of offering a press that
@@ -340,6 +369,9 @@ interface StructureStepView {
   stateLabel: string;
   options: StructureReadingView[];
   inEffect?: StructureReadingView | null;
+  /** The equation(s) this step's tables carry, composed once at
+   *  step level (transcription previews + cross-disclosure note). */
+  tableEquations?: StepTableEquationsView[];
   coverage: { state?: string | null; filename?: string | null; page?: number | null };
 }
 
@@ -567,6 +599,63 @@ const SlotRowsTable: React.FC<{ rows: Array<Record<string, any>> }> = ({ rows })
   );
 };
 
+/** The second citation of a merged dual-source reading (Oct 29,
+ *  2026): the same equation body is also filed as a table, so the
+ *  reading's one item names the table source too — and accepting a
+ *  slice of that table settles this same reading. */
+export const MergedTableCitation: React.FC<{ info: MergedTableInfo }> = ({
+  info,
+}) => {
+  const sources = (info.sources ?? [])
+    .map(
+      (source) =>
+        `${sourceName(source.filename)}${source.page != null ? `, p. ${source.page}` : ""}`,
+    )
+    .join("; ");
+  return (
+    <p className="muted">
+      Also filed as the {info.slotLabel} table{sources ? ` (${sources})` : ""} —
+      the same equation; accepting a slice of that table in this step settles
+      this reading too.
+    </p>
+  );
+};
+
+/** The step's table-carried equation, rendered ONCE (Oct 29, 2026):
+ *  the typeset transcription a slice acceptance in this step
+ *  carries, plus the step's cross-disclosure note.  Slice cards
+ *  never repeat it — they keep their per-slice facts and a confirm
+ *  whose wording references this equation. */
+export const StepTableEquations: React.FC<{ step: StructureStepView }> = ({
+  step,
+}) => {
+  const blocks = step.tableEquations ?? [];
+  if (blocks.length === 0) return null;
+  return (
+    <>
+      {blocks.map((block) => (
+        <div key={block.tableMechanic} className="step-table-equations">
+          {block.entries.map((entry) => (
+            <div key={entry.mechanic} className="proposal-equation">
+              <p className="muted">
+                {entry.state === "will_put_in_effect"
+                  ? `${entry.label} — the equation this step's table carries; confirming a slice in this step puts it in effect:`
+                  : `${entry.label} — the equation this step's table carries, already in effect:`}
+              </p>
+              <EquationDisplay
+                math={entry.math}
+                rendering={entry.rendering}
+                timingNote={entry.timingNote}
+              />
+            </div>
+          ))}
+          {block.note ? <p className="muted">{block.note}</p> : null}
+        </div>
+      ))}
+    </>
+  );
+};
+
 /** One reading of a step's equation, presented as an explicit
  *  option (product structure, Oct 28, 2026).  Choosing an option IS
  *  the approval act: with several readings, the radio selects and
@@ -670,6 +759,9 @@ export const StructureOptionCard: React.FC<{
           Evidence: none — this reading was carried over from the workspace's
           earlier state; no filed statement stands behind it.
         </p>
+      ) : null}
+      {option.alsoFiledAsTable ? (
+        <MergedTableCitation info={option.alsoFiledAsTable} />
       ) : null}
       {proposal && !isCurrent ? (
         <p className="muted">{proposal.confirmBack}</p>
@@ -796,6 +888,9 @@ export const ProposalCard: React.FC<{
           />
         </div>
       ) : null}
+      {proposal.kind === "equation" && proposal.alsoFiledAsTable ? (
+        <MergedTableCitation info={proposal.alsoFiledAsTable} />
+      ) : null}
       {!isChoice && proposal.evidence && (
         <p className="muted">
           Evidence: {sourceName(proposal.evidence.filename)}
@@ -823,23 +918,6 @@ export const ProposalCard: React.FC<{
               {option.confirmBack ? (
                 <p className="muted">{option.confirmBack}</p>
               ) : null}
-              {(option.equationPreviews ?? []).map((preview) => (
-                <div key={preview.mechanic} className="proposal-equation">
-                  <p className="muted">
-                    {preview.state === "will_put_in_effect"
-                      ? `${preview.label} — the equation this table carries; confirming puts it in effect:`
-                      : `${preview.label} — the equation this table carries, already in effect:`}
-                  </p>
-                  <EquationDisplay
-                    math={preview.math}
-                    rendering={preview.rendering}
-                    timingNote={preview.timingNote}
-                  />
-                </div>
-              ))}
-              {option.equationNote ? (
-                <p className="muted">{option.equationNote}</p>
-              ) : null}
               <button
                 type="button"
                 className="button"
@@ -848,9 +926,7 @@ export const ProposalCard: React.FC<{
               >
                 {options.length > 1 && option.inForce
                   ? "Confirm — keep this version in force"
-                  : (option.equationPreviews ?? []).some(
-                        (p) => p.state === "will_put_in_effect",
-                      )
+                  : option.putsEquationInEffect
                     ? "Accept this table and its equation"
                     : "Confirm and apply"}
               </button>
@@ -1746,6 +1822,7 @@ export const MechanicsPanel: React.FC<{
                   onDismiss={() => void postProposal(proposal.id, "dismiss")}
                 />
               ))}
+              <StepTableEquations step={step} />
               {(step.slots.length > 0 || tableProposalsForStep(step).length > 0) && (
                 <div className="structure-step-tables">
                   {step.slots.length > 0 && (

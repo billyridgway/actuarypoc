@@ -64,7 +64,7 @@ buildSync({
   outfile: panelBundlePath,
   logLevel: "silent",
 });
-const { StructureOptionCard, ProposalCard } = require(panelBundlePath);
+const { StructureOptionCard, ProposalCard, StepTableEquations } = require(panelBundlePath);
 const panelSource = readFileSync(join(webDir, "MechanicsPanel.tsx"), "utf8");
 const stylesSource = readFileSync(join(webDir, "styles.css"), "utf8");
 
@@ -438,13 +438,14 @@ check("one-slice table proposal: summary and direct confirm, no radio", () => {
   ]);
   expectAbsent(html, ['type="radio"']);
 });
-// --- The unified table+equation act (Oct 29, 2026) ----------------
-// A transcription mechanic's slice card shows the equation the
-// acceptance carries — typeset, BEFORE confirmation — and the one
-// button names both halves of the act.  A later slice shows the
-// equation as already in effect and its button goes back to plain
-// coverage wording.  A table that carries no equation (the NAR
-// factor table) shows no equation block and no unified wording.
+// --- The step-level treatment (Oct 29, 2026) ---------------------
+// A transcription mechanic's equation renders ONCE per step, in the
+// step's equation area (StepTableEquations) — never repeated inside
+// slice cards (Billy's run-detail PDF showed the fees equation on
+// all four slice cards).  A slice card keeps its per-slice facts and
+// one confirm: the first slice's button names both halves of the
+// act; a later slice's adds coverage only.  A table that carries no
+// equation (the NAR factor table) shows no equation anywhere.
 const coiPreview = (state) => ({
   mechanic: "coi_charge",
   label: "COI charge",
@@ -453,11 +454,11 @@ const coiPreview = (state) => ({
   math: live.coi_charge.math,
   timingNote: "The COI charge is deducted at the beginning of each month, before interest is credited.",
 });
-check("coi slice card: typeset equation preview + unified confirm, pre-acceptance", () => {
+check("coi slice card: unified confirm wording, no equation on the card", () => {
   const option = sliceOption({
+    putsEquationInEffect: true,
     confirmBack:
-      "COI schedule: nothing was in force before; now the filed table of 121 rows from ICC18 S18PRUL.pdf, p. 6, accepted on your confirmation. It adds its coverage to the table in force — versions already accepted stay in force. Confirming also puts the COI charge equation in effect — the equation this table carries, shown on this card.",
-    equationPreviews: [coiPreview("will_put_in_effect")],
+      "COI schedule: nothing was in force before; now the filed table of 121 rows from ICC18 S18PRUL.pdf, p. 6, accepted on your confirmation. It adds its coverage to the table in force — versions already accepted stay in force. Confirming also puts the COI charge equation in effect — the equation this table carries, shown in this step.",
   });
   const html = renderProposalCard({
     id: "prop-4",
@@ -473,17 +474,18 @@ check("coi slice card: typeset equation preview + unified confirm, pre-acceptanc
   });
   expectTokens(html, [
     "Accept this table and its equation",
-    "the equation this table carries; confirming puts it in effect",
-    "equation-math",
     "puts the COI charge equation in effect",
+    "shown in this step",
   ]);
-  expectAbsent(html, ["Confirm and apply", 'type="radio"']);
+  expectAbsent(html, ["equation-math", "Confirm and apply", 'type="radio"']);
 });
-check("later coi slice card: equation shown as already in effect, plain confirm", () => {
+check("later coi slice card: plain confirm, equation not repeated", () => {
   const option = sliceOption({
     candidateId: "cand-2",
     filename: "ICC18 S18PRUL Nicotine.pdf",
-    equationPreviews: [coiPreview("already_in_effect")],
+    putsEquationInEffect: false,
+    confirmBack:
+      "COI schedule: was nothing in force; now the filed table of 121 rows from ICC18 S18PRUL Nicotine.pdf, p. 4, accepted on your confirmation. It adds its coverage to the table in force — versions already accepted stay in force. The COI charge equation this table carries is already in effect.",
   });
   const html = renderProposalCard({
     id: "prop-5",
@@ -497,11 +499,136 @@ check("later coi slice card: equation shown as already in effect, plain confirm"
     optionDiffs: [],
     evidence: option.evidence,
   });
+  expectTokens(html, ["Confirm and apply", "already in effect"]);
+  expectAbsent(html, ["equation-math", "Accept this table and its equation"]);
+});
+check("step table equations: the coi equation renders once, at step level", () => {
+  const html = renderToString(
+    React.createElement(StepTableEquations, {
+      step: {
+        tableEquations: [
+          { tableMechanic: "coi", entries: [coiPreview("will_put_in_effect")], note: null },
+        ],
+      },
+    }),
+  );
   expectTokens(html, [
-    "the equation this table carries, already in effect",
-    "Confirm and apply",
+    "equation-math",
+    "confirming a slice in this step puts it in effect",
+    "beginning of each month",
   ]);
-  expectAbsent(html, ["Accept this table and its equation"]);
+  const occurrences = html.split("equation-math").length - 1;
+  if (occurrences !== 1) {
+    throw new Error(`expected the equation exactly once, saw ${occurrences}`);
+  }
+});
+check("fees step: slice cards carry no equation; the step block carries it once", () => {
+  const feesOption = (candidateId, page) =>
+    sliceOption({
+      candidateId,
+      filename: "ICC18 P18PRUL.pdf",
+      page,
+      rowCount: 3,
+      coverageText: "3 rows",
+      selectors: {},
+      putsEquationInEffect: true,
+      confirmBack:
+        "Policy fees: nothing was in force before; now the filed table, accepted on your confirmation. Confirming also puts the Premium load equation in effect — the equation this table carries, shown in this step.",
+      evidence: { filename: "ICC18 P18PRUL.pdf", page, snippet: "Administrative Charge" },
+    });
+  const cardHtml = ["cand-fees-1", "cand-fees-2"]
+    .map((candidateId, index) =>
+      renderProposalCard({
+        id: `prop-fees-${index}`,
+        kind: "filed_table_choice",
+        slot: "fees",
+        mechanic: "fees",
+        label: "Accept the filed policy fees table from ICC18 P18PRUL.pdf",
+        confirmBack: "Policy fees.",
+        candidateId,
+        options: [feesOption(candidateId, 6 + index)],
+        optionDiffs: [],
+        evidence: { filename: "ICC18 P18PRUL.pdf", page: 6 },
+      }),
+    )
+    .join("");
+  expectAbsent(cardHtml, ["equation-math", "row amount"]);
+  const blockHtml = renderToString(
+    React.createElement(StepTableEquations, {
+      step: {
+        tableEquations: [
+          {
+            tableMechanic: "fees",
+            entries: [
+              {
+                mechanic: "policy_fees",
+                label: "Policy and admin fees",
+                state: "will_put_in_effect",
+                rendering: live.policy_fees.rendering,
+                math: live.policy_fees.math,
+                timingNote: null,
+              },
+            ],
+            note: "The Premium load equation reads the percentage rows of this table; they are not part of the fees themselves.",
+          },
+        ],
+      },
+    }),
+  );
+  expectTokens(blockHtml, ["row amount", "Premium load equation reads the percentage rows"]);
+  const occurrences = blockHtml.split("equation-math").length - 1;
+  if (occurrences !== 1) {
+    throw new Error(`expected the fees equation exactly once, saw ${occurrences}`);
+  }
+});
+check("merged fees option card: one item, both citations", () => {
+  const html = renderOptionCard({
+    equationLabel: "Policy and admin fees",
+    option: {
+      key: "policy_fees-harvest",
+      mechanic: "policy_fees",
+      recordId: null,
+      origin: "harvest",
+      state: "pending",
+      rendering: live.policy_fees.rendering,
+      math: live.policy_fees.math,
+      timingNote: null,
+      evidence: {
+        filename: "ICC18 P18PRUL Promise UL Actuarial Memo V3.pdf",
+        page: 2,
+        snippet: "An Administrative Charge is deducted",
+      },
+      provenanceClass: "from_filing",
+      provenanceLabel: "From the filing",
+      alsoFiledAsTable: {
+        tableMechanic: "fees",
+        slotLabel: "Policy fees",
+        sources: [{ filename: "ICC18 P18PRUL.pdf", page: 6 }],
+      },
+    },
+    singleOption: true,
+  });
+  expectTokens(html, [
+    "ICC18 P18PRUL Promise UL Actuarial Memo V3.pdf",
+    "Also filed as the Policy fees table",
+    "ICC18 P18PRUL.pdf, p. 6",
+    "the same equation",
+    "Confirm — put this reading in effect",
+  ]);
+});
+check("step loop source: step block renders inside the step, cards carry no previews", () => {
+  if (!panelSource.includes("<StepTableEquations step={step} />")) {
+    throw new Error("the step loop does not render the step-level equation block");
+  }
+  if (
+    panelSource.indexOf("<StepTableEquations step={step} />") >
+    panelSource.indexOf("structure-step-tables")
+  ) {
+    throw new Error("the step equation block must render before the step's tables");
+  }
+  if (panelSource.includes("equationPreviews") || panelSource.includes("equationNote")) {
+    throw new Error("slice cards must not carry equation previews or notes any more");
+  }
 });
 check("nar factor slice card: no equation block, no unified wording", () => {
   const option = sliceOption({

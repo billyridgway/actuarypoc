@@ -123,6 +123,7 @@ from actuarypoc.extract.workspace_mechanics_corrections import (
 )
 from actuarypoc.extract.workspace_mechanics_proposals import (
     annotate_structure_confirmability as _annotate_structure_confirmability,
+    annotate_structure_table_equations as _annotate_structure_table_equations,
     apply_bulk_approval as _apply_bulk_approval,
     apply_proposal as _apply_proposal,
     bulk_summary as _bulk_summary,
@@ -3818,6 +3819,13 @@ def api_get_mechanics_panel(workspace_id: str) -> Dict[str, Any]:
     # be confirmed; the annotation names why on the reading itself,
     # so its card explains instead of offering a dead Confirm.
     _annotate_structure_confirmability(
+        panel["structure"], panel["proposals"], artifact
+    )
+    # Step-level treatment (Oct 29, 2026): the equation a step's
+    # tables carry is composed once, on the step — never repeated on
+    # every slice card — and a dual-source reading's option carries
+    # both citations (prose + filed table).
+    _annotate_structure_table_equations(
         panel["structure"], panel["proposals"], artifact
     )
     panel["equations"] = _workspace_equations.equations_view(artifact)

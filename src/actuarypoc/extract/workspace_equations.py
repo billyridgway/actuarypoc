@@ -705,10 +705,14 @@ def transcribe_tables_as_approved(
 
     Used when a filed (or synthetic) table is accepted through review:
     the accepting user is the approver and the source kind is the
-    document.  Mechanics that already carry any equation record are
+    document.  Mechanics that already carry an APPROVED equation are
     left alone — an existing approved equation already reads the table
     through its lookups, and a correction/actuary equation is never
-    displaced by a table acceptance.
+    displaced by a table acceptance.  One exception (Oct 29, 2026): a
+    PENDING document reading whose body is canonically identical to
+    the transcription is settled — approved in place — because the
+    two routes state one reading (see ``_settle_identical_pending``);
+    settled records are returned under ``"settled"``.
     """
 
     before_ids = {str(r.get("id")) for r in records(artifact)}
@@ -722,10 +726,21 @@ def transcribe_tables_as_approved(
         record["approval"] = {"by": who, "at": at}
         record["updatedAt"] = at
         transcribed.append(record)
-    if transcribed:
+    settled: List[Dict[str, Any]] = []
+    for record_id in outcome.get("settled") or []:
+        record = next(
+            (r for r in records(result) if str(r.get("id")) == record_id), None
+        )
+        if record is None:
+            continue
+        record["approval"] = {"by": who, "at": at}
+        record["updatedAt"] = at
+        record["source"]["settledByTableAcceptance"] = True
+        settled.append(record)
+    if transcribed or settled:
         for mechanic in _eq.MECHANICS:
             _refresh_conflicts(result, mechanic)
-    return {"artifact": result, "transcribed": transcribed}
+    return {"artifact": result, "transcribed": transcribed, "settled": settled}
 
 
 def _first_unit(rows: Sequence[Mapping[str, Any]], field: str) -> Tuple[Optional[str], bool]:
@@ -743,6 +758,48 @@ def _correction_params(artifact: Mapping[str, Any], mechanic: str, variant: str)
     if record.get("variant") == variant:
         return dict(record.get("params") or {})
     return {}
+
+
+def _canonical_body(body: Any) -> str:
+    return json.dumps(body or {}, sort_keys=True, default=str)
+
+
+def _settle_identical_pending(
+    result: Dict[str, Any],
+    mechanic: str,
+    body: Any,
+    *,
+    approver: str,
+    at: str,
+    settled_ids: List[str],
+) -> None:
+    """Approve, in place, a pending document reading whose body is
+    canonically identical to the transcription a table acceptance is
+    about to install.
+
+    The dual-source merge (Oct 29, 2026): a mechanic whose equation
+    reaches the same body by two routes — a harvested prose reading
+    and the transcription of the filed table it reads — is ONE
+    reading with two sources.  Settling it here (rather than skipping
+    the mechanic because a record exists, which would leave the
+    reading pending forever while its identical twin governs) makes
+    either approval door settle the one reading.  Bounded strictly:
+    pending records only, document-sourced records only, canonically
+    equal bodies only — a differing reading is a choice, never a
+    settle, and correction/actuary records are never touched."""
+    target = _canonical_body(body)
+    for record in records_for(result, mechanic):
+        if record.get("state") != "pending":
+            continue
+        if str((record.get("source") or {}).get("kind") or "") != "document":
+            continue
+        if _canonical_body(record.get("body")) != target:
+            continue
+        record["state"] = "approved"
+        record["approval"] = {"by": approver, "at": at}
+        record["updatedAt"] = at
+        settled_ids.append(str(record.get("id")))
+        return
 
 
 def materialize_legacy_equations(
@@ -776,8 +833,9 @@ def materialize_legacy_equations(
 
     result = deepcopy(artifact or {})
     if not transcribe_only and result.get("equationsMigratedAt"):
-        return {"artifact": result, "changed": False, "notes": []}
+        return {"artifact": result, "changed": False, "notes": [], "settled": []}
     notes: List[str] = []
+    settled_ids: List[str] = []
     usable = result.get("usable") or {}
     kind = "specimen" if specimen else "pre_doctrine_migration"
     approver = SPECIMEN_APPROVER if specimen else MIGRATION_APPROVER
@@ -803,6 +861,15 @@ def materialize_legacy_equations(
         table_source_type: Optional[str] = None,
     ) -> None:
         if records_for(result, mechanic):
+            if transcribe_only:
+                _settle_identical_pending(
+                    result,
+                    mechanic,
+                    body,
+                    approver=approver,
+                    at=at,
+                    settled_ids=settled_ids,
+                )
             return
         source: Dict[str, Any] = {"kind": kind, "statement": None, "note": note}
         if table_source_type:
@@ -947,10 +1014,10 @@ def materialize_legacy_equations(
             ),
         )
 
-    changed = bool(notes)
+    changed = bool(notes) or bool(settled_ids)
     if changed and not result.get("equationsMigratedAt"):
         result["equationsMigratedAt"] = at
-    return {"artifact": result, "changed": changed, "notes": notes}
+    return {"artifact": result, "changed": changed, "notes": notes, "settled": settled_ids}
 
 
 # ---------------------------------------------------------------------------
