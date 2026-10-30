@@ -1958,6 +1958,14 @@ details > summary {
     display: none !important;
   }
 
+  /* The "In words" prose stays on screen, behind its toggle; a
+     printout keeps the typeset math and the timing line only
+     (Oct 29, 2026 — the fees equation's prose rendering is the
+     longest in the product and filled printed pages). */
+  .equation-words-block {
+    display: none !important;
+  }
+
   .workbench__tabpanel[hidden] {
     display: none !important;
   }

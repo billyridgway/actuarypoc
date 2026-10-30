@@ -971,6 +971,39 @@ check("registry authoring saves drafts, never in force", () => {
   ]);
 });
 
+// --- Print: the "In words" prose stays off the page (Oct 29, 2026)
+// The typeset math and the timing line print; the prose rendering
+// (the fees equation's runs to a page) does not. Screen behavior is
+// pinned unchanged by the toggle checks above; here the print rule
+// itself is pinned to the @media print block, targeting the words
+// container only — never the math or timing classes.
+check("print suppresses the In words block, keeps math and timing", () => {
+  const printAt = stylesSource.indexOf("@media print");
+  if (printAt < 0) throw new Error("no @media print block in styles.css");
+  // Brace-match the print block so only its own rules are inspected
+  // (the plain .equation-math rules that follow it are screen CSS).
+  let depth = 0;
+  let end = -1;
+  for (let i = stylesSource.indexOf("{", printAt); i < stylesSource.length; i += 1) {
+    if (stylesSource[i] === "{") depth += 1;
+    else if (stylesSource[i] === "}") {
+      depth -= 1;
+      if (depth === 0) { end = i; break; }
+    }
+  }
+  if (end < 0) throw new Error("unbalanced @media print block");
+  const printBlock = stylesSource.slice(printAt, end + 1);
+  expectTokens(printBlock, [".equation-words-block", "display: none"]);
+  expectAbsent(printBlock, [".equation-math", ".equation-timing"]);
+  // Screen still renders the toggle and its prose when expanded.
+  const rec = live.premium_load;
+  const html = renderDisplay(rec.math, {
+    rendering: rec.rendering,
+    defaultWordsOpen: true,
+  });
+  expectTokens(html, ["equation-words-toggle", "In words:", "(or 0 if no row applies)"]);
+});
+
 rmSync(buildDir, { recursive: true, force: true });
 if (failures > 0) {
   console.log(`\n${failures} check(s) failed`);
