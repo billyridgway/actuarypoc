@@ -4452,6 +4452,30 @@ def _persist_equation_outcome(
     }
 
 
+def _persist_equation_draft(
+    workspace_id: str, mechanic: str, outcome: Dict[str, Any],
+    kind: str, who: str, at: str, summary: str,
+) -> Dict[str, Any]:
+    """Persist a drafted equation record WITHOUT touching the projection.
+
+    A draft is a pending reading: nothing that executes changed, so
+    the saved projection is not stale.  Same storage and change log
+    as an in-force outcome; only the stale marking differs.
+    """
+
+    updated = outcome["artifact"]
+    updated["objectKey"] = store_workspace_executable_mechanics(workspace_id, updated)
+    change = _equation_change(workspace_id, mechanic, kind, who, at, summary, outcome["record"])
+    append_workspace_mechanics_change(workspace_id, change)
+    return {
+        "record": _workspace_equations.record_view(outcome["record"]),
+        "equations": _workspace_equations.equations_view(updated),
+        "change": change,
+        "projectionStale": False,
+        "draft": True,
+    }
+
+
 @app.get("/api/workspaces/{workspace_id}/equations")
 def api_list_equations(workspace_id: str) -> Dict[str, Any]:
     """All equation artifacts with state, provenance, and conflicts.
@@ -4522,6 +4546,13 @@ def api_approve_equation(
 
     The unconfirmed response is the confirm-back: the equation's
     canonical rendering, which is exactly what will execute.
+
+    This route is the product-structure steps' confirm door for
+    readings that carry a saved record but no proposal
+    (MechanicsPanel's chooseOption posts here, Oct 29, 2026) — the
+    Equations registry no longer calls it.  Proposal confirms and
+    bulk-approve reach the same domain function through the
+    mechanics-panel routes.
     """
 
     if get_workspace(workspace_id) is None:
@@ -4584,11 +4615,16 @@ def api_reject_equation(
 def api_author_equation(
     workspace_id: str, mechanic: str, payload: EquationAuthorRequest
 ) -> Dict[str, Any]:
-    """Author or replace an equation in-product.
+    """Draft an equation in-product (the registry's authoring door).
 
     Unconfirmed: returns the canonical rendering as the confirm-back
-    and writes nothing.  Confirmed: the equation is validated, put in
-    force with actuary provenance, and supersedes the previous one.
+    and writes nothing.  Confirmed: the equation is validated and
+    saved as a PENDING record with actuary provenance — never put in
+    force from here (Oct 29, 2026).  The draft appears as a reading
+    option in the mechanic's product-structure step, and only
+    confirming it there puts it in force.  Corrections and confirmed
+    proposals still author straight into force through
+    ``author_equation`` — their door IS the structure surface.
     """
 
     if get_workspace(workspace_id) is None:
@@ -4613,16 +4649,18 @@ def api_author_equation(
     at = _correction_now()
     artifact = load_workspace_executable_mechanics(workspace_id) or {}
     try:
-        outcome = _workspace_equations.author_equation(
+        outcome = _workspace_equations.draft_equation(
             artifact, mechanic, payload.body,
-            who=who, at=at, timing=payload.timing, statement=payload.statement,
+            at=at, timing=payload.timing, statement=payload.statement,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     label = _equations.MECHANIC_LABELS[mechanic]
-    return _persist_equation_outcome(
-        workspace_id, mechanic, outcome, "equation_authored", who, at,
-        f"{label} equation entered by {who} and put in force: {outcome['record'].get('rendering')}",
+    return _persist_equation_draft(
+        workspace_id, mechanic, outcome, "equation_drafted", who, at,
+        f"{label} equation drafted by {who} and saved as a pending reading — "
+        f"not in force until approved in the product structure: "
+        f"{outcome['record'].get('rendering')}",
     )
 
 

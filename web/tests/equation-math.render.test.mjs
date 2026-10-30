@@ -66,6 +66,7 @@ buildSync({
 });
 const { StructureOptionCard, ProposalCard, StepTableEquations } = require(panelBundlePath);
 const panelSource = readFileSync(join(webDir, "MechanicsPanel.tsx"), "utf8");
+const registrySource = readFileSync(join(webDir, "EquationsPanel.tsx"), "utf8");
 const stylesSource = readFileSync(join(webDir, "styles.css"), "utf8");
 
 const live = JSON.parse(
@@ -930,6 +931,44 @@ check("results section: Projection ledger reconciled still renders", () => {
 });
 check("the frontend no longer consumes the definitions prose line", () => {
   expectAbsent(ledgerSource + logicSource + workspacePageSource, ["definitionsLine"]);
+});
+
+// --- Equations registry: read-only, one approval door (Oct 29, 2026)
+// The Equations section is the record, not a second door: it must
+// render every record state with provenance and approval stamps,
+// and it must contain NO control that puts an equation in force —
+// no approve call, no approve button, no put-in-force save. What
+// remains writable there is drafting (the editor saves a pending
+// record) and rejecting (curation; never an approval).
+check("registry renders the record: states, provenance, stamps", () => {
+  expectTokens(registrySource, [
+    "Waiting for approval",
+    "Stated, but not structured",
+    "In force",
+    "Earlier equations",
+    "provenanceLine",
+    "EquationDisplay",
+  ]);
+});
+check("registry has no approve door", () => {
+  expectAbsent(registrySource, [
+    "handleApprove",
+    "/approve`",
+    "Confirm approval — use this equation",
+    "\"Approve\"",
+    "Approving…",
+  ]);
+});
+check("registry authoring saves drafts, never in force", () => {
+  expectAbsent(registrySource, [
+    "Confirm — put this equation in force",
+    "saved and in force",
+  ]);
+  expectTokens(registrySource, [
+    "Save draft",
+    "product-structure steps above",
+    "never puts an equation in force",
+  ]);
 });
 
 rmSync(buildDir, { recursive: true, force: true });

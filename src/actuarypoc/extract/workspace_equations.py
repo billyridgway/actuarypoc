@@ -621,6 +621,53 @@ def author_equation(
     return {"artifact": result, "record": record}
 
 
+def draft_equation(
+    artifact: Dict[str, Any],
+    mechanic: str,
+    body: Dict[str, Any],
+    *,
+    at: str,
+    timing: Optional[str] = None,
+    statement: Optional[str] = None,
+    source_kind: str = "actuary",
+    extra_source: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Save an authored/edited equation as a PENDING draft record.
+
+    The registry-door counterpart of author_equation (Oct 29, 2026):
+    authoring in the Equations section saves a draft — a pending
+    reading with actuary provenance — and never puts anything in
+    force.  The draft surfaces as a reading option in the mechanic's
+    product-structure step, and only confirming it there (a saved
+    record approved through the structure surface) puts it in force.
+    Corrections and confirmed proposals keep using author_equation:
+    one in-force path, through the structure surface.  Validation is
+    identical to authoring — an invalid body raises ValueError
+    listing the defects and nothing is written.
+    """
+
+    preview = preview_equation(mechanic, body, timing)
+    if preview["errors"]:
+        raise ValueError("The equation is not valid: " + "; ".join(preview["errors"]))
+    result = deepcopy(artifact or {})
+    source: Dict[str, Any] = {"kind": source_kind, "statement": statement}
+    if extra_source:
+        source.update(extra_source)
+    record = new_record(
+        mechanic=mechanic,
+        body=body,
+        state="pending",
+        source=source,
+        at=at,
+        timing=timing if mechanic == "coi_charge" else None,
+        version=_next_version(result, mechanic),
+    )
+    result.setdefault("equations", []).append(record)
+    _refresh_conflicts(result, mechanic)
+    result["equations"] = records(result)
+    return {"artifact": result, "record": record}
+
+
 # ---------------------------------------------------------------------------
 # Pre-doctrine migration — one-time, persisted, change-logged.
 #
@@ -2625,6 +2672,7 @@ __all__ = [
     "SPECIMEN_APPROVER",
     "approve_equation",
     "author_equation",
+    "draft_equation",
     "banded_coi_body",
     "banded_surrender_body",
     "calculation_slices",

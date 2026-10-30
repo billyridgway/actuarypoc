@@ -529,9 +529,19 @@ def test_end_to_end_stated_equations_drive_the_projection(
     assert {"coi_charge", "nar_definition", "surrender_charge", "crediting"} <= applied
 
 
-def test_actuary_authored_edit_changes_output_by_the_stated_amount(
+def test_actuary_authored_draft_changes_output_only_after_step_approval(
     client: TestClient, store: FakeMinio
 ) -> None:
+    """Registry authoring saves a draft; only approval puts it in force.
+
+    Oct 29, 2026: the Equations section is a read-only registry — a
+    confirmed PUT saves a PENDING record with actuary provenance and
+    changes nothing that executes.  The projection moves by the
+    stated amount only after the draft is approved (here through
+    the approve route — the same call the product-structure step's
+    Confirm makes for a record-backed reading).
+    """
+
     workspace_id = _seed_workspace(store, _filed_coi_artifact())
     view = _harvest_and_get(client, workspace_id)
     surrender_pending = _pending(view, "surrender_charge")
@@ -556,14 +566,112 @@ def test_actuary_authored_edit_changes_output_by_the_stated_amount(
     unchanged = _projection(workspace_id)["rows"][0]
     assert unchanged["surrenderCharge"] == pytest.approx(baseline["surrenderCharge"])
 
+    # Confirmed PUT saves a draft: pending, actuary provenance, and
+    # the projection is NOT marked stale — nothing that runs changed.
     saved = client.put(
         f"/api/workspaces/{workspace_id}/equations/surrender_charge",
         json={"body": new_body, "confirmed": True, "who": "eddy"},
     )
     assert saved.status_code == 200, saved.text
-    assert saved.json()["record"]["source"]["kind"] == "actuary"
+    draft = saved.json()["record"]
+    assert draft["source"]["kind"] == "actuary"
+    assert draft["state"] == "pending"
+    assert saved.json()["projectionStale"] is False
+    # The harvested equation is still in force; the draft runs nothing.
+    view = client.get(f"/api/workspaces/{workspace_id}/equations").json()
+    assert view["mechanics"]["surrender_charge"]["inForce"]["id"] == surrender_pending["id"]
+    row = _projection(workspace_id)["rows"][0]
+    assert row["surrenderCharge"] == pytest.approx(baseline["surrenderCharge"])
+
+    # The step's door: approving the saved record puts it in force,
+    # and only then does the output move by the stated amount.
+    assert _approve(client, workspace_id, "surrender_charge", draft["id"]).status_code == 200
+    view = client.get(f"/api/workspaces/{workspace_id}/equations").json()
+    assert view["mechanics"]["surrender_charge"]["inForce"]["id"] == draft["id"]
     row = _projection(workspace_id)["rows"][0]
     assert row["surrenderCharge"] == pytest.approx(row["endingPolicyValue"] * 0.05, rel=1e-9)
+
+
+def test_authored_draft_is_a_step_option_and_confirms_there(
+    client: TestClient, store: FakeMinio
+) -> None:
+    """Author → pending → step option → confirm in the step → in force.
+
+    The registry change (Oct 29, 2026) stands or falls on this door:
+    an equation authored in the Equations section must surface as a
+    confirmable reading in its product-structure step — the only
+    approval door left.  The confirm below is the exact call the
+    step's card makes for a record-backed reading (MechanicsPanel's
+    chooseOption posts to the equations approve route when the
+    reading carries a recordId but no proposal).
+    """
+
+    workspace_id = _seed_workspace(store, _filed_coi_artifact())
+    view = client.get(f"/api/workspaces/{workspace_id}/equations").json()
+    migrated = view["mechanics"]["coi_charge"]["inForce"]
+    assert migrated is not None
+    baseline_charges = [r["coiCharge"] for r in _projection(workspace_id)["rows"]]
+    assert baseline_charges[0] > 0
+
+    # Author a distinct COI reading in the registry: half the filed
+    # rate, deducted at month end.
+    body = {
+        "mul": [
+            {"div": [{"qty": "nar"}, {"const": 1000}]},
+            {"lookup": {"table": "coi", "field": "rate"}},
+            {"const": 0.5},
+        ]
+    }
+    saved = client.put(
+        f"/api/workspaces/{workspace_id}/equations/coi_charge",
+        json={
+            "body": body,
+            "timing": "end",
+            "statement": "Authored in the workbench for this test.",
+            "confirmed": True,
+            "who": "eddy",
+        },
+    )
+    assert saved.status_code == 200, saved.text
+    draft = saved.json()["record"]
+    assert draft["state"] == "pending"
+    assert draft["source"]["kind"] == "actuary"
+
+    # Still the migration equation in force; the draft runs nothing.
+    view = client.get(f"/api/workspaces/{workspace_id}/equations").json()
+    assert view["mechanics"]["coi_charge"]["inForce"]["id"] == migrated["id"]
+    assert [r["coiCharge"] for r in _projection(workspace_id)["rows"]] == baseline_charges
+
+    # The draft is a reading option in the COI step, carrying its
+    # record id and no block on confirming it there.
+    panel = client.get(f"/api/workspaces/{workspace_id}/mechanics-panel").json()
+    step = next(
+        s for s in panel["structure"]["steps"] if s["equationMechanic"] == "coi_charge"
+    )
+    option = next((o for o in step["options"] if o.get("recordId") == draft["id"]), None)
+    assert option is not None, f"draft not offered as a step option: {step['options']}"
+    assert option["state"] == "pending"
+    assert option["provenanceClass"] == "workspace"
+    assert not option.get("confirmBlockedReason")
+
+    # Confirm in the step (the approve route, as the step calls it).
+    response = _approve(client, workspace_id, "coi_charge", draft["id"])
+    assert response.status_code == 200, response.text
+
+    view = client.get(f"/api/workspaces/{workspace_id}/equations").json()
+    in_force = view["mechanics"]["coi_charge"]["inForce"]
+    assert in_force["id"] == draft["id"]
+    assert in_force["approval"]["by"] == "eddy"
+    states = {r["id"]: r["state"] for r in view["mechanics"]["coi_charge"]["records"]}
+    assert states[migrated["id"]] == "superseded"
+
+    # And it executes: COI is charged, and the ledger cites the
+    # authored equation with Eddy's approval.
+    projection = _projection(workspace_id)
+    assert projection["rows"][0]["coiCharge"] > 0
+    component = _ledger_component(projection, "coi")
+    assert component["equation"]["mechanic"] == "coi_charge"
+    assert component["equation"]["approvedBy"] == "eddy"
 
 
 def test_actuary_put_rejects_invalid_equation(client: TestClient, store: FakeMinio) -> None:

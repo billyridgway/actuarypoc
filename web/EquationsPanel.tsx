@@ -2,11 +2,13 @@ import React from "react";
 
 import { EquationDisplay, type MathNode } from "./EquationMath";
 
-// Phase 7 (the equation doctrine): the equations pane is where the
-// calculations stated in a workspace's documents are approved, and
-// where the equation in force for each mechanic is shown with its
-// provenance. It speaks to Phase 7's real API (see
-// docs/phase-7-equations.md):
+// Phase 7 (the equation doctrine): the equations pane is the
+// REGISTRY of every equation record the workspace holds — the
+// equation in force for each mechanic with its provenance, pending
+// readings, and the record of what was rejected or superseded. It
+// is read-only with respect to force (Oct 29, 2026): approvals
+// happen ONLY in the product-structure steps, never here. It
+// speaks to Phase 7's real API (see docs/phase-7-equations.md):
 //   GET  /api/workspaces/{id}/equations
 //     -> { workspaceId, mechanics: { <mechanic>: { mechanic, label,
 //          inForce: <record|null>, records: [<record>], missing,
@@ -15,16 +17,21 @@ import { EquationDisplay, type MathNode } from "./EquationMath";
 //     rendering, source: { kind, filename, page, statement },
 //     sourceKindLabel, approval: { by, at }, conflict } with state in
 //     pending | approved | rejected | superseded | unmapped.
-//   POST /api/workspaces/{id}/equations/{mechanic}/approve
-//     { equationId, confirmed: true } — unconfirmed is a 400 whose
-//     detail carries the rendering as the confirm-back.
 //   POST /api/workspaces/{id}/equations/{mechanic}/reject { equationId }
+//     Curation only: a rejected record never runs. Rejecting is not
+//     an approval path, so it stays here.
 //   PUT  /api/workspaces/{id}/equations/{mechanic}
-//     { body, timing?, statement?, confirmed } — unconfirmed returns
-//     { preview: true, rendering } and writes nothing; an invalid
-//     body is a 400 with detail.errors naming each problem.
+//     { body, timing?, statement?, confirmed } — authoring saves a
+//     DRAFT: unconfirmed returns { preview: true, rendering } and
+//     writes nothing; confirmed saves a pending record with actuary
+//     provenance. A draft is never put in force from this pane — it
+//     appears as a reading option in the mechanic's product-
+//     structure step, and approving it there is what puts it in
+//     force. An invalid body is a 400 with detail.errors naming
+//     each problem.
 //   POST /api/workspaces/{id}/equations/harvest
 //     -> the full list view plus harvest: { createdCount, ... }.
+//     Harvesting proposes pending records; it never approves.
 // The pane never fabricates equation state: what it renders is what
 // the API returned, and a mechanic with no approved equation is shown
 // as missing — it does not calculate.
@@ -151,8 +158,8 @@ const humanizeMechanic = (mechanic: string): string =>
 // backend's transcription builders produce), so an actuary edits a
 // working equation instead of writing the formula language from a
 // blank page. Saving still goes through the API's validation and
-// preview/confirm discipline — a template is a draft, never in force
-// until confirmed here.
+// preview discipline — a template is a draft, and a draft is never
+// in force until approved in the product-structure steps.
 const BODY_TEMPLATES: Record<string, any> = {
   coi_charge: {
     mul: [
@@ -553,7 +560,6 @@ export const EquationsPanel: React.FC<{
   const [error, setError] = React.useState<string | null>(null);
   const [message, setMessage] = React.useState<string | null>(null);
   const [busyKey, setBusyKey] = React.useState<string | null>(null);
-  const [confirmingId, setConfirmingId] = React.useState<string | null>(null);
   // The authoring editor: which mechanic, the structured body as
   // editable JSON, the COI timing, the statement it comes from, and
   // the preview confirm-back the API returned for the current draft.
@@ -616,7 +622,6 @@ export const EquationsPanel: React.FC<{
     try {
       await run();
       setMessage(done);
-      setConfirmingId(null);
       closeEditor();
       await load();
       onMutated?.();
@@ -627,26 +632,10 @@ export const EquationsPanel: React.FC<{
     }
   };
 
-  const handleApprove = (eq: EquationRecord) => {
-    const key = `approve-${eq.mechanic}-${eq.id}`;
-    if (confirmingId !== key) {
-      setConfirmingId(key);
-      setError(null);
-      return;
-    }
-    void act(
-      key,
-      async () => {
-        await requestJson(`${base}/${encodeURIComponent(eq.mechanic)}/approve`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ equationId: eq.id, confirmed: true }),
-        });
-      },
-      `${labelOf(eq.mechanic)} equation approved and in force. The projection now calculates from it.`
-    );
-  };
-
+  // There is deliberately no approve handler in this pane: putting
+  // a reading in force happens only in the product-structure steps
+  // (Oct 29, 2026). Reject stays — it takes a record out of
+  // contention; it can never put anything in force.
   const handleReject = (eq: EquationRecord) => {
     void act(
       `reject-${eq.mechanic}-${eq.id}`,
@@ -677,7 +666,7 @@ export const EquationsPanel: React.FC<{
         onMutated?.();
         setMessage(
           created > 0
-            ? `Harvesting proposed ${created} new equation${created === 1 ? "" : "s"} from the documents — each is waiting below for approval. Nothing runs until it is approved.`
+            ? `Harvesting proposed ${created} new equation${created === 1 ? "" : "s"} from the documents — each is recorded below as pending. Nothing runs until it is approved in the product-structure steps.`
             : "Looked through the documents for stated calculations; no new ones were found."
         );
       } catch (err: any) {
@@ -796,7 +785,8 @@ export const EquationsPanel: React.FC<{
         const { errors } = await putAuthor(true);
         if (errors) throw new Error(errors.join("; "));
       },
-      `${labelOf(mechanic)} equation saved and in force, with your authorship recorded.`
+      `${labelOf(mechanic)} draft saved as a pending reading, with your authorship recorded. ` +
+        `It is not in force — approve it in the ${labelOf(mechanic)} step of the product structure to put it in force.`
     );
   };
 
@@ -804,8 +794,10 @@ export const EquationsPanel: React.FC<{
     <div className="equation-editor">
       <p className="muted">
         The equation is a structured formula — the form the projection executes. Edit the
-        draft, preview it to see exactly how it reads, then confirm to put it in force with
-        your authorship recorded. Nothing is saved before you confirm.
+        draft, preview it to see exactly how it reads, then save it as a pending reading
+        with your authorship recorded. Saving never puts anything in force: the draft
+        appears as an option in this mechanic's step in the product structure above, and
+        approving it there is what puts it in force. Nothing is saved before you save.
       </p>
       <label>
         Equation body (structured formula, JSON)
@@ -883,7 +875,7 @@ export const EquationsPanel: React.FC<{
           disabled={previewRendering === null || busyKey === `save-${mechanic}`}
           onClick={handleConfirmSave}
         >
-          {busyKey === `save-${mechanic}` ? "Saving…" : "Confirm — put this equation in force"}
+          {busyKey === `save-${mechanic}` ? "Saving…" : "Save draft"}
         </button>
         <button type="button" className="button button-secondary" onClick={closeEditor}>
           Cancel
@@ -910,9 +902,13 @@ export const EquationsPanel: React.FC<{
     <section className="card home-card equations-panel" id="equations-panel">
       <h2>Equations</h2>
       <p className="muted">
-        The calculations this product runs are the ones stated in its documents and approved
-        here, or written here by an actuary — nothing calculates from an unstated default.
-        Approvals are recorded with who approved them and where the statement came from.
+        This is the record of every equation the workspace holds — the one in force for
+        each mechanic, the readings still waiting, and what was rejected or replaced.
+        The calculations this product runs are the ones stated in its documents, or
+        written here by an actuary — nothing calculates from an unstated default.
+        Approvals happen in the product-structure steps above, not here; this section
+        never puts an equation in force. Equations written here are saved as drafts
+        and appear as readings in their step, where they can be approved.
       </p>
       {error && <p className="error">{error}</p>}
       {message && <p className="muted">{message}</p>}
@@ -957,8 +953,12 @@ export const EquationsPanel: React.FC<{
           {pendingRecords.length > 0 && (
             <div className="equation-group">
               <h3>Waiting for approval ({pendingRecords.length})</h3>
+              <p className="muted">
+                These readings are decided in the product-structure steps above — each
+                one is an option in its mechanic's step. This list is the record; it
+                carries no approve button.
+              </p>
               {pendingRecords.map((eq) => {
-                const key = `approve-${eq.mechanic}-${eq.id}`;
                 return (
                   <article key={eq.id} className="slot-card equation-card">
                     <h4>
@@ -989,22 +989,10 @@ export const EquationsPanel: React.FC<{
                       <div className="equation-actions">
                         <button
                           type="button"
-                          className="button"
-                          disabled={busyKey === key}
-                          onClick={() => handleApprove(eq)}
-                        >
-                          {busyKey === key
-                            ? "Approving…"
-                            : confirmingId === key
-                              ? "Confirm approval — use this equation"
-                              : "Approve"}
-                        </button>
-                        <button
-                          type="button"
                           className="button button-secondary"
                           onClick={() => openEditor(eq.mechanic, eq)}
                         >
-                          Edit first
+                          Edit as a draft
                         </button>
                         <button
                           type="button"
@@ -1106,7 +1094,7 @@ export const EquationsPanel: React.FC<{
                           className="button button-secondary"
                           onClick={() => openEditor(view.mechanic, eq)}
                         >
-                          Edit equation
+                          Edit as a draft
                         </button>
                       </div>
                     )}

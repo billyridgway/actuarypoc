@@ -204,14 +204,22 @@ consumes exactly this.
   cannot be rejected (supersede it instead) → 400.
 - `PUT /api/workspaces/{id}/equations/{mechanic}`
   `{body, timing?, confirmed: true, statement?}` — actuary-authored
-  or edited equation; on save+confirm it becomes the approved record
-  with actuary provenance. Without `confirmed: true` it returns the
-  rendering as a confirm-back preview and writes nothing.
+  or edited equation. Since Oct 29, 2026 the registry's authoring
+  door saves a **pending draft** with actuary provenance — it never
+  puts anything in force; the draft appears as a reading option in
+  the mechanic's product-structure step, and only confirming it
+  there (the approve route, driven by the step) puts it in force.
+  Without `confirmed: true` it returns the rendering as a
+  confirm-back preview and writes nothing. (Corrections and
+  confirmed proposals still author straight into force through the
+  domain `author_equation` — their door is the structure surface.)
 - `POST /api/workspaces/{id}/equations/harvest` — run/refresh
   harvesting; returns the records created/refreshed.
 
-Every mutation appends a mechanics change record and marks the
-projection stale, exactly like panel edits and corrections.
+Every mutation appends a mechanics change record. Mutations that
+change what executes (approvals, rejections, corrections) also mark
+the projection stale; saving a draft does not — nothing that runs
+has changed.
 
 ## Execution
 
