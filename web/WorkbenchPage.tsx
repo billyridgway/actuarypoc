@@ -3,6 +3,7 @@ import { MechanicsPanel } from "./MechanicsPanel";
 import { ValidationPanel } from "./ValidationPanel";
 import { EquationsPanel } from "./EquationsPanel";
 import { ActivityPanel } from "./ActivityPanel";
+import { ChatPanel } from "./ChatPanel";
 import {
   useProjectionWorkspace,
   ProjectionResultsSection,
@@ -41,10 +42,12 @@ const humanize = (value?: string | null): string =>
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
     .join(" ");
 
-export type BenchTab = "ledger" | "inputs" | "validation" | "filing" | "activity";
+export type BenchTab = "ledger" | "ask" | "inputs" | "validation" | "filing" | "activity";
 
 const BENCH_TABS: Array<{ id: BenchTab; label: string }> = [
   { id: "ledger", label: "Ledger" },
+  { id: "ask", label: "Ask" },
+  { id: "inputs", label: "Inputs & Equations" },
   { id: "inputs", label: "Inputs & Equations" },
   { id: "validation", label: "Validation" },
   { id: "filing", label: "Filing" },
@@ -352,6 +355,21 @@ export const WorkbenchPage: React.FC<WorkbenchPageProps> = ({
             <ProjectionGraphSection ws={ws} />
           </details>
         </>
+      ))}
+
+      {tabPanel("ask", (
+        <ChatPanel
+          workspaceId={workspaceId}
+          presentedRun={ws.illustration}
+          hasFilings={documents.length > 0 || sources.length > 0}
+          onApplyScenario={(changes) => {
+            // A chat scenario proposal lands on the scenario form
+            // exactly like a hand edit (marks the run dirty); the
+            // user presses Run projection — the chat never runs or
+            // computes anything itself.
+            changes.forEach((change) => ws.updateInput(change.field, String(change.newValue)));
+          }}
+        />
       ))}
 
       {tabPanel("inputs", (
