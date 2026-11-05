@@ -69,6 +69,7 @@ from actuarypoc.domain.projection_graph import compile_projection_graph
 from actuarypoc.domain.projection_ledger import build_projection_ledger, build_rate_tables_in_force
 from actuarypoc.domain import equations as _equations
 from actuarypoc.extract import workspace_equations as _workspace_equations
+from actuarypoc.extract import workspace_chat as _workspace_chat
 from actuarypoc.extract import workspace_linkage as _workspace_linkage
 from actuarypoc.extract import workspace_structure as _workspace_structure
 from actuarypoc.domain.requirements_classification import (
@@ -5041,6 +5042,53 @@ def api_workspace_projection(
         "gaps": {"items": _annotate_gap_items(gaps), "warnings": warnings, "notes": notes},
         "projectionGraph": _compile_snapshot_projection_graph(graph_snapshot),
     }
+
+
+class WorkspaceChatRequest(BaseModel):  # type: ignore[misc]
+    message: str
+    history: Optional[List[Dict[str, str]]] = None
+    # The run the UI is currently presenting.  A diagnostic run lives
+    # client-side (POST /projection is non-persisted), so the client
+    # sends its request/rows/metrics with the question; absent, the
+    # chat grounds on the snapshot's saved illustration.
+    presentedRun: Optional[Dict[str, Any]] = None
+
+
+@app.post("/api/workspaces/{workspace_id}/chat")
+def api_workspace_chat(
+    workspace_id: str, payload: WorkspaceChatRequest
+) -> Dict[str, Any]:
+    """Grounded workbench chat: one question about this product and
+    its presented projection.
+
+    Two-stage pipeline (see extract/workspace_chat.py): a cheap
+    intent router/screen, then an answering call that receives ONLY
+    the grounded context the typed tool layer assembled from the
+    workspace's own data — snapshot, artifact, slices, coverage.
+    The chat never computes numbers; scenario changes come back as
+    a structured proposal for the scenario form.
+    """
+
+    ws = get_workspace(workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    snapshot = ws.get("latest_snapshot_json") or {}
+    if not isinstance(snapshot, dict):
+        snapshot = {}
+    artifact = load_workspace_executable_mechanics(workspace_id) or {}
+    slices = _load_workspace_slices(workspace_id)
+    coverage = _document_coverage(artifact, slices)
+    ctx = _workspace_chat.ChatContext(
+        workspace_id=workspace_id,
+        snapshot=snapshot,
+        artifact=artifact,
+        slices=slices,
+        coverage=coverage,
+        presented_run=payload.presentedRun,
+    )
+    return _workspace_chat.answer_question(
+        ctx, payload.message, history=payload.history
+    )
 
 
 FEATURE_REQUEST_STATUSES = {
