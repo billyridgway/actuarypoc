@@ -23,10 +23,10 @@ Architecture: a two-stage pipeline.  Stage 1 is a cheap intent
 router/screen — deterministic keyword/pattern rules first, a small
 model call only when the rules are ambiguous — classifying each
 message into exactly one of filing_fact, model_fact,
-ledger_explanation, scenario_change, out_of_scope, and extracting
-structured slots.  Stage 2 is the answering call, which receives
-ONLY the grounded context the tool layer assembled for that intent
-and must answer from it, with citations.
+ledger_explanation, scenario_change, product_overview, out_of_scope,
+and extracting structured slots.  Stage 2 is the answering call,
+which receives ONLY the grounded context the tool layer assembled
+for that intent and must answer from it, with citations.
 
 The tool layer is plain internal functions over data the server
 already holds (workspace snapshot, executable-mechanics artifact,
@@ -54,6 +54,7 @@ INTENT_FILING_FACT = "filing_fact"
 INTENT_MODEL_FACT = "model_fact"
 INTENT_LEDGER = "ledger_explanation"
 INTENT_SCENARIO_CHANGE = "scenario_change"
+INTENT_PRODUCT_OVERVIEW = "product_overview"
 INTENT_OUT_OF_SCOPE = "out_of_scope"
 
 INTENTS = (
@@ -61,6 +62,7 @@ INTENTS = (
     INTENT_MODEL_FACT,
     INTENT_LEDGER,
     INTENT_SCENARIO_CHANGE,
+    INTENT_PRODUCT_OVERVIEW,
     INTENT_OUT_OF_SCOPE,
 )
 
@@ -71,6 +73,7 @@ INTENT_LABELS = {
     INTENT_MODEL_FACT: "From the model in force",
     INTENT_LEDGER: "From the ledger",
     INTENT_SCENARIO_CHANGE: "Scenario change",
+    INTENT_PRODUCT_OVERVIEW: "Product overview",
     INTENT_OUT_OF_SCOPE: "Out of scope",
 }
 
@@ -130,12 +133,23 @@ class ChatContext:
     # -- tools -----------------------------------------------------------
 
     def get_scenario(self) -> Optional[Dict[str, Any]]:
-        """The scenario behind the presented run (tool-provided)."""
+        """The scenario behind the presented run (tool-provided).
 
-        request = self._run().get("request")
-        if not isinstance(request, Mapping) or not request:
-            return None
-        return {
+        The projection's normalised request echo carries most
+        fields but NOT the modal premium — the engine consumes it
+        without echoing it — so a missing premium (and a missing
+        issue age) is recovered from the presented ledger itself:
+        the first row's modal premium, and its attained age less
+        the elapsed durations.  Both are figures the run itself
+        produced, quoted — never derived by the chat.  Returns None
+        when no scenario field is known at all (the analysis-time
+        request carries mechanics only, no scenario)."""
+
+        run = self._run()
+        request = run.get("request")
+        if not isinstance(request, Mapping):
+            request = {}
+        scenario: Dict[str, Any] = {
             "issue_age": request.get("age"),
             "face_amount": request.get("faceAmount"),
             "premium": request.get("modalPremium"),
@@ -144,6 +158,24 @@ class ChatContext:
             "risk_class": request.get("riskClass"),
             "tobacco_status": request.get("tobaccoStatus"),
         }
+        if scenario["premium"] is None or scenario["issue_age"] is None:
+            rows = self.run_rows()
+            if rows:
+                first = rows[0]
+                if scenario["premium"] is None:
+                    scenario["premium"] = first.get("modalPremium")
+                    if scenario["premium"] is None:
+                        scenario["premium"] = first.get("annualPremium")
+                if scenario["issue_age"] is None:
+                    attained = first.get("attainedAge")
+                    year = first.get("year")
+                    if isinstance(attained, (int, float)) and isinstance(
+                        year, (int, float)
+                    ):
+                        scenario["issue_age"] = attained - (year - 1)
+        if all(value is None for value in scenario.values()):
+            return None
+        return scenario
 
     def get_run_ledger(
         self, years: Optional[Sequence[int]] = None
@@ -226,18 +258,29 @@ class ChatContext:
         }
 
     def search_filing_text(
-        self, query_terms: Sequence[str], limit: int = 5
+        self,
+        query_terms: Sequence[str],
+        limit: int = 5,
+        topic_terms: Optional[Sequence[str]] = None,
     ) -> List[Dict[str, Any]]:
         """Keyword search over the workspace's filing slices.
 
         Hits carry document + page provenance; the page is anchored
         through the slice's page offsets, so a citation names the
         page the matched text actually sits on.
-        """
+
+        When ``topic_terms`` is given, each hit is also flagged
+        ``topical``: the matched segment speaks to the question's
+        actual topic (it contains at least one topic term), as
+        opposed to matching only the question's generic framing
+        vocabulary ("what does the filing say…"), which matches
+        nearly every page of a filing.  The absence path keys on
+        this flag: generic hits are not coverage."""
 
         terms = [t.lower() for t in query_terms if len(t) >= 3]
         if not terms:
             return []
+        topics = [t.lower() for t in (topic_terms or []) if len(t) >= 3]
         scored: List[Tuple[int, Dict[str, Any]]] = []
         for sl in self.slices:
             text = str(sl.get("text") or "")
@@ -265,6 +308,10 @@ class ChatContext:
                     "heading": sl.get("heading"),
                     "snippet": snippet,
                     "score": score,
+                    "topical": (
+                        not topics
+                        or any(t in lowered for t in topics)
+                    ),
                 }))
         scored.sort(key=lambda item: -item[0])
         return [hit for _score, hit in scored[:limit]]
@@ -403,6 +450,26 @@ _ARITHMETIC_RE = re.compile(
     r"(\d+(?:\.\d+)?\s*(?:%|percent)\s+of\b)"
     r"|(\bcalculate\b|\bcompute\b|\bmultiply\b|\bdivide\b|\badd up\b"
     r"|\bsum of\b|\bhow much is\b|\btotal of\b)",
+    re.IGNORECASE,
+)
+
+#: Product-overview anchor: a summary verb (summarize / describe /
+#: overview / story / tell me about / what is this) aimed at the
+#: product AS A WHOLE.  It is checked only after every specific
+#: anchor (scenario, filing signal, ledger column, named mechanic
+#: or table, filing feature), so "explain the COI charge" still
+#: routes to the mechanic and "summarize the surrender table" to
+#: the table — the overview fires only when nothing more specific
+#: claimed the question.
+_OVERVIEW_RE = re.compile(
+    r"\b(?:summar\w+|overview|describe|description|story)\b"
+    r"[^.?!]{0,60}?\b(?:product|policy|insurance|plan|coverage|this)\b"
+    r"|\bexplain\b[^.?!]{0,40}?\b(?:product|policy|insurance|plan|this)\b"
+    r"|\btell (?:me|us)\b[^.?!]{0,40}?"
+    r"\b(?:product|policy|insurance|plan|coverage|story|this)\b"
+    r"|\bwhat (?:is|kind of)\b[^.?!]{0,40}?"
+    r"\b(?:product|policy|insurance|plan|this)\b"
+    r"|\boverview of\b",
     re.IGNORECASE,
 )
 
@@ -568,6 +635,12 @@ def classify_intent_rules(message: str) -> Route:
     if any(phrase in text for phrase in _FILING_FEATURE_PHRASES):
         return Route(INTENT_FILING_FACT, slots)
 
+    # Product-overview anchor: a summary of the product as a whole.
+    # Last before the fallthrough — every specific anchor above has
+    # already had its claim on the question.
+    if _OVERVIEW_RE.search(message or ""):
+        return Route(INTENT_PRODUCT_OVERVIEW, slots)
+
     return Route(INTENT_OUT_OF_SCOPE, slots, ambiguous=True)
 
 
@@ -576,13 +649,17 @@ _ROUTER_SYSTEM_PROMPT = (
     "about a single life insurance product and its presented "
     "illustration. Output valid JSON only: {\"intent\": one of "
     "[\"filing_fact\", \"model_fact\", \"ledger_explanation\", "
-    "\"scenario_change\", \"out_of_scope\"], \"mechanics\": [mechanic "
-    "ids], \"years\": [ints], \"tables\": [table names]}. "
+    "\"scenario_change\", \"product_overview\", \"out_of_scope\"], "
+    "\"mechanics\": [mechanic ids], \"years\": [ints], \"tables\": "
+    "[table names]}. "
     "filing_fact = what the filed documents say; model_fact = the "
     "equations/tables in force and how a mechanic is defined; "
     "ledger_explanation = why the presented projection's numbers are "
     "what they are; scenario_change = the user wants different "
-    "scenario inputs run; out_of_scope = anything else. Mechanic "
+    "scenario inputs run; product_overview = the user wants a "
+    "summary or overview of the product as a whole — what it is, "
+    "its story — not one mechanic, table, or figure; "
+    "out_of_scope = anything else. Mechanic "
     "ids: coi_charge, surrender_charge, premium_load, policy_fees, "
     "crediting, nar_definition, death_benefit. Tables: coi, "
     "surrender, fees, nar_factors, corridor."
@@ -665,6 +742,74 @@ def _query_terms(message: str, slots: Mapping[str, Any]) -> List[str]:
     return terms
 
 
+#: Single words that match filing text regardless of the question's
+#: topic — the question's framing vocabulary ("what does the filing
+#: say") and the filing's own ubiquitous vocabulary ("policy",
+#: "benefit", "premium").  A search hit matching ONLY these is not
+#: coverage of the topic asked about.  Multiword terms (the filed
+#: phrases: "net amount at risk", "surrender charge") are never
+#: generic — a segment containing one speaks to the topic.
+_GENERIC_TOPIC_WORDS = {
+    "filing", "filings", "document", "documents", "say", "says",
+    "said", "state", "states", "stated", "mention", "mentions",
+    "mentioned", "allow", "allows", "allowed", "provide", "provides",
+    "provided", "cover", "covers", "covered", "include", "includes",
+    "included", "benefit", "benefits", "policy", "product",
+    "coverage", "premium", "premiums", "charge", "charges", "value",
+    "values", "account", "death", "insurance", "life", "term",
+    "period", "amount", "amounts", "payment", "payments",
+    "policyholder", "insured", "owner", "company", "plan", "rate",
+    "rates", "cost", "fee", "fees", "year", "years", "contract",
+    "interest",
+}
+
+
+def _distinctive_terms(terms: Sequence[str]) -> List[str]:
+    """The terms that carry the question's topic: every multiword
+    phrase, plus single words outside the generic vocabulary."""
+
+    return [
+        t for t in terms
+        if " " in t or t.lower() not in _GENERIC_TOPIC_WORDS
+    ]
+
+
+#: Broad product vocabulary for the overview's framing search: the
+#: passages that describe the product as a whole (actuarial-memo
+#: introductions, the policy form's framing pages) are dense in it.
+_OVERVIEW_SEARCH_TERMS: Sequence[str] = (
+    "universal life", "flexible premium", "adjustable life",
+    "life insurance", "death benefit", "cash value", "policy value",
+    "premium", "policy", "insurance", "coverage",
+)
+
+#: Ledger columns that hold money.  In the stage-2 context they are
+#: rendered as currency ("$53,515.47") rather than raw floats
+#: (53515.465876699025): the value quoted is the ledger value,
+#: rounded for display by the tool layer — the chat quotes figures
+#: the way the workbench prints them, and the grounding pass checks
+#: answers against these same rendered figures.
+_LEDGER_MONEY_COLUMNS = (
+    "modalPremium", "annualPremium", "cumulativePremium",
+    "premiumLoad", "guaranteedInterest", "coiCharge", "policyFee",
+    "endingPolicyValue", "cashValue", "surrenderCharge",
+    "surrenderValue", "deathBenefit", "netAmountAtRisk",
+)
+
+
+def _ledger_row_display(row: Mapping[str, Any]) -> Dict[str, Any]:
+    """A ledger row for the answering context: money as currency,
+    everything else (year, attained age, status) untouched."""
+
+    out: Dict[str, Any] = {}
+    for key, value in row.items():
+        if key in _LEDGER_MONEY_COLUMNS and isinstance(value, (int, float)):
+            out[key] = _fmt_money(value)
+        else:
+            out[key] = value
+    return out
+
+
 def _table_selectors(slots: Mapping[str, Any]) -> Dict[str, Any]:
     selectors: Dict[str, Any] = {}
     years = slots.get("years") or []
@@ -683,8 +828,9 @@ def assemble_context(
     slots = route.slots
     payload: Dict[str, Any] = {"intent": route.intent}
     if route.intent == INTENT_FILING_FACT:
+        terms = _query_terms(message, slots)
         payload["filing_hits"] = ctx.search_filing_text(
-            _query_terms(message, slots)
+            terms, topic_terms=_distinctive_terms(terms)
         )
         payload["coverage"] = ctx.get_coverage_states()
     elif route.intent == INTENT_MODEL_FACT:
@@ -701,7 +847,10 @@ def assemble_context(
         payload["coverage"] = ctx.get_coverage_states()
     elif route.intent == INTENT_LEDGER:
         payload["scenario"] = ctx.get_scenario()
-        payload["ledger_rows"] = ctx.get_run_ledger(slots.get("years") or None)
+        payload["ledger_rows"] = [
+            _ledger_row_display(row)
+            for row in ctx.get_run_ledger(slots.get("years") or None)
+        ]
         payload["has_run"] = ctx.has_run
         # The definitions behind the numbers are ledger context too:
         # "why" questions are usually definition questions in disguise.
@@ -710,6 +859,41 @@ def assemble_context(
             equations[mechanic] = ctx.get_equation_in_force(mechanic)
         if equations:
             payload["equations_in_force"] = equations
+    elif route.intent == INTENT_PRODUCT_OVERVIEW:
+        # The product as a whole: the filings' framing passages,
+        # the document inventory, the mechanics and tables in force
+        # (names + filed statements), and the presented scenario.
+        payload["filing_hits"] = ctx.search_filing_text(
+            _OVERVIEW_SEARCH_TERMS, limit=6
+        )
+        payload["documents"] = sorted({
+            str(sl.get("document_hint") or sl.get("doc_id"))
+            for sl in ctx.slices
+            if sl.get("document_hint") or sl.get("doc_id")
+        })
+        equations = {}
+        for mechanic in _eq.MECHANICS:
+            record = ctx.get_equation_in_force(mechanic)
+            if record:
+                equations[mechanic] = record
+        payload["equations_in_force"] = equations
+        tables = {}
+        for table in _eq.TABLES:
+            view = ctx.get_table_slice(table, limit=0)
+            if view.get("inForce"):
+                tables[table] = {
+                    key: value for key, value in view.items()
+                    if key != "rows"
+                }
+        payload["tables_in_force"] = tables
+        payload["scenario"] = ctx.get_scenario()
+        product = (ctx.snapshot or {}).get("product") or {}
+        payload["product"] = {
+            key: product.get(key)
+            for key in ("code", "name", "type")
+            if product.get(key)
+        }
+        payload["has_filings"] = ctx.has_filings
     return payload
 
 
@@ -918,8 +1102,25 @@ def _absence_answer(
     coverage = ctx.get_coverage_states()
     coverage_eq = coverage.get("equations") or {}
 
+    if route.intent == INTENT_PRODUCT_OVERVIEW:
+        if not ctx.has_filings:
+            return (
+                "This workspace has no filing documents, so there "
+                "is nothing to tell the product's story from. Add "
+                "the product's filing documents and run the analysis "
+                "— I'll summarise it from them, with citations."
+            )
+        return None
+
     if route.intent == INTENT_FILING_FACT:
-        if payload.get("filing_hits"):
+        # Coverage means a hit that speaks to the topic asked
+        # about.  Hits matching only the question's generic framing
+        # vocabulary ("what does the filing say about…") are not
+        # coverage — they match nearly every page of a filing, and
+        # treating them as coverage is how an absence question ends
+        # up answered from unrelated passages, with citations.
+        hits = payload.get("filing_hits") or []
+        if any(hit.get("topical", True) for hit in hits):
             return None
         for mechanic in slots.get("mechanics") or []:
             entry = coverage_eq.get(mechanic) or {}
@@ -1044,8 +1245,9 @@ _ARITHMETIC_ANSWER = (
 def _out_of_scope_answer() -> str:
     return (
         "That's outside what I can answer. I answer questions about "
-        "this product — what its filing documents say, the equations "
-        "and tables in force, and the presented projection's ledger — "
+        "this product — a summary of the product as a whole, what "
+        "its filing documents say, the equations and tables in "
+        "force, and the presented projection's ledger — "
         "always quoting the source, never computing new figures."
     )
 
@@ -1167,9 +1369,19 @@ def _answer_prompt(
         if content:
             turns.append(f"{role}: {content}")
     history_block = "\n".join(turns) if turns else "(no prior turns)"
+    task = ""
+    if payload.get("intent") == INTENT_PRODUCT_OVERVIEW:
+        task = (
+            "Task: the user wants an overview of the product as a "
+            "whole. Summarise what the product is from the filing "
+            "passages, name the mechanics and tables in force, and "
+            "say who the presented scenario covers — from the "
+            "context only.\n\n"
+        )
     return (
         f"Conversation so far:\n{history_block}\n\n"
         f"Question: {message}\n\n"
+        f"{task}"
         f"Grounded context (JSON):\n{json.dumps(payload, default=str)}"
     )
 
@@ -1266,7 +1478,11 @@ def answer_question(
     absence = _absence_answer(ctx, route, payload, message)
     if absence is not None:
         result["answer"] = absence
-        result["citations"] = derive_citations(payload)
+        # An absence answer carries NO citations: there is no
+        # material to cite, and a citation assembled from generic
+        # search hits would falsely imply the documents speak to
+        # the topic they are silent on.
+        result["citations"] = []
         return result
 
     if route.slots.get("arithmetic_request"):

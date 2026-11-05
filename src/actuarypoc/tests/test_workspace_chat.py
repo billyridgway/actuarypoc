@@ -174,6 +174,39 @@ def test_router_out_of_scope() -> None:
     assert route.intent == chat.INTENT_OUT_OF_SCOPE
 
 
+def test_router_product_overview_story() -> None:
+    """Billy's verbatim live question (Nov 5, 2026): a product-level
+    ask with no mechanic, table, or ledger anchor is an overview,
+    not out of scope."""
+
+    route = chat.classify_intent("Tell me the story about this insurance product.")
+    assert route.intent == chat.INTENT_PRODUCT_OVERVIEW
+
+
+def test_router_product_overview_summarize() -> None:
+    route = chat.classify_intent("Summarize this insurance product.")
+    assert route.intent == chat.INTENT_PRODUCT_OVERVIEW
+
+
+def test_router_product_overview_what_is_this_product() -> None:
+    route = chat.classify_intent("What is this product?")
+    assert route.intent == chat.INTENT_PRODUCT_OVERVIEW
+
+
+def test_router_explain_mechanic_is_not_overview() -> None:
+    """A summary verb aimed at a named mechanic stays with the
+    mechanic's specific intent."""
+
+    route = chat.classify_intent("Explain the COI charge.")
+    assert route.intent == chat.INTENT_MODEL_FACT
+
+
+def test_router_summarize_table_is_not_overview() -> None:
+    route = chat.classify_intent("Summarize the surrender table.")
+    assert route.intent == chat.INTENT_MODEL_FACT
+    assert route.slots["tables"] == ["surrender"]
+
+
 # ---------------------------------------------------------------------------
 # The tool layer
 # ---------------------------------------------------------------------------
@@ -355,6 +388,179 @@ def test_out_of_scope_redirects() -> None:
     )
     assert result["intent"] == chat.INTENT_OUT_OF_SCOPE
     assert "outside what I can answer" in result["answer"]
+
+
+# ---------------------------------------------------------------------------
+# Product overview (the Nov 5 live-test gap)
+# ---------------------------------------------------------------------------
+
+FRAMING_TEXT = (
+    "The Promise UL is a flexible premium adjustable life insurance "
+    "policy. It provides a death benefit, and its account value "
+    "grows as premiums are paid and interest is credited."
+)
+
+
+def _overview_context(**overrides) -> chat.ChatContext:
+    slices = [
+        _slice(FRAMING_TEXT, page=1, filename="specimen-base.pdf"),
+        _slice(NAR_STATEMENT, page=5, filename="specimen-base.pdf"),
+    ]
+    overrides.setdefault("slices", slices)
+    return _context(**overrides)
+
+
+def test_overview_answer_quotes_framing_and_cites_it() -> None:
+    """The overview answers from the filings' framing passages and
+    the model in force, with citations — and the grounding pass
+    still applies: a fabricated figure is dropped and disclosed."""
+
+    ctx = _overview_context()
+    caller = _stub_caller({
+        "answer": (
+            "The Promise UL is a flexible premium adjustable life "
+            "insurance policy. The presented scenario covers a "
+            "45-year-old insured. It also pays a $777,777 loyalty "
+            "bonus."
+        ),
+        "citations": [
+            {"kind": "filing", "document": "specimen-base.pdf", "page": 1}
+        ],
+    })
+    result = chat.answer_question(
+        ctx, "Summarize this insurance product.", answer_caller=caller
+    )
+    assert result["intent"] == chat.INTENT_PRODUCT_OVERVIEW
+    assert result["intentLabel"] == "Product overview"
+    assert "flexible premium adjustable life" in result["answer"]
+    assert "777" not in result["answer"]
+    assert result.get("groundingNote")
+    assert result["citations"] == [{
+        "kind": "filing",
+        "document": "specimen-base.pdf",
+        "page": 1,
+        "label": "specimen-base.pdf · p. 1",
+    }]
+
+
+def test_overview_without_filings_states_it_plainly() -> None:
+    ctx = _overview_context(slices=[])
+    result = chat.answer_question(
+        ctx, "Tell me the story about this insurance product.",
+        answer_caller=_stub_caller({"answer": "unused"}),
+    )
+    assert result["intent"] == chat.INTENT_PRODUCT_OVERVIEW
+    assert "no filing documents" in result["answer"]
+    assert result["citations"] == []
+
+
+# ---------------------------------------------------------------------------
+# Ride-alongs from the Nov 5 live gate
+# ---------------------------------------------------------------------------
+
+
+def test_absence_despite_generic_filing_hits() -> None:
+    """This morning's gate failure: the question's framing words
+    ("what does the filing say") matched filing pages, the model
+    answered absence from unrelated passages, and the generic hits
+    rode along as citations.  Generic hits are not coverage: the
+    deterministic absence path fires, in the canonical wording,
+    with NO citations."""
+
+    generic = (
+        "The filing says this policy provides a death benefit. "
+        "The filing states the premium, the account value, and "
+        "the terms under which the policy remains in force."
+    )
+    ctx = _context(slices=[_slice(generic, page=31, filename="filing.pdf")])
+    for question in (
+        "What does the filing say about teleportation benefits?",
+        "What does the filing say about the product's cryptocurrency mining rewards?",
+    ):
+        result = chat.answer_question(
+            ctx, question, answer_caller=_stub_caller({"answer": "unused"})
+        )
+        assert result["intent"] == chat.INTENT_FILING_FACT
+        assert "not in the documents" in result["answer"]
+        assert result["citations"] == []
+
+
+def test_ledger_figures_are_currency_in_the_context() -> None:
+    """The raw ledger float (53515.465876699025) must never reach
+    the answering model: the context renders money as currency, so
+    the quoted figure is the ledger value rounded for display —
+    $53,515.47 — digit-exact to the cent."""
+
+    rows = [
+        {"year": 9, "cashValue": 47000.0, "deathBenefit": 100000.0},
+        {"year": 10, "cashValue": 53515.465876699025,
+         "deathBenefit": 100000.0},
+        {"year": 11, "cashValue": 57000.0, "deathBenefit": 100000.0},
+    ]
+    snapshot = {
+        "illustration": {
+            "request": {
+                "age": 45, "faceAmount": 100000, "modalPremium": 3000,
+                "premiumMode": "ANNUAL", "sex": "M",
+                "riskClass": "Standard", "tobaccoStatus": "Non-Tobacco",
+            },
+            "rows": rows,
+            "metrics": {},
+        }
+    }
+    ctx = _context(snapshot=snapshot)
+    seen: dict = {}
+
+    def capturing_caller(system: str, user: str):
+        seen["prompt"] = user
+        return {
+            "answer": "The cash value in year 10 is $53,515.47.",
+            "citations": [{"kind": "ledger", "years": [10]}],
+        }
+
+    result = chat.answer_question(
+        ctx, "What is the cash value in year 10?",
+        answer_caller=capturing_caller,
+    )
+    assert "$53,515.47" in seen["prompt"]
+    assert "53515.465876699025" not in seen["prompt"]
+    assert result["answer"] == "The cash value in year 10 is $53,515.47."
+    assert not result.get("groundingNote")
+
+
+def test_proposal_current_value_recovered_from_the_ledger() -> None:
+    """The projection's normalised request echo drops modalPremium,
+    so a proposal built from get_scenario alone read null this
+    morning.  The scenario behind the run carries the premium in
+    its ledger rows; the proposal's currentValue comes from there."""
+
+    snapshot = {
+        "illustration": {
+            "request": {
+                # The normalised echo: no modalPremium key at all.
+                "age": 45, "faceAmount": 100000,
+                "premiumMode": "SEMIANNUAL", "sex": "M",
+                "riskClass": "Standard", "tobaccoStatus": "Non-Tobacco",
+            },
+            "rows": [
+                {"year": 1, "attainedAge": 45, "modalPremium": 1500.0,
+                 "cashValue": 1200.0},
+                {"year": 2, "attainedAge": 46, "modalPremium": 1500.0,
+                 "cashValue": 2600.0},
+            ],
+            "metrics": {},
+        }
+    }
+    ctx = _context(snapshot=snapshot)
+    result = chat.answer_question(
+        ctx, "What if the premium were $5,000 a year?",
+        answer_caller=_stub_caller({"answer": "unused"}),
+    )
+    assert result["intent"] == chat.INTENT_SCENARIO_CHANGE
+    changes = result["scenario_proposal"]["changes"]
+    assert changes[0]["field"] == "premium"
+    assert changes[0]["currentValue"] == 1500.0
+    assert changes[0]["newValue"] == 5000.0
 
 
 # ---------------------------------------------------------------------------
