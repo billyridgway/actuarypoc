@@ -32,6 +32,7 @@ from actuarypoc.extract.document_map import (
     doc_slug,
 )
 from actuarypoc.extract.slice_extraction import (
+    _dispatch_char_budget,
     extract_assumption_set_from_slices,
     extract_mechanics_from_slices,
     extract_product_metadata_from_slices,
@@ -47,15 +48,12 @@ from actuarypoc.storage.object_store import stat_store_object
 
 
 def _dispatch_budget() -> int:
-    # Default 48,000 chars per dispatch unit (see slice_extraction's
-    # DEFAULT_DISPATCH_CHAR_BUDGET). The env var is the per-backend
-    # tuning knob: an on-prem appliance profile with a small local
-    # model sets ACTUARYPOC_SLICE_DISPATCH_CHARS back down — bounded
-    # units are what make the pipeline portable at all.
-    try:
-        return int(os.getenv("ACTUARYPOC_SLICE_DISPATCH_CHARS", "48000"))
-    except ValueError:
-        return 48000
+    # The resolution lives in slice_extraction._dispatch_char_budget
+    # (explicit callers of the extract functions share it): env var
+    # ACTUARYPOC_SLICE_DISPATCH_CHARS wins, then a local-endpoint
+    # default, then 48,000 chars. Bounded units are what make the
+    # pipeline portable at all.
+    return _dispatch_char_budget()
 
 
 def _document_etag(document: Dict[str, Any]) -> Optional[str]:

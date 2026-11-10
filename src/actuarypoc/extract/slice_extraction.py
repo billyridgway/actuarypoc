@@ -21,10 +21,12 @@ Two trust rules are enforced here:
   to the unit's page span and the confidence is discounted.
 """
 
+import ipaddress
 import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urlparse
 from dataclasses import replace
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -48,6 +50,29 @@ from actuarypoc.extract.mechanics_extractor import _extract_mechanics_single_cal
 DEFAULT_DISPATCH_CHAR_BUDGET = 48000
 
 DEFAULT_DISPATCH_CONCURRENCY = 8
+
+# A local model endpoint is one appliance GPU: a cloud-sized fan-out
+# of large prompts makes the server batch them all at once and run
+# itself out of GPU memory (observed Nov 10, 2026 on the Mac mini
+# appliance: seven concurrent 12k-43k-token prompts OOM-killed
+# mlx-lm's single generation thread at the tail of an Analyze,
+# leaving the server up but unable to generate until restarted —
+# and a fan-out of just two still OOM-killed it when the two were
+# the 40k-token units). Local endpoints therefore serialize
+# dispatch; the env var and the explicit argument still win over
+# either default.
+LOCAL_DISPATCH_CONCURRENCY = 1
+
+# The unit size needs the same local default, for the same reason:
+# at the cloud budget a single dispatch unit is a ~40k-token
+# prompt, and processing even one of those ALONE ran a 24 GB
+# appliance GPU out of memory at the tail of prompt processing
+# (Nov 10, 2026: a serialized 39,759-token prompt OOM-killed the
+# generation thread at 39,758/39,759). Prompts in the ~16k-token
+# range completed reliably in every observed run, so the local
+# budget targets at most ~14k tokens per unit (this corpus runs
+# ~0.9 tokens per char).
+LOCAL_DISPATCH_CHAR_BUDGET = 16000
 
 _WS = re.compile(r"\s+")
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
@@ -109,13 +134,37 @@ def _span_label(unit: Sequence[DocumentSlice]) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _model_endpoint_is_local() -> bool:
+    """True when OPENAI_BASE_URL points at an appliance-class
+    endpoint: this machine, or a private / LAN / tailnet address
+    rather than a public cloud API. An unset or unparseable value
+    reads as cloud (the SDK default is the OpenAI API), and a
+    non-IP hostname other than localhost does too — the appliance
+    profiles this guards address their server by IP.
+    """
+
+    raw = os.getenv("OPENAI_BASE_URL", "").strip()
+    if not raw:
+        return False
+    host = urlparse(raw).hostname or ""
+    if host == "localhost":
+        return True
+    try:
+        return not ipaddress.ip_address(host).is_global
+    except ValueError:
+        return False
+
+
 def _dispatch_concurrency(explicit: Optional[int] = None) -> int:
     """Bounded fan-out for unit dispatch.
 
     Precedence: explicit argument, then the
-    ACTUARYPOC_SLICE_DISPATCH_CONCURRENCY env var, then the default.
-    An on-prem appliance profile can pin this to 1 to serialize calls
-    against a local model; merge order never depends on it.
+    ACTUARYPOC_SLICE_DISPATCH_CONCURRENCY env var, then the
+    default — LOCAL_DISPATCH_CONCURRENCY when the model endpoint
+    is local (see _model_endpoint_is_local), else
+    DEFAULT_DISPATCH_CONCURRENCY. An on-prem appliance profile can
+    still pin this to 1 to serialize calls against a local model;
+    merge order never depends on it.
     """
 
     if explicit is not None:
@@ -126,7 +175,31 @@ def _dispatch_concurrency(explicit: Optional[int] = None) -> int:
             return max(1, int(raw))
         except ValueError:
             pass
+    if _model_endpoint_is_local():
+        return LOCAL_DISPATCH_CONCURRENCY
     return DEFAULT_DISPATCH_CONCURRENCY
+
+
+def _dispatch_char_budget(explicit: Optional[int] = None) -> int:
+    """Chars per dispatch unit.
+
+    Precedence mirrors _dispatch_concurrency: explicit argument,
+    then the ACTUARYPOC_SLICE_DISPATCH_CHARS env var, then the
+    default — LOCAL_DISPATCH_CHAR_BUDGET when the model endpoint
+    is local, else DEFAULT_DISPATCH_CHAR_BUDGET.
+    """
+
+    if explicit is not None:
+        return max(1, int(explicit))
+    raw = os.getenv("ACTUARYPOC_SLICE_DISPATCH_CHARS", "")
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    if _model_endpoint_is_local():
+        return LOCAL_DISPATCH_CHAR_BUDGET
+    return DEFAULT_DISPATCH_CHAR_BUDGET
 
 
 def _dispatch_units(
@@ -497,7 +570,7 @@ def extract_mechanics_from_slices(
     product_code: str,
     slices: Sequence[DocumentSlice],
     model: Optional[str] = None,
-    dispatch_char_budget: int = DEFAULT_DISPATCH_CHAR_BUDGET,
+    dispatch_char_budget: Optional[int] = None,
     concurrency: Optional[int] = None,
     progress_callback: Optional[Callable[[str, int, int], None]] = None,
 ) -> Dict[str, Any]:
@@ -505,7 +578,7 @@ def extract_mechanics_from_slices(
 
     t0 = time.monotonic()
     report = _base_report(slices)
-    units = group_slices_for_dispatch(list(slices), char_budget=dispatch_char_budget)
+    units = group_slices_for_dispatch(list(slices), char_budget=_dispatch_char_budget(dispatch_char_budget))
 
     def _invoke(unit: Sequence[DocumentSlice]) -> List[ProductMechanic]:
         raw = _extract_mechanics_single_call(
@@ -529,7 +602,7 @@ def extract_product_metadata_from_slices(
     *,
     slices: Sequence[DocumentSlice],
     model: Optional[str] = None,
-    dispatch_char_budget: int = DEFAULT_DISPATCH_CHAR_BUDGET,
+    dispatch_char_budget: Optional[int] = None,
     concurrency: Optional[int] = None,
     progress_callback: Optional[Callable[[str, int, int], None]] = None,
 ) -> Dict[str, Any]:
@@ -537,7 +610,7 @@ def extract_product_metadata_from_slices(
 
     t0 = time.monotonic()
     report = _base_report(slices)
-    units = group_slices_for_dispatch(list(slices), char_budget=dispatch_char_budget)
+    units = group_slices_for_dispatch(list(slices), char_budget=_dispatch_char_budget(dispatch_char_budget))
 
     def _invoke(unit: Sequence[DocumentSlice]) -> Tuple[Dict[str, Any], Sequence[DocumentSlice]]:
         return (_extract_metadata_single_call(text=unit_block(unit), model=model), unit)
@@ -580,7 +653,7 @@ def extract_assumption_set_from_slices(
     slices: Sequence[DocumentSlice],
     description_hint: Optional[str] = None,
     model: Optional[str] = None,
-    dispatch_char_budget: int = DEFAULT_DISPATCH_CHAR_BUDGET,
+    dispatch_char_budget: Optional[int] = None,
     concurrency: Optional[int] = None,
     progress_callback: Optional[Callable[[str, int, int], None]] = None,
 ) -> Dict[str, Any]:
@@ -588,7 +661,7 @@ def extract_assumption_set_from_slices(
 
     t0 = time.monotonic()
     report = _base_report(slices)
-    units = group_slices_for_dispatch(list(slices), char_budget=dispatch_char_budget)
+    units = group_slices_for_dispatch(list(slices), char_budget=_dispatch_char_budget(dispatch_char_budget))
 
     def _invoke(unit: Sequence[DocumentSlice]) -> Tuple[AssumptionSet, Sequence[DocumentSlice]]:
         asn = _assumption_set_single_call(

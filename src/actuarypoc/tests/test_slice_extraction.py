@@ -469,3 +469,66 @@ def test_pipeline_degrades_without_api_key(fake_store, monkeypatch):
     assert report["parts"]["tables"]["status"] == "ok"
     assert len(result["extractedTables"]) == 1  # deterministic channel still runs
     assert result["extractedMechanics"] == []
+
+
+# ---------------------------------------------------------------------------
+# Dispatch concurrency: local endpoints get the appliance fan-out
+# ---------------------------------------------------------------------------
+
+
+def test_dispatch_concurrency_defaults_to_cloud_fanout(monkeypatch):
+    monkeypatch.delenv("ACTUARYPOC_SLICE_DISPATCH_CONCURRENCY", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    from actuarypoc.extract.slice_extraction import _dispatch_concurrency
+
+    assert _dispatch_concurrency() == 8
+
+
+def test_dispatch_concurrency_caps_local_endpoints(monkeypatch):
+    monkeypatch.delenv("ACTUARYPOC_SLICE_DISPATCH_CONCURRENCY", raising=False)
+    from actuarypoc.extract.slice_extraction import _dispatch_concurrency
+
+    for url in (
+        "http://127.0.0.1:8000/v1",
+        "http://localhost:11434/v1",
+        "http://100.104.249.77:11434/v1",  # tailnet (CGNAT) address
+        "http://192.168.50.79:8000/v1",
+    ):
+        monkeypatch.setenv("OPENAI_BASE_URL", url)
+        assert _dispatch_concurrency() == 1, url
+
+
+def test_dispatch_concurrency_keeps_cloud_fanout_for_public_endpoints(monkeypatch):
+    monkeypatch.delenv("ACTUARYPOC_SLICE_DISPATCH_CONCURRENCY", raising=False)
+    from actuarypoc.extract.slice_extraction import _dispatch_concurrency
+
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    assert _dispatch_concurrency() == 8
+
+
+def test_dispatch_concurrency_env_and_explicit_still_win(monkeypatch):
+    from actuarypoc.extract.slice_extraction import _dispatch_concurrency
+
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8000/v1")
+    monkeypatch.setenv("ACTUARYPOC_SLICE_DISPATCH_CONCURRENCY", "1")
+    assert _dispatch_concurrency() == 1
+    assert _dispatch_concurrency(5) == 5
+
+
+def test_dispatch_char_budget_defaults(monkeypatch):
+    monkeypatch.delenv("ACTUARYPOC_SLICE_DISPATCH_CHARS", raising=False)
+    from actuarypoc.extract.slice_extraction import _dispatch_char_budget
+
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    assert _dispatch_char_budget() == 48000
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8000/v1")
+    assert _dispatch_char_budget() == 16000
+
+
+def test_dispatch_char_budget_env_and_explicit_still_win(monkeypatch):
+    from actuarypoc.extract.slice_extraction import _dispatch_char_budget
+
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8000/v1")
+    monkeypatch.setenv("ACTUARYPOC_SLICE_DISPATCH_CHARS", "24000")
+    assert _dispatch_char_budget() == 24000
+    assert _dispatch_char_budget(6000) == 6000
