@@ -2041,13 +2041,19 @@ def _reading_batches(
     return batches
 
 
-def _parse_model_payload(content: Any) -> Any:
+def _parse_model_payload(content: Any, *, repair_truncation: bool = False) -> Any:
     """Parse a model response into JSON, tolerantly but loudly.
 
     Fallback order: strip a code fence, then parse; else extract the
     first balanced {...} object and parse that.  Anything else raises
     ValueError naming the failure — a parse failure must never again
     surface as a bare, unexplained degradation.
+
+    With ``repair_truncation`` (opt-in; the workbench chat passes it),
+    a response whose JSON object was cut off mid-stream by the
+    completion token cap is repaired by _repair_truncated_json before
+    giving up.  Extraction callers leave it off: for them a truncated
+    payload must stay a loud failure (their batching retries smaller).
     """
 
     text = str(content or "").strip()
@@ -2081,10 +2087,62 @@ def _parse_model_payload(content: Any) -> Any:
                 depth -= 1
                 if depth == 0:
                     return json.loads(text[start:index + 1])
+    if repair_truncation:
+        try:
+            return _repair_truncated_json(text)
+        except ValueError:
+            pass
     raise ValueError(
         "model output carried no parseable JSON object "
         f"(begins: {text[:120]!r})"
     )
+
+
+def _repair_truncated_json(text: str) -> Any:
+    """Best-effort repair of a JSON object truncated mid-stream.
+
+    The completion ran into the token cap, so the object never
+    closed.  Close the open string — trimmed back to its last
+    whitespace, so a partial word or a dangling escape is not sealed
+    in — then close any open containers in reverse order and parse.
+    Raises ValueError when the text is not a truncated object or the
+    repair still does not parse; the caller keeps its loud failure.
+    """
+
+    stripped = text.strip()
+    if not stripped.startswith("{"):
+        raise ValueError("not a truncated JSON object")
+    stack: List[str] = []
+    in_string = False
+    escaped = False
+    last_ws_in_string = -1
+    for index, ch in enumerate(stripped):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            elif ch in " \t\n":
+                last_ws_in_string = index
+        elif ch == '"':
+            in_string = True
+            last_ws_in_string = -1
+        elif ch in "{[":
+            stack.append(ch)
+        elif ch in "}]":
+            if stack:
+                stack.pop()
+    if not stack and not in_string:
+        raise ValueError("not truncated")
+    repaired = stripped
+    if in_string:
+        cut = last_ws_in_string if last_ws_in_string >= 0 else len(repaired)
+        repaired = repaired[:cut] + '"'
+    for opener in reversed(stack):
+        repaired += "}" if opener == "{" else "]"
+    return json.loads(repaired)
 
 
 def _openai_client_and_model() -> "tuple[Any, str]":
@@ -2117,13 +2175,27 @@ def _openai_client_and_model() -> "tuple[Any, str]":
     return OpenAI(api_key=api_key, timeout=timeout, max_retries=0), model
 
 
-def _chat_json(client: Any, model: str, messages: List[Dict[str, str]]) -> Any:
+def _chat_json(
+    client: Any,
+    model: str,
+    messages: List[Dict[str, str]],
+    *,
+    max_tokens: Optional[int] = None,
+    repair_truncation: bool = False,
+) -> Any:
     """One JSON-mode chat call; returns the parsed payload.
 
     Requests structured output (response_format json_object); if the
     provider rejects that parameter, retries once without it — the
     tolerant parser is the backstop either way.  Raises with the
     cause named (finish reason / parse detail) on failure.
+
+    ``max_tokens`` is sent only when given: some servers cap
+    completions far below what a long JSON answer needs when the
+    request stays silent (mlx-lm's server defaults to 512), while
+    the extraction callers rely on the provider default plus their
+    own finish_reason="length" batch-splitting.  ``repair_truncation``
+    forwards to _parse_model_payload.
     """
 
     kwargs: Dict[str, Any] = {
@@ -2132,6 +2204,8 @@ def _chat_json(client: Any, model: str, messages: List[Dict[str, str]]) -> Any:
         "temperature": 0.1,
         "response_format": {"type": "json_object"},
     }
+    if max_tokens is not None:
+        kwargs["max_tokens"] = max_tokens
     try:
         response = client.chat.completions.create(**kwargs)
     except Exception as exc:  # noqa: BLE001 - retry only the known case
@@ -2142,7 +2216,7 @@ def _chat_json(client: Any, model: str, messages: List[Dict[str, str]]) -> Any:
     choice = response.choices[0]
     content = choice.message.content or ""
     try:
-        payload = _parse_model_payload(content)
+        payload = _parse_model_payload(content, repair_truncation=repair_truncation)
     except ValueError as exc:
         raise RuntimeError(
             f"model output unparseable ({exc}); "

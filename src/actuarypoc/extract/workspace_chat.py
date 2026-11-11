@@ -1392,6 +1392,16 @@ AnswerCaller = Callable[[str, str], Any]
 RouterCaller = Callable[[str, str], Any]
 
 
+#: Completion budget for the answering (and routing) call.  It must be
+#: stated explicitly: a local OpenAI-compatible server can cap a
+#: completion far below what a long JSON answer needs when the request
+#: stays silent (mlx-lm's server defaults to 512 tokens), which cut
+#: overview answers off mid-JSON and dropped the chat to its
+#: deterministic excerpt fallback.  4096 leaves generous headroom for
+#: the longest grounded answer while staying a bounded request.
+_ANSWER_MAX_TOKENS = 4096
+
+
 def default_answer_caller() -> Optional[AnswerCaller]:
     """The production answer caller (OpenAI, existing plumbing).
 
@@ -1409,10 +1419,16 @@ def default_answer_caller() -> Optional[AnswerCaller]:
         return None
 
     def call(system: str, user: str) -> Any:
-        payload, _finish = _chat_json(client, model, [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ])
+        payload, _finish = _chat_json(
+            client,
+            model,
+            [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            max_tokens=_ANSWER_MAX_TOKENS,
+            repair_truncation=True,
+        )
         return payload
 
     return call

@@ -22,6 +22,8 @@ doctrine, not just the plumbing:
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -620,3 +622,94 @@ def test_chat_endpoint_unknown_workspace_404(chat_client: TestClient) -> None:
         "/api/workspaces/ws-nope/chat", json={"message": "hello"}
     )
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Answer-call output budget + truncated-JSON repair (Nov 11, 2026)
+#
+# A local OpenAI-compatible server (mlx-lm) caps a completion at 512
+# tokens when the request does not state max_tokens, which cut long
+# chat answers off mid-JSON; the chat then degraded to its
+# deterministic excerpt fallback.  The chat caller now states a
+# budget, and the payload parser may repair a truncated object —
+# for the chat only; extraction callers keep loud failures.
+# ---------------------------------------------------------------------------
+
+_TRUNCATED_ANSWER = (
+    '{"answer": "This product is a Universal Life policy. It provides '
+    "a death benefit while the policy is in force, and the cash value "
+    "grows with credited interest less the monthly charges descri"
+)
+
+
+def test_parse_repairs_answer_truncated_mid_string() -> None:
+    payload = ws_eq._parse_model_payload(_TRUNCATED_ANSWER, repair_truncation=True)
+    assert payload["answer"].startswith("This product is a Universal Life policy.")
+    # The partial final word is trimmed rather than sealed in.
+    assert payload["answer"].endswith("monthly charges")
+
+
+def test_parse_truncation_still_raises_without_repair() -> None:
+    with pytest.raises(ValueError):
+        ws_eq._parse_model_payload(_TRUNCATED_ANSWER)
+
+
+def test_parse_repairs_truncated_citations_array() -> None:
+    text = (
+        '{"answer": "Short.", "citations": [{"kind": "filing", '
+        '"document": "ICC18 P18PRUL.pdf", "page": 5}, {"kind": "equ'
+    )
+    payload = ws_eq._parse_model_payload(text, repair_truncation=True)
+    assert payload["answer"] == "Short."
+    assert payload["citations"][0]["page"] == 5
+
+
+def test_parse_repair_rejects_non_json() -> None:
+    with pytest.raises(ValueError):
+        ws_eq._parse_model_payload("no json here at all", repair_truncation=True)
+
+
+def test_parse_complete_json_unaffected_by_repair_flag() -> None:
+    assert ws_eq._parse_model_payload('{"a": 1}', repair_truncation=True) == {"a": 1}
+
+
+class _FakeCompletions:
+    def __init__(self, content: str, finish_reason: str = "length") -> None:
+        self._content = content
+        self._finish_reason = finish_reason
+        self.calls: list = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        choice = SimpleNamespace(
+            message=SimpleNamespace(content=self._content),
+            finish_reason=self._finish_reason,
+        )
+        return SimpleNamespace(choices=[choice])
+
+
+def _fake_client(content: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        chat=SimpleNamespace(completions=_FakeCompletions(content))
+    )
+
+
+def test_chat_json_sends_budget_and_repairs_when_asked() -> None:
+    client = _fake_client(_TRUNCATED_ANSWER)
+    payload, finish = ws_eq._chat_json(
+        client,
+        "m",
+        [{"role": "user", "content": "q"}],
+        max_tokens=chat._ANSWER_MAX_TOKENS,
+        repair_truncation=True,
+    )
+    assert payload["answer"].startswith("This product is")
+    assert finish == "length"
+    assert client.chat.completions.calls[0]["max_tokens"] == chat._ANSWER_MAX_TOKENS
+
+
+def test_chat_json_default_sends_no_budget_and_raises_on_truncation() -> None:
+    client = _fake_client(_TRUNCATED_ANSWER)
+    with pytest.raises(RuntimeError):
+        ws_eq._chat_json(client, "m", [{"role": "user", "content": "q"}])
+    assert "max_tokens" not in client.chat.completions.calls[0]
