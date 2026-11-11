@@ -5075,6 +5075,14 @@ def api_workspace_chat(
     snapshot = ws.get("latest_snapshot_json") or {}
     if not isinstance(snapshot, dict):
         snapshot = {}
+    # Ground on the same illustration the workspace view serves.
+    # The stored snapshot's illustration is the Analyze-time run;
+    # when reviewed or edited mechanics are active, the detail
+    # endpoint rebuilds it from the current artifact
+    # (_apply_active_synthetic_mechanics) — the chat must read that
+    # same rebuilt run, not the frozen one, or the two surfaces
+    # quote different projections for the same workspace.
+    snapshot = _apply_active_synthetic_mechanics(dict(snapshot), workspace_id)
     artifact = load_workspace_executable_mechanics(workspace_id) or {}
     slices = _load_workspace_slices(workspace_id)
     coverage = _document_coverage(artifact, slices)

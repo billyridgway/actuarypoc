@@ -839,3 +839,124 @@ def test_ledger_payload_carries_run_metrics_and_status() -> None:
     )
     assert "run_status" not in clean
     assert "run_metrics" not in clean
+
+
+# ---------------------------------------------------------------------------
+# Endpoint reconciliation (Nov 11, 2026)
+#
+# The workspace detail view rebuilds the saved illustration from
+# the current artifact when reviewed/edited mechanics are active
+# (_apply_active_synthetic_mechanics); the chat endpoint used to
+# ground on the frozen Analyze-time illustration, so the two
+# surfaces quoted different projections for the same workspace.
+# The chat endpoint now applies the same rebuild before grounding.
+# ---------------------------------------------------------------------------
+
+_STORED_ILLUSTRATION = {
+    "request": {
+        "age": 45, "faceAmount": 100000, "modalPremium": 3000,
+        "premiumMode": "ANNUAL", "sex": None,
+        "riskClass": None, "tobaccoStatus": None,
+    },
+    "rows": [
+        {"year": 1, "endingPolicyValue": 3000.0, "cashValue": 3000.0,
+         "coiCharge": 0.0},
+    ],
+    "metrics": {"finalCashValue": 90000.0},
+    "incomplete": True,
+    "missingMechanics": [
+        {"mechanic": "coi_charge", "label": "COI charge"},
+        {"mechanic": "surrender_charge", "label": "Surrender charge"},
+    ],
+}
+
+_REBUILT_ILLUSTRATION = {
+    "request": {
+        "age": 45, "faceAmount": 100000, "modalPremium": 3000,
+        "premiumMode": "ANNUAL", "sex": None,
+        "riskClass": None, "tobaccoStatus": None,
+    },
+    "rows": [
+        {"year": 1, "endingPolicyValue": 2608.44, "cashValue": 2608.44,
+         "coiCharge": 0.0},
+    ],
+    "metrics": {"finalCashValue": 105819.59},
+    "incomplete": True,
+    "missingMechanics": [
+        {"mechanic": "coi_charge", "label": "COI charge"},
+    ],
+}
+
+
+def _reconcile_client(monkeypatch, *, with_reviews: bool):
+    stored = {
+        "illustration": _STORED_ILLUSTRATION,
+        "product": {"code": "ICC18 P18PRUL"},
+    }
+    monkeypatch.setattr(
+        server, "get_workspace",
+        lambda wid: {"id": wid, "latest_snapshot_json": stored}
+        if wid == "ws-chat" else None,
+    )
+    artifact = _artifact()
+    if with_reviews:
+        artifact = {**artifact, "reviews": {"r1": {"status": "approved"}}}
+    monkeypatch.setattr(
+        server, "load_workspace_executable_mechanics", lambda wid: artifact
+    )
+    monkeypatch.setattr(
+        server, "_load_workspace_slices",
+        lambda wid: [_slice(NAR_STATEMENT, page=5, filename="specimen-base.pdf")],
+    )
+    monkeypatch.setattr(server, "_document_coverage", lambda a, s: _coverage())
+    monkeypatch.setattr(server, "_executable_mechanics_view", lambda a: {})
+    monkeypatch.setattr(chat, "default_answer_caller", lambda: None)
+    calls: list = []
+
+    def fake_builder(product_code, request):
+        calls.append(product_code)
+        return (_REBUILT_ILLUSTRATION, {}, [], [], [])
+
+    monkeypatch.setattr(server, "_build_ul_projection_view", fake_builder)
+    return TestClient(server.app), calls
+
+
+def test_chat_endpoint_grounds_on_rebuilt_illustration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, calls = _reconcile_client(monkeypatch, with_reviews=True)
+    resp = client.post(
+        "/api/workspaces/ws-chat/chat",
+        json={"message": "What is the final cash value in the projection?"},
+    )
+    assert resp.status_code == 200
+    answer = resp.json()["answer"]
+    # The rebuild fired (same gate as the workspace detail view)…
+    assert calls == ["ICC18 P18PRUL"]
+    # …so the chat quotes the rebuilt run's rows, not the stored
+    # straight-line ones, and the diagnostic disclosure names only
+    # the mechanic the rebuilt run is actually missing.
+    assert "$2,608.44" in answer
+    assert "$3,000" not in answer
+    assert answer.startswith(
+        "Note on these figures: they come from a diagnostic run "
+        "— COI charge not included —"
+    )
+
+
+def test_chat_endpoint_without_reviews_keeps_stored_illustration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, calls = _reconcile_client(monkeypatch, with_reviews=False)
+    resp = client.post(
+        "/api/workspaces/ws-chat/chat",
+        json={"message": "What is the final cash value in the projection?"},
+    )
+    assert resp.status_code == 200
+    answer = resp.json()["answer"]
+    # Gate closed: no rebuild, exactly like the detail view — the
+    # chat grounds on the stored run and discloses all its missing
+    # mechanics.
+    assert calls == []
+    assert "$3,000" in answer
+    assert "COI charge, Surrender charge not included" in answer
