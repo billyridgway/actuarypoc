@@ -713,3 +713,129 @@ def test_chat_json_default_sends_no_budget_and_raises_on_truncation() -> None:
     with pytest.raises(RuntimeError):
         ws_eq._chat_json(client, "m", [{"role": "user", "content": "q"}])
     assert "max_tokens" not in client.chat.completions.calls[0]
+
+
+# ---------------------------------------------------------------------------
+# Diagnostic-run disclosure (Nov 11, 2026)
+#
+# The snapshot's saved illustration can be a diagnostic: a run that
+# did not execute every mechanic (its own missingMechanics record
+# says which — e.g. the COI charge, when the run's scenario is not
+# covered by the in-force COI table).  The chat used to quote such
+# a run's figures as the settled projection, silently.  Now any
+# answer presenting a diagnostic run's figures carries a plain
+# disclosure, and the ledger payload includes the run's own engine
+# metrics so headline figures come from the engine's summary.
+# ---------------------------------------------------------------------------
+
+def _diagnostic_context() -> chat.ChatContext:
+    snapshot = {
+        "illustration": {
+            "request": {
+                "age": 45, "faceAmount": 100000, "modalPremium": 3000,
+                "premiumMode": "ANNUAL", "sex": None,
+                "riskClass": None, "tobaccoStatus": None,
+            },
+            "rows": _ledger_rows(),
+            "metrics": {"finalCashValue": 53500.0, "maximumYear": 11},
+            "incomplete": True,
+            "missingMechanics": [
+                {
+                    "mechanic": "coi_charge",
+                    "label": "COI charge",
+                    "reason": "table_coverage",
+                },
+            ],
+        }
+    }
+    return _context(snapshot=snapshot)
+
+
+def test_run_diagnostic_note_names_missing_mechanics() -> None:
+    note = _diagnostic_context().run_diagnostic_note()
+    assert note is not None
+    assert "diagnostic run" in note
+    assert "COI charge not included" in note
+    assert "not a settled projection" in note
+    # A complete run needs no disclosure.
+    assert _context().run_diagnostic_note() is None
+
+
+def test_run_diagnostic_note_for_incomplete_without_labels() -> None:
+    snapshot = {
+        "illustration": {
+            "rows": _ledger_rows(),
+            "metrics": {},
+            "incomplete": True,
+        }
+    }
+    note = _context(snapshot=snapshot).run_diagnostic_note()
+    assert note is not None
+    assert "some mechanics not included" in note
+
+
+def test_ledger_answer_discloses_diagnostic_run() -> None:
+    ctx = _diagnostic_context()
+    caller = _stub_caller({
+        "answer": "The year 10 cash value is $50,000.",
+        "citations": [{"kind": "ledger", "years": [10]}],
+    })
+    result = chat.answer_question(
+        ctx, "What is the cash value in year 10?", answer_caller=caller
+    )
+    assert result["answer"].startswith("Note on these figures:")
+    assert "COI charge not included" in result["answer"]
+    # The grounded figure itself is still quoted.
+    assert "$50,000" in result["answer"]
+
+
+def test_ledger_answer_complete_run_has_no_disclosure() -> None:
+    ctx = _context()
+    caller = _stub_caller({
+        "answer": "The year 10 cash value is $50,000.",
+        "citations": [{"kind": "ledger", "years": [10]}],
+    })
+    result = chat.answer_question(
+        ctx, "What is the cash value in year 10?", answer_caller=caller
+    )
+    assert result["answer"] == "The year 10 cash value is $50,000."
+
+
+def test_arithmetic_answer_discloses_diagnostic_run() -> None:
+    ctx = _diagnostic_context()
+    result = chat.answer_question(
+        ctx, "What's 12% of the year-10 cash value?",
+        answer_caller=_stub_caller({"answer": "unused"}),
+    )
+    assert result["intent"] == chat.INTENT_LEDGER
+    assert result["answer"].startswith("Note on these figures:")
+    assert "don't do arithmetic" in result["answer"]
+
+
+def test_model_fact_answer_not_disclosed_for_diagnostic_run() -> None:
+    ctx = _diagnostic_context()
+    caller = _stub_caller({
+        "answer": (
+            "The net amount at risk is the difference between the "
+            "Death Benefit and the Policy Value."
+        ),
+        "citations": [{"kind": "equation", "mechanic": "nar_definition"}],
+    })
+    result = chat.answer_question(
+        ctx, "How is the net amount at risk defined?", answer_caller=caller
+    )
+    assert not result["answer"].startswith("Note on these figures:")
+
+
+def test_ledger_payload_carries_run_metrics_and_status() -> None:
+    route = chat.classify_intent("What is the cash value in year 10?", None)
+    payload = chat.assemble_context(
+        _diagnostic_context(), route, "What is the cash value in year 10?"
+    )
+    assert payload["run_metrics"]["finalCashValue"] == 53500.0
+    assert payload["run_status"]["diagnostic"] is True
+    clean = chat.assemble_context(
+        _context(), route, "What is the cash value in year 10?"
+    )
+    assert "run_status" not in clean
+    assert "run_metrics" not in clean

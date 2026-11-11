@@ -114,6 +114,50 @@ class ChatContext:
     def has_run(self) -> bool:
         return bool(self.run_rows())
 
+    def get_run_metrics(self) -> Dict[str, Any]:
+        """The run's own engine-computed headline figures (final
+        values, break-even years), when the run carries them — so a
+        headline question is answered from the engine's summary of
+        the run, not by picking a column out of the last row."""
+
+        metrics = self._run().get("metrics")
+        return dict(metrics) if isinstance(metrics, Mapping) else {}
+
+    def run_diagnostic_note(self) -> Optional[str]:
+        """Plain-language disclosure when the effective run is a
+        diagnostic: it did not execute every mechanic (its own
+        ``missingMechanics`` record says which), so its figures are
+        not a settled projection and must not be presented as one.
+
+        Returns None for a complete run (or no run at all)."""
+
+        run = self._run()
+        if not isinstance(run, Mapping) or not run:
+            return None
+        labels: List[str] = []
+        missing = run.get("missingMechanics")
+        if isinstance(missing, list):
+            for entry in missing:
+                if isinstance(entry, Mapping):
+                    label = entry.get("label") or entry.get("mechanic")
+                    if label:
+                        labels.append(str(label))
+                elif entry:
+                    labels.append(str(entry))
+        if not labels and not run.get("incomplete"):
+            return None
+        missing_text = (
+            ", ".join(labels) + " not included"
+            if labels
+            else "some mechanics not included"
+        )
+        return (
+            "Note on these figures: they come from a diagnostic run "
+            f"— {missing_text} — so they are not a settled "
+            "projection. Run the projection in the workbench for "
+            "settled figures."
+        )
+
     @property
     def has_filings(self) -> bool:
         return bool(self.slices)
@@ -852,6 +896,9 @@ def assemble_context(
             for row in ctx.get_run_ledger(slots.get("years") or None)
         ]
         payload["has_run"] = ctx.has_run
+        metrics = ctx.get_run_metrics()
+        if metrics:
+            payload["run_metrics"] = metrics
         # The definitions behind the numbers are ledger context too:
         # "why" questions are usually definition questions in disguise.
         equations = {}
@@ -894,6 +941,9 @@ def assemble_context(
             if product.get(key)
         }
         payload["has_filings"] = ctx.has_filings
+    note = ctx.run_diagnostic_note()
+    if note:
+        payload["run_status"] = {"diagnostic": True, "note": note}
     return payload
 
 
@@ -1347,6 +1397,13 @@ _ANSWER_SYSTEM_PROMPT = (
     "recompute.\n"
     "4. If the context does not cover the question, say plainly that "
     "it is not in the documents / not in force, in those words.\n"
+    "5. If the context carries a run_status note, the run behind "
+    "the ledger figures is a diagnostic that did not execute every "
+    "mechanic: name that status plainly when you present its "
+    "figures, and never call them a settled projection. For a "
+    "headline figure (a final value, a break-even year), quote the "
+    "run_metrics summary when it is present rather than picking a "
+    "column out of a row.\n"
     "Output valid JSON only: {\"answer\": \"...\", \"citations\": "
     "[{\"kind\": \"filing\", \"document\": \"...\", \"page\": N} | "
     "{\"kind\": \"equation\", \"mechanic\": \"...\"} | {\"kind\": "
@@ -1487,6 +1544,22 @@ def answer_question(
 
     payload = assemble_context(ctx, route, message)
 
+    def _finalize(res: Dict[str, Any]) -> Dict[str, Any]:
+        """Prepend the diagnostic-run disclosure when an answer
+        presents figures from a run that did not execute every
+        mechanic (see ChatContext.run_diagnostic_note): the figures
+        stay quoted, but never dressed as a settled projection."""
+
+        note = ctx.run_diagnostic_note()
+        if note and res.get("answer"):
+            uses_run = route.intent == INTENT_LEDGER or any(
+                isinstance(c, Mapping) and c.get("kind") == "ledger"
+                for c in res.get("citations") or []
+            )
+            if uses_run:
+                res["answer"] = f"{note} {res['answer']}"
+        return res
+
     if route.intent == INTENT_LEDGER and not ctx.has_run:
         result["answer"] = _no_run_answer(ctx)
         return result
@@ -1509,7 +1582,7 @@ def answer_question(
             _ARITHMETIC_ANSWER + (f" The figures it would rest on: {base}" if base else "")
         )
         result["citations"] = derive_citations(payload)
-        return result
+        return _finalize(result)
 
     caller = answer_caller if answer_caller is not None else default_answer_caller()
     if caller is None:
@@ -1517,7 +1590,7 @@ def answer_question(
             "I have no grounded material to answer that from."
         )
         result["citations"] = derive_citations(payload)
-        return result
+        return _finalize(result)
 
     try:
         raw = caller(
@@ -1531,7 +1604,7 @@ def answer_question(
         )
         result["citations"] = derive_citations(payload)
         result["modelError"] = str(exc)[:200]
-        return result
+        return _finalize(result)
 
     answer = ""
     citations: List[Dict[str, Any]] = []
@@ -1553,4 +1626,4 @@ def answer_question(
             citations = derive_citations(payload)
     result["answer"] = answer
     result["citations"] = citations
-    return result
+    return _finalize(result)
